@@ -1,0 +1,20 @@
+environment: development
+project_name: ashare-lgbm-quant
+paths:
+  raw_data: data/raw
+  processed_data: data/processed
+  parquet_store: data/parquet
+  duckdb_path: data/ashare_quant.duckdb
+  reports: reports
+logging:
+  level: INFO
+  json_logs: true
+data:
+  provider: tushare
+  retry_attempts: 3
+  rate_limit_per_minute: 180
+backtest:
+  execution: next_open
+  initial_cash: 1000000.0
+  commission_bps: 3.0
+  slippage_bps: 5.0
