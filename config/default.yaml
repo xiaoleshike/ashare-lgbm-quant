@@ -3,16 +3,93 @@ project_name: ashare-lgbm-quant
 paths:
   raw_data: data/raw
   processed_data: data/processed
-  parquet_store: data/parquet
+  parquet_store: data_on_sata/parquet
   duckdb_path: data/ashare_quant.duckdb
   reports: reports
+  data_quality_logs: logs/data_quality
 logging:
   level: INFO
   json_logs: true
 data:
   provider: tushare
   retry_attempts: 3
-  rate_limit_per_minute: 180
+  rate_limit_per_minute: 500
+  endpoint_rate_limits_per_minute:
+    cyq_chips: 200
+  request_interval_seconds: 0.0
+  backoff_base_seconds: 1.0
+  backoff_max_seconds: 60.0
+  default_start_date: "20100101"
+  calendar_exchange: SSE
+  index_codes:
+    - 000001.SH
+    - 000300.SH
+    - 399001.SZ
+    - 399006.SZ
+  fund_markets:
+    - E
+  hs_types:
+    - SH
+    - SZ
+  stock_list_statuses:
+    - L
+    - D
+    - P
+  date_range_chunk_years: 1
+  tushare_page_size: 6000
+  finance_revision_lookback_days: 550
+  snapshot_refresh_policy: manual
+  snapshot_refresh_ttl_days: 7
+universe:
+  min_list_trading_days: 180
+  liquidity_window_days: 20
+  min_avg_amount: 30000.0
+  require_full_liquidity_window: true
+  min_price: null
+  exclude_st: true
+  mark_limit_up_not_buyable: true
+  mark_limit_down_not_sellable: true
+  price_tolerance: 0.000001
+labels:
+  horizons:
+    - 3
+    - 5
+    - 10
+  benchmark_index_code: 000300.SH
+  quantile_buckets: 5
+  skip_unbuyable_entry: true
+  allow_limit_up_entry: false
+  allow_limit_down_exit: false
+  delay_unsellable_exit: false
+  max_exit_delay_days: 5
+  price_adjustment: open_times_adj_factor
+features:
+  return_windows:
+    - 1
+    - 3
+    - 5
+    - 10
+    - 20
+    - 60
+    - 120
+  short_windows:
+    - 1
+    - 2
+    - 3
+    - 5
+  medium_windows:
+    - 5
+    - 10
+    - 20
+    - 60
+  long_windows:
+    - 20
+    - 60
+    - 120
+  quantile_buckets: 5
+  min_period_fraction: 0.6
+  benchmark_index_code: 000300.SH
+  include_fundamentals: true
 backtest:
   execution: next_open
   initial_cash: 1000000.0

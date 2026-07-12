@@ -38,3 +38,12 @@ The default JSON format is suitable for scheduled jobs and log aggregation.
 All later implementation must preserve chronological train, validation, and test
 splits; prevent look-ahead and survivorship bias; and document non-obvious
 quantitative assumptions in code, configuration, or docs.
+
+
+## Phase 1 Data Ingestion
+
+The ingestion layer wraps the official Tushare client in `ashare_quant.data.tushare_client`
+for retry, pacing, rate limiting, structured logging, permission diagnostics, and request
+statistics. Dataset metadata lives in `ashare_quant.data.datasets`; partitioned Parquet
+storage and validation are separated from API access so tests can use mocked responses.
+See `docs/data_ingestion.md` for partitioning, deduplication, and resume behavior.

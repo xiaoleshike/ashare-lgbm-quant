@@ -10,7 +10,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Ashare Quant Contributors" }]
 dependencies = [
+    "baostock>=0.8.9",
     "duckdb>=1.0",
+    "efinance>=0.5.8",
     "lightgbm>=4.0",
     "numpy>=1.26",
     "optuna>=3.6",
@@ -44,6 +46,9 @@ minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: optional tests that may call external services",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -55,7 +60,7 @@ select = ["E", "F", "I", "B", "UP", "N", "ANN", "S"]
 ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["ANN", "S101"]
+"tests/**/*.py" = ["ANN", "S101", "S106"]
 
 [tool.ruff.format]
 quote-style = "double"
