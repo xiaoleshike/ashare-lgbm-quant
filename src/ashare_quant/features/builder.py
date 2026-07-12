@@ -92,7 +92,7 @@ class FeatureBuilder:
 
     def _load_inputs(self, start_date: str, end_date: str) -> dict[str, DataFrame]:
         history_start = feature_history_start(start_date)
-        dated_names = ("daily", "adj_factor", "daily_basic", "index_daily")
+        dated_names = ("daily", "adj_factor", "daily_basic", "index_daily", "trade_cal")
         inputs = {
             name: self._raw_store.read_dataset(get_dataset_spec(name), history_start, end_date)
             for name in dated_names
@@ -122,6 +122,7 @@ def build_feature_frame(
         adj_factor=inputs["adj_factor"],
         daily_basic=inputs["daily_basic"],
         index_daily=inputs["index_daily"],
+        trade_cal=inputs["trade_cal"],
         universe=universe,
         settings=settings.features,
     )

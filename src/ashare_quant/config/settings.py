@@ -98,6 +98,7 @@ class FeatureSettings(BaseModel):
     long_windows: tuple[int, ...] = (20, 60, 120)
     quantile_buckets: int = Field(default=5, ge=2)
     min_period_fraction: float = Field(default=0.6, ge=0.1, le=1.0)
+    min_traded_observation_fraction: float = Field(default=0.6, ge=0.1, le=1.0)
     benchmark_index_code: str = "000300.SH"
     include_fundamentals: bool = True
 

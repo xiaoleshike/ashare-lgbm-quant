@@ -119,6 +119,7 @@ def feature_fixture_inputs(days: int = 140) -> dict[str, pd.DataFrame]:
         }
     )
     return {
+        "trade_cal": pd.DataFrame({"cal_date": dates, "is_open": 1}),
         "daily": pd.DataFrame(daily_rows),
         "adj_factor": pd.DataFrame(adj_rows),
         "daily_basic": pd.DataFrame(daily_basic_rows),
@@ -185,6 +186,71 @@ def test_expected_nan_warmup_behavior() -> None:
     assert frame["ret_1d"].notna().all()
 
 
+def test_ret_1d_is_null_after_one_day_suspension_gap() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    suspend_stock_dates(inputs, "000001.SZ", ["20240103"])
+
+    frame = build_feature_frame(inputs, settings, "20240104", "20240104")
+    rows = frame.set_index("ts_code")
+
+    assert pd.isna(rows.loc["000001.SZ", "ret_1d"])
+    assert pd.notna(rows.loc["000002.SZ", "ret_1d"])
+
+
+def test_ret_1d_is_null_after_multi_day_suspension_gap() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=10)
+    suspend_stock_dates(inputs, "000001.SZ", ["20240103", "20240104", "20240105"])
+
+    frame = build_feature_frame(inputs, settings, "20240108", "20240108")
+    row = frame.set_index("ts_code").loc["000001.SZ"]
+
+    assert pd.isna(row["ret_1d"])
+
+
+def test_rolling_amount_window_respects_calendar_and_minimum_observations() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=10)
+    suspend_stock_dates(inputs, "000001.SZ", ["20240103", "20240104", "20240105", "20240108"])
+
+    frame = build_feature_frame(inputs, settings, "20240109", "20240109")
+    rows = frame.set_index("ts_code")
+
+    assert pd.isna(rows.loc["000001.SZ", "amount_ratio_5d"])
+    assert pd.notna(rows.loc["000002.SZ", "amount_ratio_5d"])
+
+
+def test_rolling_amount_minimum_valid_observation_threshold_is_configurable() -> None:
+    settings = load_settings("config/default.yaml")
+    settings = settings.model_copy(
+        update={
+            "features": settings.features.model_copy(
+                update={"min_traded_observation_fraction": 0.2}
+            )
+        }
+    )
+    inputs = feature_fixture_inputs(days=10)
+    suspend_stock_dates(inputs, "000001.SZ", ["20240103", "20240104", "20240105", "20240108"])
+
+    frame = build_feature_frame(inputs, settings, "20240109", "20240109")
+    row = frame.set_index("ts_code").loc["000001.SZ"]
+
+    assert pd.notna(row["amount_ratio_5d"])
+
+
+def test_resumed_stock_does_not_use_stale_liquidity_before_suspension() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=10)
+    suspend_stock_dates(inputs, "000001.SZ", ["20240103", "20240104", "20240105", "20240108"])
+
+    frame = build_feature_frame(inputs, settings, "20240109", "20240109")
+    row = frame.set_index("ts_code").loc["000001.SZ"]
+
+    assert pd.isna(row["amount_ratio_5d"])
+    assert pd.isna(row["turnover_ratio_5d"])
+
+
 def test_point_in_time_financial_join_uses_announcement_date() -> None:
     settings = load_settings("config/default.yaml")
     inputs = feature_fixture_inputs()
@@ -228,6 +294,7 @@ def test_feature_builder_reads_only_required_date_windows() -> None:
     assert raw_store.calls["adj_factor"] == [("20221117", "20240520")]
     assert raw_store.calls["daily_basic"] == [("20221117", "20240520")]
     assert raw_store.calls["index_daily"] == [("20221117", "20240520")]
+    assert raw_store.calls["trade_cal"] == [("20221117", "20240520")]
     assert raw_store.calls["fina_indicator"] == [(None, "20240520")]
     assert universe_store.calls == [("20221117", "20240520")]
 
@@ -275,6 +342,27 @@ class FakeRawStore:
             if end_date is not None:
                 frame = frame[frame[spec.date_column] <= end_date]
         return frame.reset_index(drop=True)
+
+
+def suspend_stock_dates(
+    inputs: dict[str, pd.DataFrame],
+    ts_code: str,
+    trade_dates: list[str],
+) -> None:
+    """Remove traded observations and mark universe rows as suspended."""
+
+    date_set = set(trade_dates)
+    for name in ("daily", "adj_factor", "daily_basic"):
+        frame = inputs[name]
+        mask = (frame["ts_code"] == ts_code) & frame["trade_date"].isin(date_set)
+        inputs[name] = frame.loc[~mask].reset_index(drop=True)
+    universe = inputs["universe"]
+    universe_mask = (universe["ts_code"] == ts_code) & universe["trade_date"].isin(date_set)
+    inputs["universe"].loc[universe_mask, ["is_suspended", "can_buy", "can_sell"]] = [
+        True,
+        False,
+        False,
+    ]
 
 
 class FakeUniverseStore:

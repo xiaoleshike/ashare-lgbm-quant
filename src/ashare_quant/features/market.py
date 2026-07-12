@@ -17,6 +17,7 @@ def build_market_features(
     adj_factor: DataFrame,
     daily_basic: DataFrame,
     index_daily: DataFrame,
+    trade_cal: DataFrame,
     universe: DataFrame,
     settings: FeatureSettings,
 ) -> DataFrame:
@@ -25,8 +26,8 @@ def build_market_features(
     prices = prepare_price_frame(daily, adj_factor)
     if prices.empty:
         return pd.DataFrame(columns=["trade_date", "ts_code"])
+    prices = align_to_trading_calendar(prices, universe, trade_cal)
     prices = add_benchmark_returns(prices, index_daily, settings.benchmark_index_code)
-    prices = add_universe_context(prices, universe)
     prices = add_daily_basic(prices, daily_basic)
     prices = prices.sort_values(["ts_code", "trade_date"]).reset_index(drop=True)
     return add_market_features_polars(prices, settings)
@@ -60,10 +61,21 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
             working = working.with_columns(pl.lit(None, dtype=pl.Float64).alias(column))
         else:
             working = working.with_columns(pl.col(column).cast(pl.Float64, strict=False))
+    if "_is_traded_observation" not in working.columns:
+        working = working.with_columns(pl.lit(True).alias("_is_traded_observation"))
+    else:
+        working = working.with_columns(pl.col("_is_traded_observation").cast(pl.Boolean))
 
     working = working.with_columns(
         [
-            pl.col("adj_close").pct_change().over("ts_code").alias("ret_1d"),
+            (
+                pl.when(
+                    pl.col("_is_traded_observation")
+                    & pl.col("_is_traded_observation").shift(1).over("ts_code")
+                )
+                .then(pl.col("adj_close") / pl.col("adj_close").shift(1).over("ts_code") - 1.0)
+                .otherwise(None)
+            ).alias("ret_1d"),
             (pl.col("adj_close") / pl.col("adj_open") - 1.0).alias("intraday_ret"),
             (pl.col("adj_close") - pl.col("adj_open")).alias("_body"),
             (pl.col("adj_high") - pl.col("adj_low")).alias("_intraday_range"),
@@ -98,13 +110,15 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
         minp = min_periods(window, settings)
         expressions: list[pl.Expr] = []
         if window != 1:
+            rolling_logret = (
+                pl.col("logret_1d")
+                .rolling_sum(window_size=window, min_samples=minp)
+                .over("ts_code")
+            )
             expressions.extend(
                 [
-                    pl.col("adj_close").pct_change(window).over("ts_code").alias(f"ret_{window}d"),
-                    pl.col("logret_1d")
-                    .rolling_sum(window_size=window, min_samples=minp)
-                    .over("ts_code")
-                    .alias(f"logret_sum_{window}d"),
+                    (rolling_logret.exp() - 1.0).alias(f"ret_{window}d"),
+                    rolling_logret.alias(f"logret_sum_{window}d"),
                 ]
             )
         else:
@@ -266,7 +280,10 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
                     percent_rank_expr(base, ["trade_date", "industry"]).alias(spec.name)
                 )
 
-    return working.drop(["_body", "_intraday_range", "_prev_close"], strict=False).to_pandas()
+    return working.drop(
+        ["_body", "_intraday_range", "_prev_close", "_is_traded_observation"],
+        strict=False,
+    ).to_pandas()
 
 
 def zero_to_null(expr: pl.Expr) -> pl.Expr:
@@ -354,7 +371,77 @@ def prepare_price_frame(daily: DataFrame, adj_factor: DataFrame) -> DataFrame:
     frame = daily_work.merge(adj_work, on=["ts_code", "trade_date"], how="left")
     for column in ("open", "high", "low", "close"):
         frame[f"adj_{column}"] = frame[column] * frame["adj_factor"]
+    frame["_is_traded_observation"] = True
     return frame.drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+
+
+def align_to_trading_calendar(
+    prices: DataFrame,
+    universe: DataFrame,
+    trade_cal: DataFrame,
+) -> DataFrame:
+    """Represent every universe stock on every open trading day without forward-filling data.
+
+    Rolling features use this calendar-aligned frame so a suspension day with no
+    `daily` row consumes one trading-day slot in the window. Price, return,
+    amount, volume, and turnover observations remain missing on those days.
+    """
+
+    open_dates = open_trade_dates(trade_cal)
+    if not open_dates:
+        raise DataValidationError("trade_cal with open trading dates is required for features")
+    if universe.empty or not {"trade_date", "ts_code"}.issubset(universe.columns):
+        raise DataValidationError("universe with trade_date and ts_code is required for features")
+
+    context = normalize_universe_context(universe)
+    context = context[context["trade_date"].isin(open_dates)].copy()
+    if context.empty:
+        return pd.DataFrame(columns=[*prices.columns, "industry", "in_model_universe"])
+    context = context.drop_duplicates(subset=["trade_date", "ts_code"], keep="last")
+
+    price_columns = [column for column in prices.columns if column not in {"industry"}]
+    merged = context.merge(
+        prices[price_columns],
+        on=["trade_date", "ts_code"],
+        how="left",
+        suffixes=("", "_price"),
+    )
+    merged["_is_traded_observation"] = merged["_is_traded_observation"].fillna(False).astype(bool)
+    return merged
+
+
+def open_trade_dates(trade_cal: DataFrame) -> list[str]:
+    """Return authoritative open dates from trade_cal."""
+
+    if trade_cal.empty or not {"cal_date", "is_open"}.issubset(trade_cal.columns):
+        return []
+    calendar = trade_cal[["cal_date", "is_open"]].copy()
+    calendar["cal_date"] = calendar["cal_date"].astype(str)
+    calendar["is_open"] = pd.to_numeric(calendar["is_open"], errors="coerce").fillna(0).astype(int)
+    return sorted(calendar.loc[calendar["is_open"] == 1, "cal_date"].drop_duplicates().tolist())
+
+
+def normalize_universe_context(universe: DataFrame) -> DataFrame:
+    """Return universe context used for calendar alignment."""
+
+    keep = [
+        column
+        for column in ("trade_date", "ts_code", "industry", "is_suspended", "in_model_universe")
+        if column in universe.columns
+    ]
+    context = universe[keep].copy()
+    context["trade_date"] = context["trade_date"].astype(str)
+    context["ts_code"] = context["ts_code"].astype(str)
+    if "industry" not in context.columns:
+        context["industry"] = ""
+    if "is_suspended" not in context.columns:
+        context["is_suspended"] = False
+    if "in_model_universe" not in context.columns:
+        context["in_model_universe"] = True
+    context["industry"] = context["industry"].fillna("").astype(str)
+    context["is_suspended"] = context["is_suspended"].fillna(False).astype(bool)
+    context["in_model_universe"] = context["in_model_universe"].fillna(False).astype(bool)
+    return context
 
 
 def add_benchmark_returns(
@@ -706,7 +793,7 @@ def rolling_group_cov(
 def min_periods(window: int, settings: FeatureSettings) -> int:
     """Return minimum observations for a rolling window."""
 
-    return max(1, int(np.ceil(window * settings.min_period_fraction)))
+    return max(1, int(np.ceil(window * settings.min_traded_observation_fraction)))
 
 
 def inverse_numeric(frame: DataFrame, column: str) -> pd.Series:
