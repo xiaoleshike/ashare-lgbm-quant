@@ -65,6 +65,12 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
         working = working.with_columns(pl.lit(True).alias("_is_traded_observation"))
     else:
         working = working.with_columns(pl.col("_is_traded_observation").cast(pl.Boolean))
+    if "in_model_universe" not in working.columns:
+        working = working.with_columns(pl.lit(True).alias("in_model_universe"))
+    else:
+        working = working.with_columns(
+            pl.col("in_model_universe").fill_null(False).cast(pl.Boolean)
+        )
 
     working = working.with_columns(
         [
@@ -271,13 +277,13 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
             base = spec.required_source_columns[0]
             if base in working.columns:
                 working = working.with_columns(
-                    percent_rank_expr(base, ["trade_date"]).alias(spec.name)
+                    eligible_percent_rank_expr(base, ["trade_date"]).alias(spec.name)
                 )
         elif spec.family == "industry_neutral_percentile_ranks":
             base = spec.required_source_columns[0]
             if base in working.columns:
                 working = working.with_columns(
-                    percent_rank_expr(base, ["trade_date", "industry"]).alias(spec.name)
+                    eligible_percent_rank_expr(base, ["trade_date", "industry"]).alias(spec.name)
                 )
 
     return working.drop(
@@ -345,6 +351,15 @@ def percent_rank_expr(column: str, over: list[str]) -> pl.Expr:
 
     count = pl.col(column).count().over(over)
     return pl.when(pl.col(column).is_not_null()).then(pl.col(column).rank().over(over) / count)
+
+
+def eligible_percent_rank_expr(column: str, over: list[str]) -> pl.Expr:
+    """Return percentile rank using only same-date model-universe rows."""
+
+    eligible_value = pl.when(pl.col("in_model_universe")).then(pl.col(column)).otherwise(None)
+    count = eligible_value.count().over(over)
+    rank = eligible_value.rank(method="average").over(over) / count
+    return pl.when(pl.col("in_model_universe") & pl.col(column).is_not_null()).then(rank)
 
 
 def prepare_price_frame(daily: DataFrame, adj_factor: DataFrame) -> DataFrame:
@@ -733,17 +748,24 @@ def add_rank_features(frame: DataFrame) -> DataFrame:
     from ashare_quant.features.registry import FEATURE_REGISTRY
 
     working = frame.copy()
+    if "in_model_universe" not in working.columns:
+        working["in_model_universe"] = True
+    eligible = working["in_model_universe"].fillna(False).astype(bool)
     for spec in FEATURE_REGISTRY:
         if spec.family == "cross_sectional_percentile_ranks":
             base = spec.required_source_columns[0]
             if base in working.columns:
-                working[spec.name] = working.groupby("trade_date")[base].rank(pct=True)
+                ranks = working.loc[eligible].groupby("trade_date")[base].rank(pct=True)
+                working[spec.name] = pd.NA
+                working.loc[eligible, spec.name] = ranks
         elif spec.family == "industry_neutral_percentile_ranks":
             base = spec.required_source_columns[0]
             if base in working.columns:
-                working[spec.name] = working.groupby(["trade_date", "industry"])[base].rank(
+                ranks = working.loc[eligible].groupby(["trade_date", "industry"])[base].rank(
                     pct=True
                 )
+                working[spec.name] = pd.NA
+                working.loc[eligible, spec.name] = ranks
     return working
 
 

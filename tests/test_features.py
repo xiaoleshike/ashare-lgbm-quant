@@ -251,6 +251,78 @@ def test_resumed_stock_does_not_use_stale_liquidity_before_suspension() -> None:
     assert pd.isna(row["turnover_ratio_5d"])
 
 
+def test_st_stock_does_not_affect_cross_sectional_rank() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    set_one_day_return_fixture(inputs, "20240103", "20240104")
+    mark_ineligible(inputs, "000003.SZ", "20240104")
+
+    frame = build_feature_frame(inputs, settings, "20240104", "20240104")
+    rows = frame.set_index("ts_code")
+
+    assert rows.loc["000001.SZ", "cs_rank_ret_1d"] == pytest.approx(0.5)
+    assert rows.loc["000002.SZ", "cs_rank_ret_1d"] == pytest.approx(1.0)
+    assert pd.isna(rows.loc["000003.SZ", "cs_rank_ret_1d"])
+
+
+def test_low_liquidity_stock_does_not_affect_cross_sectional_rank() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    set_one_day_return_fixture(inputs, "20240103", "20240104")
+    mark_ineligible(inputs, "000003.SZ", "20240104")
+
+    frame = build_feature_frame(inputs, settings, "20240104", "20240104")
+    rows = frame.set_index("ts_code")
+
+    assert rows.loc["000002.SZ", "cs_rank_ret_1d"] == pytest.approx(1.0)
+    assert pd.isna(rows.loc["000003.SZ", "cs_rank_ret_1d"])
+
+
+def test_new_stock_does_not_affect_cross_sectional_rank() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    set_one_day_return_fixture(inputs, "20240103", "20240104")
+    mark_ineligible(inputs, "000003.SZ", "20240104")
+
+    frame = build_feature_frame(inputs, settings, "20240104", "20240104")
+    rows = frame.set_index("ts_code")
+
+    assert rows.loc["000001.SZ", "cs_rank_ret_1d"] == pytest.approx(0.5)
+    assert pd.isna(rows.loc["000003.SZ", "cs_rank_ret_1d"])
+
+
+def test_same_date_same_value_rank_is_deterministic_for_eligible_stocks() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    set_one_day_return_fixture(
+        inputs,
+        "20240103",
+        "20240104",
+        current_closes={"000001.SZ": 11.0, "000002.SZ": 11.0, "000003.SZ": 100.0},
+    )
+    mark_ineligible(inputs, "000003.SZ", "20240104")
+
+    frame = build_feature_frame(inputs, settings, "20240104", "20240104")
+    rows = frame.set_index("ts_code")
+
+    assert rows.loc["000001.SZ", "cs_rank_ret_1d"] == pytest.approx(0.75)
+    assert rows.loc["000002.SZ", "cs_rank_ret_1d"] == pytest.approx(0.75)
+    assert pd.isna(rows.loc["000003.SZ", "cs_rank_ret_1d"])
+
+
+def test_industry_neutral_rank_uses_only_eligible_stocks() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    set_one_day_return_fixture(inputs, "20240103", "20240104")
+    mark_ineligible(inputs, "000003.SZ", "20240104")
+
+    frame = build_feature_frame(inputs, settings, "20240104", "20240104")
+    rows = frame.set_index("ts_code")
+
+    assert rows.loc["000002.SZ", "ind_rank_ret_1d"] == pytest.approx(1.0)
+    assert pd.isna(rows.loc["000003.SZ", "ind_rank_ret_1d"])
+
+
 def test_point_in_time_financial_join_uses_announcement_date() -> None:
     settings = load_settings("config/default.yaml")
     inputs = feature_fixture_inputs()
@@ -363,6 +435,41 @@ def suspend_stock_dates(
         False,
         False,
     ]
+
+
+def set_one_day_return_fixture(
+    inputs: dict[str, pd.DataFrame],
+    previous_date: str,
+    current_date: str,
+    current_closes: dict[str, float] | None = None,
+) -> None:
+    """Set deterministic adjacent-day closes for rank tests."""
+
+    closes = current_closes or {
+        "000001.SZ": 11.0,
+        "000002.SZ": 12.0,
+        "000003.SZ": 100.0,
+    }
+    daily = inputs["daily"]
+    for code in ("000001.SZ", "000002.SZ", "000003.SZ"):
+        previous_mask = (daily["ts_code"] == code) & (daily["trade_date"] == previous_date)
+        current_mask = (daily["ts_code"] == code) & (daily["trade_date"] == current_date)
+        daily.loc[previous_mask, ["open", "high", "low", "close"]] = [10.0, 10.0, 10.0, 10.0]
+        close = closes[code]
+        daily.loc[current_mask, ["open", "high", "low", "close"]] = [
+            close,
+            close,
+            close,
+            close,
+        ]
+
+
+def mark_ineligible(inputs: dict[str, pd.DataFrame], ts_code: str, trade_date: str) -> None:
+    """Mark one stock/date outside the model universe."""
+
+    universe = inputs["universe"]
+    mask = (universe["ts_code"] == ts_code) & (universe["trade_date"] == trade_date)
+    inputs["universe"].loc[mask, "in_model_universe"] = False
 
 
 class FakeUniverseStore:
