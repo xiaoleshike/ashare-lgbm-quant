@@ -301,6 +301,8 @@ def test_universe_build_cli_with_fixture_raw_store(tmp_path, monkeypatch, capsys
 
 
 def test_labels_build_cli_with_fixture_data(tmp_path, monkeypatch, capsys) -> None:
+    import json
+
     import pandas as pd
 
     from ashare_quant.data.datasets import get_dataset_spec
@@ -343,6 +345,14 @@ def test_labels_build_cli_with_fixture_data(tmp_path, monkeypatch, capsys) -> No
         processed_root / "labels_forward" / "year=2024" / "month=01" / "data.parquet"
     )
     assert len(stored) == 7
+    manifest = json.loads(
+        (
+            processed_root / "labels_forward" / "_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert manifest["artifact_name"] == "labels_forward"
+    assert manifest["label_horizons"] == [3]
+    assert manifest["row_count"] == 7
 
 
 def test_labels_validate_cli_returns_nonzero_for_invalid_labels(
@@ -442,6 +452,71 @@ def test_labels_validate_cli_returns_nonzero_for_missing_configured_horizon(
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "configured label horizons are missing: [10]" in captured.out
+
+
+def test_failed_labels_build_does_not_replace_existing_manifest(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import json
+
+    import pandas as pd
+
+    from ashare_quant.data.datasets import get_dataset_spec
+    from ashare_quant.data.storage import ParquetDataStore
+    from ashare_quant.utils.manifest import atomic_write_json
+
+    monkeypatch.setenv("TUSHARE_TOKEN", "hidden-token")
+    raw_root = tmp_path / "raw"
+    processed_root = tmp_path / "processed"
+    ParquetDataStore(raw_root).write(
+        get_dataset_spec("trade_cal"),
+        pd.DataFrame({"exchange": ["SSE"], "cal_date": ["20240102"], "is_open": [1]}),
+    )
+    manifest_path = processed_root / "labels_forward" / "_manifest.json"
+    atomic_write_json(manifest_path, {"artifact_name": "labels_forward", "sentinel": "old"})
+
+    exit_code = main(
+        [
+            "--config",
+            "config/default.yaml",
+            "labels",
+            "--storage-root",
+            str(raw_root),
+            "--processed-root",
+            str(processed_root),
+            "build",
+            "--start-date",
+            "20240102",
+            "--end-date",
+            "20240102",
+            "--horizons",
+            "3",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert captured.out == "" or "validation: ok=False" in captured.out
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["sentinel"] == "old"
+
+
+def test_features_status_reports_missing_manifest(tmp_path, capsys) -> None:
+    processed_root = tmp_path / "processed"
+
+    exit_code = main(
+        [
+            "--config",
+            "config/default.yaml",
+            "features",
+            "--processed-root",
+            str(processed_root),
+            "status",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "features_daily_manifest: exists=False stale=True" in captured.out
 
 
 def test_features_registry_cli_reports_count(capsys) -> None:

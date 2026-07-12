@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -21,6 +22,13 @@ from ashare_quant.labels.validation import LabelValidationResult
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
 from ashare_quant.utils import configure_logging
+from ashare_quant.utils.manifest import (
+    artifact_manifest_status,
+    processed_source_fingerprint,
+    raw_source_fingerprints,
+    utc_now_iso,
+    write_build_manifest,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -328,6 +336,11 @@ def run_universe_command(args: argparse.Namespace) -> int:
             f"in_model_universe={status.in_model_universe} can_buy={status.can_buy} "
             f"can_sell={status.can_sell}"
         )
+        print_manifest_status(
+            "universe_daily",
+            universe_store.dataset_dir,
+            effective_config_path(args.config),
+        )
         return 0
 
     if args.universe_command == "validate":
@@ -339,6 +352,7 @@ def run_universe_command(args: argparse.Namespace) -> int:
 
     if args.universe_command == "build":
         builder = UniverseBuilder(raw_store, universe_store, settings)
+        build_started_at = utc_now_iso()
         try:
             build_result = builder.build(args.start_date, args.end_date)
         except DataValidationError as error:
@@ -350,6 +364,28 @@ def run_universe_command(args: argparse.Namespace) -> int:
             f"start_date={build_result.start_date} end_date={build_result.end_date}"
         )
         print_universe_validation_result(build_result.validation)
+        if build_result.validation.ok:
+            write_build_manifest(
+                universe_store.dataset_dir,
+                artifact_name="universe_daily",
+                build_started_at=build_started_at,
+                config_path=effective_config_path(args.config),
+                start_date=build_result.start_date,
+                end_date=build_result.end_date,
+                row_count=build_result.rows_written,
+                source_fingerprints=raw_source_fingerprints(
+                    raw_store,
+                    (
+                        "stock_basic",
+                        "trade_cal",
+                        "daily",
+                        "daily_basic",
+                        "suspend_d",
+                        "stk_limit",
+                        "namechange",
+                    ),
+                ),
+            )
         return 0 if build_result.validation.ok else 1
 
     raise ValueError(f"Unsupported universe command: {args.universe_command}")
@@ -374,6 +410,11 @@ def run_labels_command(args: argparse.Namespace) -> int:
             f"partitions={status.partitions} min_date={status.min_date} max_date={status.max_date} "
             f"available={status.available} unavailable={status.unavailable}"
         )
+        print_manifest_status(
+            "labels_forward",
+            label_store.dataset_dir,
+            effective_config_path(args.config),
+        )
         return 0
 
     if args.labels_command == "validate":
@@ -389,6 +430,7 @@ def run_labels_command(args: argparse.Namespace) -> int:
     if args.labels_command == "build":
         horizons = parse_horizons(args.horizons) if args.horizons else settings.labels.horizons
         builder = LabelBuilder(raw_store, universe_store, label_store, settings)
+        build_started_at = utc_now_iso()
         try:
             build_result = builder.build(args.start_date, args.end_date, horizons)
         except DataValidationError as error:
@@ -401,6 +443,30 @@ def run_labels_command(args: argparse.Namespace) -> int:
             f"horizons={','.join(str(horizon) for horizon in build_result.horizons)}"
         )
         print_label_validation_result(build_result.validation)
+        if build_result.validation.ok:
+            universe_status = universe_store.status()
+            source_fingerprints = raw_source_fingerprints(
+                raw_store,
+                ("trade_cal", "daily", "adj_factor", "stk_limit", "index_daily"),
+            )
+            source_fingerprints["universe_daily"] = processed_source_fingerprint(
+                universe_store.dataset_dir,
+                rows=universe_status.rows,
+                partitions=universe_status.partitions,
+                min_date=universe_status.min_date,
+                max_date=universe_status.max_date,
+            )
+            write_build_manifest(
+                label_store.dataset_dir,
+                artifact_name="labels_forward",
+                build_started_at=build_started_at,
+                config_path=effective_config_path(args.config),
+                start_date=build_result.start_date,
+                end_date=build_result.end_date,
+                row_count=build_result.rows_written,
+                source_fingerprints=source_fingerprints,
+                extra={"label_horizons": list(build_result.horizons)},
+            )
         return 0 if build_result.validation.ok else 1
 
     raise ValueError(f"Unsupported labels command: {args.labels_command}")
@@ -433,11 +499,17 @@ def run_features_command(args: argparse.Namespace) -> int:
             f"partitions={status.partitions} min_date={status.min_date} max_date={status.max_date} "
             f"feature_count={status.feature_count}"
         )
+        print_manifest_status(
+            "features_daily",
+            feature_store.dataset_dir,
+            effective_config_path(args.config),
+        )
         return 0
 
     if args.features_command == "build":
         universe_store = UniverseStore(processed_root)
         builder = FeatureBuilder(raw_store, universe_store, feature_store, settings)
+        build_started_at = utc_now_iso()
         try:
             result = builder.build(args.start_date, args.end_date)
         except DataValidationError as error:
@@ -452,6 +524,39 @@ def run_features_command(args: argparse.Namespace) -> int:
         )[:10]
         for name, ratio in missing_preview:
             print(f"missing_ratio {name}={ratio:.4f}")
+        universe_status = universe_store.status()
+        source_fingerprints = raw_source_fingerprints(
+            raw_store,
+            (
+                "trade_cal",
+                "daily",
+                "adj_factor",
+                "daily_basic",
+                "index_daily",
+                "fina_indicator",
+                "income",
+                "balancesheet",
+                "cashflow",
+            ),
+        )
+        source_fingerprints["universe_daily"] = processed_source_fingerprint(
+            universe_store.dataset_dir,
+            rows=universe_status.rows,
+            partitions=universe_status.partitions,
+            min_date=universe_status.min_date,
+            max_date=universe_status.max_date,
+        )
+        write_build_manifest(
+            feature_store.dataset_dir,
+            artifact_name="features_daily",
+            build_started_at=build_started_at,
+            config_path=effective_config_path(args.config),
+            start_date=result.start_date,
+            end_date=result.end_date,
+            row_count=result.rows_written,
+            source_fingerprints=source_fingerprints,
+            extra={"feature_count": result.feature_count},
+        )
         return 0
 
     raise ValueError(f"Unsupported features command: {args.features_command}")
@@ -541,6 +646,23 @@ def print_label_validation_result(result: LabelValidationResult) -> None:
         print(f"  warning: {warning}")
     for error in result.errors:
         print(f"  error: {error}")
+
+
+def print_manifest_status(artifact_name: str, artifact_dir: Path, config_path: str | None) -> None:
+    """Print compact processed artifact provenance status."""
+
+    status = artifact_manifest_status(artifact_dir, config_path=config_path)
+    print(
+        f"{artifact_name}_manifest: exists={status.exists} stale={status.stale} "
+        f"artifact_git={status.artifact_git_revision} current_git={status.current_git_revision} "
+        f"config_hash_match={status.config_hash_match} reason={status.reason}"
+    )
+
+
+def effective_config_path(config_arg: str | None) -> str:
+    """Return the config path used by load_settings for manifest hashing."""
+
+    return config_arg or os.environ.get("ASHARE_QUANT_CONFIG", "config/default.yaml")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
