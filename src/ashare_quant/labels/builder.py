@@ -58,7 +58,11 @@ class LabelBuilder:
         frame = build_label_frame(
             inputs, self._settings.labels, start_date, end_date, selected_horizons
         )
-        validation = validate_label_frame(frame, self._settings.labels.quantile_buckets)
+        validation = validate_label_frame(
+            frame,
+            self._settings.labels.quantile_buckets,
+            selected_horizons,
+        )
         rows_written = self._label_store.write(frame) if validation.ok else 0
         return LabelBuildResult(
             start_date=start_date,

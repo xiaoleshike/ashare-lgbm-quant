@@ -383,6 +383,67 @@ def test_labels_validate_cli_returns_nonzero_for_invalid_labels(
     assert "duplicate label rows" in captured.out
 
 
+def test_labels_validate_cli_returns_nonzero_for_empty_labels(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "hidden-token")
+    processed_root = tmp_path / "processed"
+
+    exit_code = main(
+        [
+            "--config",
+            "config/default.yaml",
+            "labels",
+            "--processed-root",
+            str(processed_root),
+            "validate",
+            "--start-date",
+            "20240102",
+            "--end-date",
+            "20240102",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "labels are empty or not built" in captured.out
+
+
+def test_labels_validate_cli_returns_nonzero_for_missing_configured_horizon(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from ashare_quant.labels import build_label_frame
+    from test_labels import default_label_settings, label_fixture_inputs
+
+    monkeypatch.setenv("TUSHARE_TOKEN", "hidden-token")
+    processed_root = tmp_path / "processed"
+    labels = build_label_frame(
+        label_fixture_inputs(), default_label_settings(), "20240102", "20240102", (3, 5)
+    )
+    label_path = processed_root / "labels_forward" / "year=2024" / "month=01"
+    label_path.mkdir(parents=True)
+    labels.to_parquet(label_path / "data.parquet", index=False)
+
+    exit_code = main(
+        [
+            "--config",
+            "config/default.yaml",
+            "labels",
+            "--processed-root",
+            str(processed_root),
+            "validate",
+            "--start-date",
+            "20240102",
+            "--end-date",
+            "20240102",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "configured label horizons are missing: [10]" in captured.out
+
+
 def test_features_registry_cli_reports_count(capsys) -> None:
     exit_code = main(["--config", "config/default.yaml", "features", "registry"])
 

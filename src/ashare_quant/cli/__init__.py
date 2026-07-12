@@ -378,7 +378,10 @@ def run_labels_command(args: argparse.Namespace) -> int:
 
     if args.labels_command == "validate":
         validation_result = LabelValidator(
-            label_store, settings.labels.quantile_buckets, universe_store
+            label_store,
+            settings.labels.quantile_buckets,
+            universe_store,
+            settings.labels.horizons,
         ).validate(args.start_date, args.end_date)
         print_label_validation_result(validation_result)
         return 0 if validation_result.ok else 1

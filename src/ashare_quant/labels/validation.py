@@ -45,10 +45,12 @@ class LabelValidator:
         store: LabelStore,
         quantile_buckets: int,
         universe_store: UniverseStore | None = None,
+        expected_horizons: tuple[int, ...] | None = None,
     ) -> None:
         self._store = store
         self._quantile_buckets = quantile_buckets
         self._universe_store = universe_store
+        self._expected_horizons = expected_horizons
 
     def validate(
         self,
@@ -58,11 +60,15 @@ class LabelValidator:
         """Validate stored labels over an optional date range."""
 
         frame = self._store.read(start_date, end_date)
-        result = validate_label_frame(frame, self._quantile_buckets)
+        result = validate_label_frame(frame, self._quantile_buckets, self._expected_horizons)
         if self._universe_store is None or frame.empty:
             return result
         row_count_errors = validate_label_row_counts(
-            self._store, self._universe_store, start_date, end_date
+            self._store,
+            self._universe_store,
+            start_date,
+            end_date,
+            self._expected_horizons,
         )
         if not row_count_errors:
             return result
@@ -78,6 +84,7 @@ def validate_label_row_counts(
     universe_store: UniverseStore,
     start_date: str | None = None,
     end_date: str | None = None,
+    expected_horizons: tuple[int, ...] | None = None,
 ) -> tuple[str, ...]:
     """Validate label row counts against eligible base-universe rows."""
 
@@ -90,8 +97,17 @@ def validate_label_row_counts(
     universe_path = str(universe_store.dataset_dir / "**/*.parquet")
     start_filter = start_date or "00000000"
     end_filter = end_date or "99999999"
+    horizon_frame = pd.DataFrame(
+        {
+            "horizon": pd.Series(
+                list(expected_horizons) if expected_horizons is not None else [],
+                dtype="int64",
+            )
+        }
+    )
     connection = duckdb.connect(":memory:")
     try:
+        connection.register("expected_horizons", horizon_frame)
         mismatch_row = connection.execute(
             """
             WITH labels AS (
@@ -101,7 +117,11 @@ def validate_label_row_counts(
               GROUP BY trade_date, horizon
             ),
             horizons AS (
-              SELECT DISTINCT horizon FROM labels
+              SELECT horizon FROM expected_horizons
+              UNION
+              SELECT DISTINCT horizon FROM labels WHERE NOT EXISTS (
+                SELECT 1 FROM expected_horizons
+              )
             ),
             universe AS (
               SELECT trade_date, COUNT(*) AS base_rows
@@ -140,14 +160,18 @@ def validate_label_row_counts(
     )
 
 
-def validate_label_frame(frame: DataFrame, quantile_buckets: int) -> LabelValidationResult:
+def validate_label_frame(
+    frame: DataFrame,
+    quantile_buckets: int,
+    expected_horizons: tuple[int, ...] | None = None,
+) -> LabelValidationResult:
     """Validate one label frame."""
 
     errors: list[str] = []
     warnings: list[str] = []
     if frame.empty:
-        warnings.append("labels are empty or not built")
-        return LabelValidationResult(ok=True, warnings=tuple(warnings))
+        errors.append("labels are empty or not built")
+        return LabelValidationResult(ok=False, errors=tuple(errors), warnings=tuple(warnings))
 
     required_columns = {
         "trade_date",
@@ -173,6 +197,14 @@ def validate_label_frame(frame: DataFrame, quantile_buckets: int) -> LabelValida
     if frame.duplicated(subset=["trade_date", "ts_code", "horizon"]).any():
         duplicate_count = int(frame.duplicated(subset=["trade_date", "ts_code", "horizon"]).sum())
         errors.append(f"duplicate label rows={duplicate_count}")
+
+    if expected_horizons is not None:
+        observed_horizons = set(
+            pd.to_numeric(frame["horizon"], errors="coerce").dropna().astype(int)
+        )
+        missing_horizons = sorted(set(expected_horizons) - observed_horizons)
+        if missing_horizons:
+            errors.append(f"configured label horizons are missing: {missing_horizons}")
 
     trade_date = frame["trade_date"].astype(str)
     entry_date = frame["entry_date"].astype(str)

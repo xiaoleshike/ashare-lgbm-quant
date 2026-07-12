@@ -457,6 +457,61 @@ def test_label_validator_accepts_row_count_matching_base_universe(tmp_path) -> N
     assert result.ok
 
 
+def test_label_validation_rejects_empty_required_dataset() -> None:
+    result = validate_label_frame(
+        pd.DataFrame(),
+        quantile_buckets=5,
+        expected_horizons=(3, 5, 10),
+    )
+
+    assert not result.ok
+    assert "labels are empty or not built" in result.errors
+
+
+def test_label_validation_rejects_globally_missing_configured_horizon() -> None:
+    labels = build_label_frame(
+        label_fixture_inputs(),
+        default_label_settings(),
+        "20240102",
+        "20240102",
+        (3, 5),
+    )
+
+    result = validate_label_frame(labels, 5, expected_horizons=(3, 5, 10))
+
+    assert not result.ok
+    assert "configured label horizons are missing: [10]" in result.errors
+
+
+def test_label_validation_accepts_present_horizon_with_tail_unavailable_rows() -> None:
+    labels = build_label_frame(
+        label_fixture_inputs(),
+        default_label_settings(),
+        "20240119",
+        "20240119",
+        (10,),
+    )
+
+    result = validate_label_frame(labels, 5, expected_horizons=(10,))
+
+    assert result.ok
+    assert set(labels["label_unavailable_reason"]) == {"insufficient_future_calendar"}
+
+
+def test_label_validation_accepts_complete_configured_horizons() -> None:
+    labels = build_label_frame(
+        label_fixture_inputs(),
+        default_label_settings(),
+        "20240102",
+        "20240102",
+        (3, 5, 10),
+    )
+
+    result = validate_label_frame(labels, 5, expected_horizons=(3, 5, 10))
+
+    assert result.ok
+
+
 def test_label_validation_detects_duplicate_rows() -> None:
     labels = build_label_frame(
         label_fixture_inputs(),
