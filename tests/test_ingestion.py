@@ -354,3 +354,175 @@ def test_snapshot_status_reports_age_and_updated_at(tmp_path) -> None:
     assert status.snapshot_updated_at is not None
     assert status.snapshot_age_days is not None
     assert status.snapshot_age_days >= 2
+
+
+def write_gap_trade_cal(store: ParquetDataStore) -> None:
+    store.write(
+        store_spec("trade_cal"),
+        pd.DataFrame(
+            {
+                "exchange": ["SSE"] * 5,
+                "cal_date": ["20240102", "20240103", "20240104", "20240105", "20240106"],
+                "is_open": [1, 1, 1, 1, 0],
+            }
+        ),
+    )
+
+
+def daily_rows(dates: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * len(dates),
+            "trade_date": dates,
+            "open": [10.0] * len(dates),
+            "high": [11.0] * len(dates),
+            "low": [9.0] * len(dates),
+            "close": [10.5] * len(dates),
+            "vol": [100.0] * len(dates),
+        }
+    )
+
+
+def test_gap_scan_no_gap_case(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    store = ParquetDataStore(tmp_path)
+    write_gap_trade_cal(store)
+    store.write(store_spec("daily"), daily_rows(["20240102", "20240103", "20240104", "20240105"]))
+    service = DataIngestionService(settings=settings, store=store, client=MockClient())  # type: ignore[arg-type]
+
+    report = service.scan_gaps(("daily",), "20240102", "20240106")[0]
+
+    assert not report.has_gaps
+    assert report.missing_dates == ()
+
+
+def test_gap_scan_detects_one_missing_trading_day_in_middle(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    store = ParquetDataStore(tmp_path)
+    write_gap_trade_cal(store)
+    store.write(store_spec("daily"), daily_rows(["20240102", "20240104", "20240105"]))
+    service = DataIngestionService(settings=settings, store=store, client=MockClient())  # type: ignore[arg-type]
+
+    report = service.scan_gaps(("daily",), "20240102", "20240106")[0]
+
+    assert report.missing_dates == ("20240103",)
+
+
+def test_gap_scan_detects_multiple_missing_trading_days(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    store = ParquetDataStore(tmp_path)
+    write_gap_trade_cal(store)
+    store.write(store_spec("daily"), daily_rows(["20240102", "20240105"]))
+    service = DataIngestionService(settings=settings, store=store, client=MockClient())  # type: ignore[arg-type]
+
+    report = service.scan_gaps(("daily",), "20240102", "20240106")[0]
+
+    assert report.missing_dates == ("20240103", "20240104")
+
+
+def test_gap_scan_ignores_non_trading_days(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    store = ParquetDataStore(tmp_path)
+    write_gap_trade_cal(store)
+    store.write(store_spec("daily"), daily_rows(["20240102", "20240103", "20240104", "20240105"]))
+    service = DataIngestionService(settings=settings, store=store, client=MockClient())  # type: ignore[arg-type]
+
+    report = service.scan_gaps(("daily",), "20240102", "20240106")[0]
+
+    assert "20240106" not in report.missing_dates
+    assert not report.has_gaps
+
+
+def test_empty_local_partition_is_treated_as_missing_gap(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    store = ParquetDataStore(tmp_path)
+    write_gap_trade_cal(store)
+    spec = store_spec("daily")
+    empty_path = tmp_path / "daily" / "year=2024" / "month=01"
+    empty_path.mkdir(parents=True)
+    pd.DataFrame(columns=list(spec.required_columns)).to_parquet(
+        empty_path / "data.parquet", index=False
+    )
+    service = DataIngestionService(settings=settings, store=store, client=MockClient())  # type: ignore[arg-type]
+
+    report = service.scan_gaps(("daily",), "20240102", "20240104")[0]
+
+    assert report.missing_dates == ("20240102", "20240103", "20240104")
+
+
+def test_index_daily_gap_detection_is_per_index_code(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    settings.data.index_codes = ("000001.SH", "000300.SH")
+    store = ParquetDataStore(tmp_path)
+    write_gap_trade_cal(store)
+    store.write(
+        store_spec("index_daily"),
+        pd.DataFrame(
+            {
+                "ts_code": ["000001.SH", "000001.SH", "000300.SH"],
+                "trade_date": ["20240102", "20240103", "20240102"],
+                "close": [1.0, 1.1, 2.0],
+            }
+        ),
+    )
+    service = DataIngestionService(settings=settings, store=store, client=MockClient())  # type: ignore[arg-type]
+
+    report = service.scan_gaps(("index_daily",), "20240102", "20240103")[0]
+
+    assert report.missing_by_entity == {"000300.SH": ("20240103",)}
+    assert report.missing_dates == ("20240103",)
+
+
+class GapRepairClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def query(self, endpoint: str, **params: object) -> pd.DataFrame:
+        self.calls.append((endpoint, params))
+        if endpoint == "daily":
+            return daily_rows([str(params["trade_date"])])
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+
+def test_gap_dry_run_reports_gaps_and_performs_no_write(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    store = ParquetDataStore(tmp_path)
+    write_gap_trade_cal(store)
+    store.write(store_spec("daily"), daily_rows(["20240102", "20240104"]))
+    client = GapRepairClient()
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    report = service.scan_gaps(("daily",), "20240102", "20240104")[0]
+
+    assert report.missing_dates == ("20240103",)
+    assert client.calls == []
+    assert store.status(store_spec("daily")).rows == 2
+
+
+def test_gap_repair_fetches_only_missing_dates(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    store = ParquetDataStore(tmp_path)
+    write_gap_trade_cal(store)
+    store.write(store_spec("daily"), daily_rows(["20240102", "20240104"]))
+    client = GapRepairClient()
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    result = service.repair_gaps(("daily",), "20240102", "20240104")
+
+    assert result[0].rows_written == 1
+    assert [params["trade_date"] for endpoint, params in client.calls if endpoint == "daily"] == [
+        "20240103"
+    ]
+    assert set(store.read_dataset(store_spec("daily"))["trade_date"].astype(str)) == {
+        "20240102",
+        "20240103",
+        "20240104",
+    }

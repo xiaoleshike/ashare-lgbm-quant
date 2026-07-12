@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -33,6 +33,26 @@ class DownloadResult:
     rows_written: int = 0
     skipped: bool = False
     message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class GapReport:
+    """Missing trading-date coverage for one dataset."""
+
+    dataset: str
+    start_date: str
+    end_date: str
+    expected_dates: int
+    missing_dates: tuple[str, ...] = ()
+    missing_by_entity: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    skipped: bool = False
+    message: str = ""
+
+    @property
+    def has_gaps(self) -> bool:
+        """Return whether this report contains missing expected coverage."""
+
+        return bool(self.missing_dates or self.missing_by_entity)
 
 
 class DataIngestionService:
@@ -74,6 +94,7 @@ class DataIngestionService:
         dataset_names: tuple[str, ...] = DEFAULT_DATASETS,
         end_date: str | None = None,
         refresh_snapshots: bool = False,
+        repair_gaps: bool = False,
     ) -> list[DownloadResult]:
         """Run incremental update from local coverage where possible."""
 
@@ -81,6 +102,10 @@ class DataIngestionService:
         results: list[DownloadResult] = []
         for name in self._with_calendar_first(dataset_names):
             spec = get_dataset_spec(name)
+            if repair_gaps:
+                results.extend(
+                    self.repair_gaps((name,), self._settings.data.default_start_date, end)
+                )
             if spec.partitioning == "snapshot" and self._store.status(spec).exists:
                 if self._should_skip_snapshot_refresh(spec, refresh_snapshots):
                     results.append(
@@ -105,6 +130,51 @@ class DataIngestionService:
                 )
                 continue
             results.append(self._download_dataset(spec, start, end))
+        return results
+
+    def scan_gaps(
+        self,
+        dataset_names: tuple[str, ...] = DEFAULT_DATASETS,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[GapReport]:
+        """Report missing expected trading dates without downloading data."""
+
+        start = start_date or self._settings.data.default_start_date
+        end = end_date or today_yyyymmdd()
+        return [
+            self._scan_dataset_gaps(get_dataset_spec(name), start, end)
+            for name in dataset_names
+        ]
+
+    def repair_gaps(
+        self,
+        dataset_names: tuple[str, ...] = DEFAULT_DATASETS,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[DownloadResult]:
+        """Download only missing trading dates detected from trade_cal coverage."""
+
+        start = start_date or self._settings.data.default_start_date
+        end = end_date or today_yyyymmdd()
+        results: list[DownloadResult] = []
+        for name in dataset_names:
+            spec = get_dataset_spec(name)
+            report = self._scan_dataset_gaps(spec, start, end)
+            if report.skipped:
+                results.append(DownloadResult(spec.name, skipped=True, message=report.message))
+                continue
+            if not report.has_gaps:
+                results.append(DownloadResult(spec.name, skipped=True, message="no gaps detected"))
+                continue
+            rows_written = self._repair_dataset_gaps(spec, report)
+            results.append(
+                DownloadResult(
+                    spec.name,
+                    rows_written=rows_written,
+                    message=f"repaired gaps={len(report.missing_dates)}",
+                )
+            )
         return results
 
     def _incremental_start_date(
@@ -158,6 +228,136 @@ class DataIngestionService:
         except TusharePermissionError as error:
             LOGGER.warning("dataset skipped for permission error", extra={"dataset": spec.name})
             return DownloadResult(spec.name, skipped=True, message=str(error))
+
+    def _scan_dataset_gaps(self, spec: DatasetSpec, start_date: str, end_date: str) -> GapReport:
+        if not self._supports_gap_detection(spec):
+            return GapReport(
+                spec.name,
+                start_date,
+                end_date,
+                expected_dates=0,
+                skipped=True,
+                message="gap detection is not defined for this dataset fetch mode",
+            )
+
+        open_dates = self._open_dates(start_date, end_date)
+        if not open_dates:
+            return GapReport(
+                spec.name,
+                start_date,
+                end_date,
+                expected_dates=0,
+                skipped=True,
+                message="no open trading dates found in trade_cal",
+            )
+
+        frame = self._store.read_dataset(spec, start_date, end_date)
+        if spec.fetch_mode == "index_codes":
+            return self._scan_index_gaps(spec, frame, open_dates, start_date, end_date)
+
+        present_dates = set()
+        if not frame.empty and spec.date_column is not None and spec.date_column in frame.columns:
+            present_dates = set(frame[spec.date_column].dropna().astype(str).unique())
+        missing = [
+            date
+            for date in open_dates
+            if date not in present_dates and not self._has_allowed_empty_marker(spec, date)
+        ]
+        return GapReport(
+            spec.name,
+            start_date,
+            end_date,
+            expected_dates=len(open_dates),
+            missing_dates=tuple(missing),
+        )
+
+    def _scan_index_gaps(
+        self,
+        spec: DatasetSpec,
+        frame: DataFrame,
+        open_dates: tuple[str, ...],
+        start_date: str,
+        end_date: str,
+    ) -> GapReport:
+        missing_by_code: dict[str, tuple[str, ...]] = {}
+        if frame.empty or not {"ts_code", "trade_date"}.issubset(frame.columns):
+            present: dict[str, set[str]] = {}
+        else:
+            work = frame[["ts_code", "trade_date"]].copy()
+            work["ts_code"] = work["ts_code"].astype(str)
+            work["trade_date"] = work["trade_date"].astype(str)
+            present = {
+                str(code): set(group["trade_date"].astype(str))
+                for code, group in work.groupby("ts_code", sort=False)
+            }
+        for code in self._settings.data.index_codes:
+            code_present = present.get(code, set())
+            missing_dates = tuple(
+                date
+                for date in open_dates
+                if date not in code_present and not self._has_allowed_empty_marker(spec, date, code)
+            )
+            if missing_dates:
+                missing_by_code[code] = missing_dates
+        union_missing = tuple(
+            sorted({date for dates in missing_by_code.values() for date in dates})
+        )
+        return GapReport(
+            spec.name,
+            start_date,
+            end_date,
+            expected_dates=len(open_dates) * len(self._settings.data.index_codes),
+            missing_dates=union_missing,
+            missing_by_entity=missing_by_code,
+        )
+
+    def _repair_dataset_gaps(self, spec: DatasetSpec, report: GapReport) -> int:
+        if spec.fetch_mode == "index_codes":
+            return self._repair_index_gaps(spec, report)
+        if spec.fetch_mode != "trade_date":
+            return 0
+        rows_written = 0
+        params = dict(spec.params)
+        fields = fields_param(spec)
+        if fields is not None:
+            params["fields"] = fields
+        for trade_date in report.missing_dates:
+            frame = self._query(spec, trade_date=trade_date, **params)
+            if frame.empty:
+                self._handle_empty_fetch(spec, trade_date)
+                continue
+            rows_written += self._store.write(spec, frame)
+        return rows_written
+
+    def _repair_index_gaps(self, spec: DatasetSpec, report: GapReport) -> int:
+        rows_written = 0
+        params = dict(spec.params)
+        fields = fields_param(spec)
+        if fields is not None:
+            params["fields"] = fields
+        for code, missing_dates in report.missing_by_entity.items():
+            for trade_date in missing_dates:
+                frame = self._query(
+                    spec,
+                    ts_code=code,
+                    start_date=trade_date,
+                    end_date=trade_date,
+                    **params,
+                )
+                if frame.empty:
+                    self._handle_empty_fetch(spec, trade_date, code)
+                    continue
+                rows_written += self._store.write(spec, frame)
+        return rows_written
+
+    @staticmethod
+    def _supports_gap_detection(spec: DatasetSpec) -> bool:
+        return (
+            spec.uses_trade_calendar
+            and spec.date_column is not None
+            and spec.partitioning == "trade_month"
+            and spec.fetch_mode in {"trade_date", "index_codes"}
+        )
 
     def _should_skip_snapshot_refresh(
         self, spec: DatasetSpec, refresh_snapshots: bool
@@ -350,7 +550,11 @@ class DataIngestionService:
             return
         if spec.fetch_mode == "trade_date":
             for trade_date in self._open_dates(start_date, end_date):
-                yield self._query(spec, trade_date=trade_date, **params)
+                frame = self._query(spec, trade_date=trade_date, **params)
+                if frame.empty:
+                    self._handle_empty_fetch(spec, trade_date)
+                    continue
+                yield frame
             return
         if spec.fetch_mode == "week_end_trade_date":
             for trade_date in self._period_end_open_dates(start_date, end_date, "week"):
@@ -365,13 +569,18 @@ class DataIngestionService:
                 for chunk_start, chunk_end in iter_year_chunks(
                     start_date, end_date, self._settings.data.date_range_chunk_years
                 ):
-                    yield self._query(
+                    frame = self._query(
                         spec,
                         ts_code=code,
                         start_date=chunk_start,
                         end_date=chunk_end,
                         **params,
                     )
+                    if frame.empty:
+                        for trade_date in self._open_dates(chunk_start, chunk_end):
+                            self._handle_empty_fetch(spec, trade_date, code)
+                        continue
+                    yield frame
             return
         if spec.fetch_mode == "fund_market_snapshot":
             for market in self._settings.data.fund_markets:
@@ -455,6 +664,36 @@ class DataIngestionService:
             return frame
         dates = frame[spec.date_column].astype(str)
         return frame.loc[(dates >= start_date) & (dates <= end_date)]
+
+    def _handle_empty_fetch(
+        self,
+        spec: DatasetSpec,
+        trade_date: str,
+        entity: str | None = None,
+    ) -> None:
+        """Record or warn about an empty response for an expected trading date."""
+
+        if spec.allow_empty_trading_days:
+            self._store.mark_empty_result(spec, trade_date, entity)
+            LOGGER.info(
+                "empty dataset response recorded as complete",
+                extra={"dataset": spec.name, "trade_date": trade_date, "entity": entity},
+            )
+            return
+        LOGGER.warning(
+            "empty dataset response leaves a repairable gap",
+            extra={"dataset": spec.name, "trade_date": trade_date, "entity": entity},
+        )
+
+    def _has_allowed_empty_marker(
+        self,
+        spec: DatasetSpec,
+        trade_date: str,
+        entity: str | None = None,
+    ) -> bool:
+        return spec.allow_empty_trading_days and self._store.has_empty_result(
+            spec, trade_date, entity
+        )
 
     def _stock_codes(self, start_date: str, end_date: str) -> tuple[str, ...]:
         stock_spec = get_dataset_spec("stock_basic")

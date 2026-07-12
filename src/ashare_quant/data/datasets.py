@@ -214,6 +214,7 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         partitioning="trade_month",
         fetch_mode="index_codes",
         date_column="trade_date",
+        uses_trade_calendar=True,
         fields=(
             "ts_code",
             "trade_date",

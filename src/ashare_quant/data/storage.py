@@ -133,6 +133,45 @@ class ParquetDataStore:
 
         return self.status(spec).max_date
 
+    def mark_empty_result(
+        self,
+        spec: DatasetSpec,
+        trade_date: str,
+        entity: str | None = None,
+        reason: str = "empty response allowed by dataset semantics",
+    ) -> None:
+        """Record that an allowed-empty request completed without rows."""
+
+        path = self.empty_marker_path(spec, trade_date, entity)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{reason}\n", encoding="utf-8")
+
+    def has_empty_result(
+        self,
+        spec: DatasetSpec,
+        trade_date: str,
+        entity: str | None = None,
+    ) -> bool:
+        """Return whether an allowed-empty completion marker exists."""
+
+        return self.empty_marker_path(spec, trade_date, entity).exists()
+
+    def empty_marker_path(
+        self,
+        spec: DatasetSpec,
+        trade_date: str,
+        entity: str | None = None,
+    ) -> Path:
+        """Return path for an allowed-empty completion marker."""
+
+        entity_part = "all" if entity is None else entity.replace("/", "_").replace(".", "_")
+        return (
+            self.dataset_dir(spec)
+            / "_empty"
+            / f"trade_date={trade_date}"
+            / f"{entity_part}.txt"
+        )
+
     def _validate_frame(self, spec: DatasetSpec, frame: DataFrame) -> None:
         missing = [column for column in spec.required_columns if column not in frame.columns]
         if missing:

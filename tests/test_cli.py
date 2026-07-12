@@ -205,6 +205,61 @@ def test_data_validate_cli_returns_nonzero_when_one_dataset_fails(tmp_path, caps
     assert "fund_basic: ok=True status=skipped_optional" in captured.out
 
 
+def test_data_gaps_cli_reports_missing_trading_days(tmp_path, capsys) -> None:
+    import pandas as pd
+
+    from ashare_quant.data.datasets import get_dataset_spec
+    from ashare_quant.data.storage import ParquetDataStore
+
+    store = ParquetDataStore(tmp_path)
+    store.write(
+        get_dataset_spec("trade_cal"),
+        pd.DataFrame(
+            {
+                "exchange": ["SSE", "SSE", "SSE"],
+                "cal_date": ["20240102", "20240103", "20240104"],
+                "is_open": [1, 1, 1],
+            }
+        ),
+    )
+    store.write(
+        get_dataset_spec("daily"),
+        pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": ["20240102", "20240104"],
+                "open": [10.0, 10.0],
+                "high": [11.0, 11.0],
+                "low": [9.0, 9.0],
+                "close": [10.5, 10.5],
+                "vol": [100.0, 100.0],
+            }
+        ),
+    )
+
+    exit_code = main(
+        [
+            "--config",
+            "config/default.yaml",
+            "data",
+            "--storage-root",
+            str(tmp_path),
+            "gaps",
+            "--dataset",
+            "daily",
+            "--start-date",
+            "20240102",
+            "--end-date",
+            "20240104",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "daily: gaps=True" in captured.out
+    assert "first=20240103" in captured.out
+
+
 def test_universe_build_cli_with_fixture_raw_store(tmp_path, monkeypatch, capsys) -> None:
     import pandas as pd
 

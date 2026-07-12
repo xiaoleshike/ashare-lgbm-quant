@@ -12,7 +12,7 @@ from pathlib import Path
 from ashare_quant.config import load_settings
 from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS
 from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
-from ashare_quant.data.ingestion import DataIngestionService, build_store
+from ashare_quant.data.ingestion import DataIngestionService, GapReport, build_store
 from ashare_quant.data.quality_logging import append_quality_event, append_validation_results
 from ashare_quant.data.validation import DataValidator, ValidationResult
 from ashare_quant.features import FEATURE_REGISTRY, FeatureBuilder, FeatureStore
@@ -64,6 +64,17 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
         action="store_true",
         help="Refresh existing snapshot datasets selected by --dataset/--all-datasets.",
     )
+    update_parser.add_argument(
+        "--repair-gaps",
+        action="store_true",
+        help="Repair missing trade_cal-derived trading dates before normal incremental update.",
+    )
+
+    gaps_parser = data_subparsers.add_parser(
+        "gaps", help="Report missing trade_cal-derived trading dates without downloading."
+    )
+    add_dataset_args(gaps_parser)
+    add_date_range_args(gaps_parser)
 
     validate_parser = data_subparsers.add_parser(
         "validate", help="Validate local Parquet datasets."
@@ -250,6 +261,13 @@ def run_data_command(args: argparse.Namespace) -> int:
         return 0
 
     dataset_names = selected_datasets(args)
+    if args.data_command == "gaps":
+        reports = DataIngestionService(settings=settings, store=store).scan_gaps(
+            dataset_names, args.start_date, args.end_date
+        )
+        print_gap_reports(reports)
+        return 1 if any(report.has_gaps for report in reports) else 0
+
     if args.data_command == "validate":
         results = DataValidator(store).validate_all(dataset_names)
         print_validation_results(results)
@@ -261,7 +279,7 @@ def run_data_command(args: argparse.Namespace) -> int:
             download_results = service.init(dataset_names, args.start_date, args.end_date)
         elif args.data_command == "update":
             download_results = service.update(
-                dataset_names, args.end_date, args.refresh_snapshots
+                dataset_names, args.end_date, args.refresh_snapshots, args.repair_gaps
             )
         else:
             raise ValueError(f"Unsupported data command: {args.data_command}")
@@ -480,6 +498,26 @@ def print_validation_results(results: Sequence[ValidationResult]) -> None:
             print(f"  warning: {warning}")
         for error in result.errors:
             print(f"  error: {error}")
+
+
+def print_gap_reports(reports: Sequence[GapReport]) -> None:
+    """Print compact gap-scan output."""
+
+    for report in reports:
+        print(
+            f"{report.dataset}: gaps={report.has_gaps} skipped={report.skipped} "
+            f"expected_dates={report.expected_dates} "
+            f"missing_dates={len(report.missing_dates)} "
+            f"start_date={report.start_date} end_date={report.end_date} "
+            f"message={report.message}"
+        )
+        if report.missing_by_entity:
+            for entity, dates in sorted(report.missing_by_entity.items()):
+                preview = ",".join(dates[:10])
+                print(f"  {entity}: missing={len(dates)} first={preview}")
+        elif report.missing_dates:
+            preview = ",".join(report.missing_dates[:20])
+            print(f"  first={preview}")
 
 
 def print_universe_validation_result(result: UniverseValidationResult) -> None:
