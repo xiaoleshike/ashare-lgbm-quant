@@ -9,9 +9,18 @@ Daily market, volume, turnover, liquidity, and rank features are available only
 after the close of `trade_date`. They may be used for signals that trade no
 earlier than the next trading day.
 
-Financial features are joined by announcement date: a statement row is eligible
-only when `ann_date <= trade_date`. The builder does not backfill later-known
-financial statements into earlier dates.
+Financial features use an explicit point-in-time availability date. `f_ann_date`
+is preferred because corrected statements may keep an original `ann_date` but
+only become knowable later; `ann_date` is used only when `f_ann_date` is missing.
+A statement row is eligible only when `availability_date <= trade_date`.
+
+When several statement records are available for the same stock and report
+period, the deterministic tie-breaker is latest availability date, then latest
+`end_date`, then `report_type`, `update_flag`, and `ann_date` ordering. Later
+corrections affect only feature dates on or after their own `f_ann_date`.
+Cross-statement ratios such as `ocf_to_profit` first align income and cash-flow
+records by the same `ts_code,end_date`; the ratio becomes available only after
+both components are available, using the later component availability date.
 
 Suspended or missing price rows are not forward-filled. Rolling windows use the
 current row and prior rows only.

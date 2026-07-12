@@ -9,6 +9,7 @@ from ashare_quant.config import load_settings
 from ashare_quant.data.datasets import DatasetSpec
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.features import FEATURE_REGISTRY, FeatureBuilder, build_feature_frame
+from ashare_quant.features.fundamentals import build_fundamental_features
 
 
 def feature_fixture_inputs(days: int = 140) -> dict[str, pd.DataFrame]:
@@ -416,6 +417,190 @@ def test_point_in_time_financial_join_uses_announcement_date() -> None:
     assert after_roe == 20.0
 
 
+def test_financial_f_ann_date_later_than_ann_date_is_not_visible_before_f_ann_date() -> None:
+    base = financial_base(["20240229", "20240301"])
+    fina_indicator = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20231231"],
+            "ann_date": ["20240131"],
+            "f_ann_date": ["20240301"],
+            "roe": [10.0],
+        }
+    )
+
+    frame = build_fundamental_features(
+        base,
+        fina_indicator,
+        empty_financial_frame(),
+        empty_financial_frame(),
+        empty_financial_frame(),
+    )
+    rows = frame.set_index("trade_date")
+
+    assert pd.isna(rows.loc["20240229", "roe"])
+    assert rows.loc["20240301", "roe"] == 10.0
+
+
+def test_corrected_statement_is_visible_only_on_or_after_own_f_ann_date() -> None:
+    base = financial_base(["20240430", "20240501"])
+    fina_indicator = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000001.SZ"],
+            "end_date": ["20231231", "20231231"],
+            "ann_date": ["20240201", "20240201"],
+            "f_ann_date": ["20240201", "20240501"],
+            "update_flag": ["0", "1"],
+            "roe": [10.0, 20.0],
+        }
+    )
+
+    frame = build_fundamental_features(
+        base,
+        fina_indicator,
+        empty_financial_frame(),
+        empty_financial_frame(),
+        empty_financial_frame(),
+    )
+    rows = frame.set_index("trade_date")
+
+    assert rows.loc["20240430", "roe"] == 10.0
+    assert rows.loc["20240501", "roe"] == 20.0
+
+
+def test_financial_ann_date_fallback_is_used_only_when_f_ann_date_missing() -> None:
+    base = financial_base(["20240201"])
+    fina_indicator = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20231231"],
+            "ann_date": ["20240201"],
+            "f_ann_date": [""],
+            "roe": [11.0],
+        }
+    )
+
+    frame = build_fundamental_features(
+        base,
+        fina_indicator,
+        empty_financial_frame(),
+        empty_financial_frame(),
+        empty_financial_frame(),
+    )
+
+    assert frame.set_index("trade_date").loc["20240201", "roe"] == 11.0
+
+
+def test_ocf_to_profit_uses_same_end_date_and_later_component_availability() -> None:
+    base = financial_base(["20240215", "20240301"])
+    income = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20231231"],
+            "ann_date": ["20240201"],
+            "f_ann_date": ["20240201"],
+            "n_income": [10.0],
+        }
+    )
+    cashflow = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000001.SZ"],
+            "end_date": ["20230930", "20231231"],
+            "ann_date": ["20240201", "20240201"],
+            "f_ann_date": ["20240201", "20240301"],
+            "n_cashflow_act": [100.0, 20.0],
+        }
+    )
+
+    frame = build_fundamental_features(
+        base, empty_financial_frame(), income, empty_financial_frame(), cashflow
+    )
+    rows = frame.set_index("trade_date")
+
+    assert pd.isna(rows.loc["20240215", "ocf_to_profit"])
+    assert rows.loc["20240301", "ocf_to_profit"] == 2.0
+
+
+def test_mismatched_income_and_cashflow_periods_do_not_produce_ratio() -> None:
+    base = financial_base(["20240301"])
+    income = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20231231"],
+            "ann_date": ["20240201"],
+            "f_ann_date": ["20240201"],
+            "n_income": [10.0],
+        }
+    )
+    cashflow = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20230930"],
+            "ann_date": ["20240201"],
+            "f_ann_date": ["20240201"],
+            "n_cashflow_act": [20.0],
+        }
+    )
+
+    frame = build_fundamental_features(
+        base, empty_financial_frame(), income, empty_financial_frame(), cashflow
+    )
+
+    assert pd.isna(frame.set_index("trade_date").loc["20240301", "ocf_to_profit"])
+
+
+def test_duplicate_revised_financial_records_are_selected_deterministically() -> None:
+    base = financial_base(["20240301"])
+    income = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000001.SZ"],
+            "end_date": ["20231231", "20231231"],
+            "ann_date": ["20240201", "20240201"],
+            "f_ann_date": ["20240201", "20240201"],
+            "update_flag": ["0", "1"],
+            "n_income": [10.0, 12.0],
+        }
+    )
+    cashflow = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20231231"],
+            "ann_date": ["20240201"],
+            "f_ann_date": ["20240201"],
+            "n_cashflow_act": [24.0],
+        }
+    )
+
+    frame = build_fundamental_features(
+        base, empty_financial_frame(), income, empty_financial_frame(), cashflow
+    )
+
+    assert frame.set_index("trade_date").loc["20240301", "ocf_to_profit"] == 2.0
+
+
+def test_future_financial_record_does_not_appear_in_features() -> None:
+    base = financial_base(["20240131"])
+    fina_indicator = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20231231"],
+            "ann_date": ["20240201"],
+            "f_ann_date": ["20240201"],
+            "roe": [10.0],
+        }
+    )
+
+    frame = build_fundamental_features(
+        base,
+        fina_indicator,
+        empty_financial_frame(),
+        empty_financial_frame(),
+        empty_financial_frame(),
+    )
+
+    assert pd.isna(frame.set_index("trade_date").loc["20240131", "roe"])
+
+
 def test_feature_computation_time_and_missing_stats_on_fixture() -> None:
     settings = load_settings("config/default.yaml")
     started = time.perf_counter()
@@ -576,6 +761,18 @@ def set_return_sequence(
         close *= 1.0 + ret
         mask = (daily["ts_code"] == ts_code) & (daily["trade_date"] == trade_date)
         daily.loc[mask, ["open", "high", "low", "close"]] = [close, close, close, close]
+
+
+def financial_base(trade_dates: list[str]) -> pd.DataFrame:
+    """Return a one-stock feature key frame for fundamental tests."""
+
+    return pd.DataFrame({"trade_date": trade_dates, "ts_code": "000001.SZ"})
+
+
+def empty_financial_frame() -> pd.DataFrame:
+    """Return an empty financial frame with required date metadata columns."""
+
+    return pd.DataFrame(columns=["ts_code", "end_date", "ann_date", "f_ann_date"])
 
 
 class FakeUniverseStore:
