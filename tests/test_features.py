@@ -323,6 +323,86 @@ def test_industry_neutral_rank_uses_only_eligible_stocks() -> None:
     assert pd.isna(rows.loc["000003.SZ", "ind_rank_ret_1d"])
 
 
+def test_downside_vol_all_positive_returns_is_zero_after_warmup() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    dates = first_trade_dates(inputs, 6)
+    set_return_sequence(inputs, "000001.SZ", dates, [0.01, 0.02, 0.03, 0.01, 0.02])
+
+    frame = build_feature_frame(inputs, settings, dates[-1], dates[-1])
+    value = frame.set_index("ts_code").loc["000001.SZ", "downside_vol_5d"]
+
+    assert value == pytest.approx(0.0)
+
+
+def test_downside_vol_mixed_returns_matches_downside_deviation() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    dates = first_trade_dates(inputs, 6)
+    returns = [0.01, -0.02, 0.03, -0.01, 0.0]
+    set_return_sequence(inputs, "000001.SZ", dates, returns)
+
+    frame = build_feature_frame(inputs, settings, dates[-1], dates[-1])
+    value = frame.set_index("ts_code").loc["000001.SZ", "downside_vol_5d"]
+    expected = ((0.0**2 + (-0.02) ** 2 + 0.0**2 + (-0.01) ** 2 + 0.0**2) / 5) ** 0.5
+
+    assert value == pytest.approx(expected)
+
+
+def test_downside_vol_all_negative_returns_matches_downside_deviation() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    dates = first_trade_dates(inputs, 6)
+    returns = [-0.01, -0.02, -0.03, -0.04, -0.05]
+    set_return_sequence(inputs, "000001.SZ", dates, returns)
+
+    frame = build_feature_frame(inputs, settings, dates[-1], dates[-1])
+    value = frame.set_index("ts_code").loc["000001.SZ", "downside_vol_5d"]
+    expected = sum(ret**2 for ret in returns) / len(returns)
+
+    assert value == pytest.approx(expected**0.5)
+
+
+def test_downside_vol_missing_returns_reduce_coverage_but_nonnegative_count_as_zero() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    dates = first_trade_dates(inputs, 6)
+    set_return_sequence(inputs, "000001.SZ", dates, [0.01, -0.02, -0.03, -0.04, -0.05])
+    suspend_stock_dates(inputs, "000001.SZ", [dates[3]])
+
+    frame = build_feature_frame(inputs, settings, dates[-1], dates[-1])
+    value = frame.set_index("ts_code").loc["000001.SZ", "downside_vol_5d"]
+    expected = (0.0**2 + (-0.02) ** 2 + (-0.05) ** 2) / 3
+
+    assert value == pytest.approx(expected**0.5)
+
+
+def test_downside_vol_insufficient_valid_returns_is_null() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    dates = first_trade_dates(inputs, 6)
+    set_return_sequence(inputs, "000001.SZ", dates, [0.01, -0.02, -0.03, -0.04, -0.05])
+    suspend_stock_dates(inputs, "000001.SZ", [dates[2], dates[3]])
+
+    frame = build_feature_frame(inputs, settings, dates[-1], dates[-1])
+    value = frame.set_index("ts_code").loc["000001.SZ", "downside_vol_5d"]
+
+    assert pd.isna(value)
+
+
+def test_downside_vol_old_all_null_behavior_is_prevented() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    dates = first_trade_dates(inputs, 6)
+    set_return_sequence(inputs, "000001.SZ", dates, [0.01, 0.01, 0.01, 0.01, 0.01])
+
+    frame = build_feature_frame(inputs, settings, dates[-1], dates[-1])
+    value = frame.set_index("ts_code").loc["000001.SZ", "downside_vol_5d"]
+
+    assert pd.notna(value)
+    assert value == pytest.approx(0.0)
+
+
 def test_point_in_time_financial_join_uses_announcement_date() -> None:
     settings = load_settings("config/default.yaml")
     inputs = feature_fixture_inputs()
@@ -470,6 +550,32 @@ def mark_ineligible(inputs: dict[str, pd.DataFrame], ts_code: str, trade_date: s
     universe = inputs["universe"]
     mask = (universe["ts_code"] == ts_code) & (universe["trade_date"] == trade_date)
     inputs["universe"].loc[mask, "in_model_universe"] = False
+
+
+def first_trade_dates(inputs: dict[str, pd.DataFrame], count: int) -> list[str]:
+    """Return the first fixture trading dates."""
+
+    return inputs["trade_cal"]["cal_date"].astype(str).head(count).tolist()
+
+
+def set_return_sequence(
+    inputs: dict[str, pd.DataFrame],
+    ts_code: str,
+    dates: list[str],
+    returns: list[float],
+) -> None:
+    """Set closes so adjacent trading-day returns equal the supplied values."""
+
+    if len(dates) != len(returns) + 1:
+        raise ValueError("dates must contain one more value than returns")
+    close = 10.0
+    daily = inputs["daily"]
+    first_mask = (daily["ts_code"] == ts_code) & (daily["trade_date"] == dates[0])
+    daily.loc[first_mask, ["open", "high", "low", "close"]] = [close, close, close, close]
+    for trade_date, ret in zip(dates[1:], returns, strict=True):
+        close *= 1.0 + ret
+        mask = (daily["ts_code"] == ts_code) & (daily["trade_date"] == trade_date)
+        daily.loc[mask, ["open", "high", "low", "close"]] = [close, close, close, close]
 
 
 class FakeUniverseStore:

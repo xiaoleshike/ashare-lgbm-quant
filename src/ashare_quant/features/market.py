@@ -163,6 +163,7 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
         amount_mean = (
             pl.col("amount").rolling_mean(window_size=window, min_samples=minp).over("ts_code")
         )
+        downside_squared = downside_squared_expr(settings)
         working = working.with_columns(
             [
                 (pl.col("adj_close") / zero_to_null(ma) - 1.0).alias(f"ma_ratio_{window}d"),
@@ -179,11 +180,10 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
                 .rolling_std(window_size=window, min_samples=minp)
                 .over("ts_code")
                 .alias(f"realized_vol_{window}d"),
-                pl.when(pl.col("ret_1d") < 0)
-                .then(pl.col("ret_1d"))
-                .otherwise(None)
-                .rolling_std(window_size=window, min_samples=minp)
+                downside_squared
+                .rolling_mean(window_size=window, min_samples=minp)
                 .over("ts_code")
+                .sqrt()
                 .alias(f"downside_vol_{window}d"),
                 (pl.col("vol") / zero_to_null(
                     pl.col("vol").rolling_mean(window_size=window, min_samples=minp).over("ts_code")
@@ -296,6 +296,13 @@ def zero_to_null(expr: pl.Expr) -> pl.Expr:
     """Convert zero denominators to null before division."""
 
     return pl.when(expr == 0).then(None).otherwise(expr)
+
+
+def downside_squared_expr(settings: FeatureSettings) -> pl.Expr:
+    """Return squared downside return using MAR, preserving missing returns."""
+
+    downside_return = pl.min_horizontal(pl.col("ret_1d") - settings.downside_mar, pl.lit(0.0))
+    return pl.when(pl.col("ret_1d").is_not_null()).then(downside_return.pow(2)).otherwise(None)
 
 
 def rolling_cov_expr(left: str, right: str, window: int, minimum_periods: int) -> pl.Expr:
@@ -598,8 +605,8 @@ def add_trend_features(frame: DataFrame, settings: FeatureSettings) -> DataFrame
             lambda values, w=window, m=minp: values.rolling(w, min_periods=m).std()
         )
         working[f"downside_vol_{window}d"] = grouped["ret_1d"].transform(
-            lambda values, w=window, m=minp: (
-                values.where(values < 0).rolling(w, min_periods=m).std()
+            lambda values, w=window, m=minp, mar=settings.downside_mar: (
+                rolling_downside_deviation(values, w, m, mar)
             )
         )
     for window in settings.long_windows:
@@ -774,6 +781,19 @@ def compound_return(values: pd.Series, window: int, settings: FeatureSettings) -
 
     minp = min_periods(window, settings)
     return (1.0 + values).rolling(window, min_periods=minp).apply(np.prod, raw=True) - 1.0
+
+
+def rolling_downside_deviation(
+    values: pd.Series,
+    window: int,
+    minimum_periods: int,
+    mar: float,
+) -> pd.Series:
+    """Compute rolling downside deviation with non-negative returns contributing zero."""
+
+    downside = (values - mar).clip(upper=0)
+    result = np.sqrt((downside**2).rolling(window, min_periods=minimum_periods).mean())
+    return pd.Series(result, index=values.index)
 
 
 def rolling_group_corr(
