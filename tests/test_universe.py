@@ -208,3 +208,99 @@ def test_universe_store_is_idempotent_and_cli_builder_uses_raw_store(tmp_path, m
     assert second.validation.ok
     assert len(stored) == len(fixture_inputs()["stock_basic"])
     assert not stored.duplicated(subset=["trade_date", "ts_code"]).any()
+
+
+def historical_st_fixture_inputs() -> dict[str, pd.DataFrame]:
+    trade_dates = ["20240102", "20240103", "20240104", "20240105"]
+    codes = ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ"]
+    stock_basic = pd.DataFrame(
+        {
+            "ts_code": codes,
+            "symbol": [code[:6] for code in codes],
+            "name": ["*ST Future", "Recovered Co", "Open End", "Normal Now", "Overlap Co"],
+            "market": ["主板"] * len(codes),
+            "industry": ["Test"] * len(codes),
+            "list_date": ["20200101"] * len(codes),
+            "delist_date": [None] * len(codes),
+        }
+    )
+    daily = pd.DataFrame(
+        [
+            {
+                "ts_code": code,
+                "trade_date": trade_date,
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.0,
+                "close": 10.0,
+                "vol": 100.0,
+                "amount": 1000.0,
+            }
+            for trade_date in trade_dates
+            for code in codes
+        ]
+    )
+    trade_cal = pd.DataFrame(
+        {"exchange": ["SSE"] * len(trade_dates), "cal_date": trade_dates, "is_open": [1] * 4}
+    )
+    namechange = pd.DataFrame(
+        {
+            "ts_code": [
+                "000001.SZ",
+                "000002.SZ",
+                "000003.SZ",
+                "000004.SZ",
+                "000005.SZ",
+                "000005.SZ",
+            ],
+            "name": [
+                "*ST Future",
+                "SST Recovered",
+                "S*ST Open",
+                "退 Old",
+                "ST Overlap",
+                "ST Overlap",
+            ],
+            "start_date": ["20240104", "20240102", "20240103", "20240102", "20240103", "20240103"],
+            "end_date": ["", "20240103", "", "20240102", "20240104", "20240104"],
+            "ann_date": ["20240104", "20240102", "20240103", "20240102", "20240103", "20240103"],
+        }
+    )
+    return {
+        "stock_basic": stock_basic,
+        "trade_cal": trade_cal,
+        "daily": daily,
+        "daily_basic": pd.DataFrame(columns=["ts_code", "trade_date"]),
+        "suspend_d": pd.DataFrame(columns=["ts_code", "trade_date"]),
+        "stk_limit": pd.DataFrame(columns=["ts_code", "trade_date", "up_limit", "down_limit"]),
+        "namechange": namechange,
+    }
+
+
+def test_universe_uses_historical_namechange_for_st_intervals() -> None:
+    settings = UniverseSettings(
+        min_list_trading_days=0,
+        liquidity_window_days=1,
+        min_avg_amount=0.0,
+        require_full_liquidity_window=True,
+    )
+
+    frame = build_universe_frame(
+        historical_st_fixture_inputs(), settings, "20240102", "20240105"
+    )
+    rows = frame.set_index(["trade_date", "ts_code"])
+
+    assert not bool(rows.loc[("20240103", "000001.SZ"), "is_st"])
+    assert bool(rows.loc[("20240104", "000001.SZ"), "is_st"])
+    assert bool(rows.loc[("20240103", "000001.SZ"), "in_model_universe"])
+    assert "st" in str(rows.loc[("20240104", "000001.SZ"), "exclude_reason"])
+
+    assert bool(rows.loc[("20240103", "000002.SZ"), "is_st"])
+    assert not bool(rows.loc[("20240104", "000002.SZ"), "is_st"])
+    assert not bool(rows.loc[("20240103", "000002.SZ"), "in_model_universe"])
+    assert bool(rows.loc[("20240104", "000002.SZ"), "in_model_universe"])
+
+    assert bool(rows.loc[("20240105", "000003.SZ"), "is_st"])
+    assert bool(rows.loc[("20240102", "000004.SZ"), "is_st"])
+    assert bool(rows.loc[("20240103", "000005.SZ"), "is_st"])
+    assert not frame.duplicated(subset=["trade_date", "ts_code"]).any()

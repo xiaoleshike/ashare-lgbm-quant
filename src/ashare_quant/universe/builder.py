@@ -84,7 +84,15 @@ class UniverseBuilder:
         )
 
     def _load_inputs(self) -> dict[str, DataFrame]:
-        names = ("stock_basic", "trade_cal", "daily", "daily_basic", "suspend_d", "stk_limit")
+        names = (
+            "stock_basic",
+            "trade_cal",
+            "daily",
+            "daily_basic",
+            "suspend_d",
+            "stk_limit",
+            "namechange",
+        )
         return {name: self._raw_store.read_dataset(get_dataset_spec(name)) for name in names}
 
 
@@ -120,6 +128,12 @@ def build_universe_frame(
         suspend_keys=inputs.get("_suspend_keys"),
         limit_prices=inputs.get("_limit_prices"),
     )
+    base = add_historical_st_flags(
+        base,
+        inputs.get("_st_keys"),
+        inputs.get("namechange", pd.DataFrame()),
+        fallback_date=latest_daily_date(daily),
+    )
     base = add_model_flags(base, settings)
     base = add_tradability_flags(base, settings)
     base = finalize_columns(base)
@@ -137,7 +151,128 @@ def prepare_universe_inputs(inputs: dict[str, DataFrame]) -> dict[str, DataFrame
     prepared["_suspend_keys"] = normalize_suspend_keys(inputs["suspend_d"])
     prepared["_limit_prices"] = normalize_limit_prices(inputs["stk_limit"])
     prepared["_candidates"] = build_candidates(inputs["stock_basic"], daily)
+    prepared["_st_keys"] = build_historical_st_keys(
+        inputs.get("namechange", pd.DataFrame()),
+        open_trade_dates(inputs["trade_cal"], None, str(inputs["trade_cal"]["cal_date"].max())),
+    )
     return prepared
+
+
+def build_historical_st_keys(namechange: DataFrame, all_trade_dates: list[str]) -> DataFrame:
+    """Expand ST-like namechange intervals to trade_date/ts_code keys.
+
+    ST-like names are matched conservatively on normalized Chinese security names
+    containing ST, *ST, SST, S*ST, or the delisting marker "退". Intervals use
+    start_date as the effective date, fall back to ann_date when start_date is
+    missing, and treat missing end_date as active through the last available
+    trading date.
+    """
+
+    if (
+        namechange.empty
+        or not all_trade_dates
+        or not {"ts_code", "name"}.issubset(namechange.columns)
+    ):
+        return pd.DataFrame(columns=["trade_date", "ts_code"])
+    intervals = normalize_namechange_intervals(namechange, all_trade_dates[-1])
+    intervals = intervals[intervals["name"].map(is_st_like_name)].copy()
+    if intervals.empty:
+        return pd.DataFrame(columns=["trade_date", "ts_code"])
+    calendar = pd.DataFrame({"trade_date": all_trade_dates})
+    keys = intervals.merge(calendar, how="cross")
+    keys = keys[
+        (keys["trade_date"] >= keys["start_date"]) & (keys["trade_date"] <= keys["end_date"])
+    ]
+    if keys.empty:
+        return pd.DataFrame(columns=["trade_date", "ts_code"])
+    return keys[["trade_date", "ts_code"]].drop_duplicates()
+
+
+def normalize_namechange_intervals(namechange: DataFrame, fallback_end_date: str) -> DataFrame:
+    """Normalize namechange rows into deterministic effective date intervals."""
+
+    working = namechange.copy()
+    working["ts_code"] = working["ts_code"].astype(str)
+    working["name"] = working["name"].fillna("").astype(str)
+    if "start_date" not in working.columns:
+        working["start_date"] = pd.NA
+    working["start_date"] = clean_date_series(working["start_date"])
+    if "ann_date" in working.columns:
+        working["ann_date"] = clean_date_series(working["ann_date"])
+        working["start_date"] = working["start_date"].fillna(working["ann_date"])
+    if "end_date" not in working.columns:
+        working["end_date"] = pd.NA
+    working["end_date"] = clean_date_series(working["end_date"]).fillna(fallback_end_date)
+    working = working[
+        working["start_date"].notna()
+        & working["end_date"].notna()
+        & (working["start_date"] <= working["end_date"])
+    ].copy()
+    if working.empty:
+        return pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"])
+    sort_columns = [
+        column
+        for column in ("ts_code", "start_date", "end_date", "ann_date", "name")
+        if column in working.columns
+    ]
+    working = working.sort_values(sort_columns)
+    return working[["ts_code", "name", "start_date", "end_date"]].drop_duplicates(
+        subset=["ts_code", "start_date", "end_date", "name"], keep="last"
+    )
+
+
+def is_st_like_name(name: object) -> bool:
+    """Return whether a security name denotes ST or delisting-risk state."""
+
+    normalized = str(name).upper().replace(" ", "")
+    return "ST" in normalized or "退" in normalized
+
+
+def add_historical_st_flags(
+    frame: DataFrame,
+    st_keys: DataFrame | None,
+    namechange: DataFrame,
+    fallback_date: str | None,
+) -> DataFrame:
+    """Attach point-in-time ST flags from namechange-derived intervals."""
+
+    working = frame.copy()
+    if st_keys is None:
+        trade_dates = sorted(working["trade_date"].astype(str).unique())
+        st_keys = build_historical_st_keys(namechange, trade_dates)
+        if st_keys.empty:
+            working["is_st"] = stock_basic_name_fallback_st(working, fallback_date)
+            return working
+    if st_keys.empty:
+        working["is_st"] = False
+        return working
+    keys = st_keys.copy()
+    keys["trade_date"] = keys["trade_date"].astype(str)
+    keys["ts_code"] = keys["ts_code"].astype(str)
+    merged = working.merge(
+        keys.assign(is_st=True).drop_duplicates(),
+        on=["trade_date", "ts_code"],
+        how="left",
+    )
+    merged["is_st"] = merged["is_st"].fillna(False).astype(bool)
+    return merged
+
+
+def stock_basic_name_fallback_st(frame: DataFrame, latest_date: str | None) -> pd.Series:
+    """Fallback for missing namechange: apply current-name ST only to latest date."""
+
+    if latest_date is None or "name" not in frame.columns or "trade_date" not in frame.columns:
+        return pd.Series(False, index=frame.index)
+    latest = frame["trade_date"].astype(str).eq(latest_date)
+    return latest & frame["name"].map(is_st_like_name)
+
+
+def latest_daily_date(daily: DataFrame) -> str | None:
+    """Return latest normalized daily trade date for current-name fallback."""
+
+    if daily.empty or "trade_date" not in daily.columns:
+        return None
+    return str(daily["trade_date"].astype(str).max())
 
 
 def year_date_ranges(trade_dates: list[str]) -> list[tuple[str, str]]:
@@ -508,7 +643,8 @@ def add_model_flags(frame: DataFrame, settings: UniverseSettings) -> DataFrame:
     working["is_new_stock"] = working["in_base_universe"].astype(bool) & (
         working["list_days"] < settings.min_list_trading_days
     )
-    working["is_st"] = working["name"].astype(str).str.upper().str.contains("ST", regex=False)
+    if "is_st" not in working.columns:
+        working["is_st"] = False
 
     avg_amount = pd.to_numeric(working["avg_amount_20"], errors="coerce")
     amount_count = pd.to_numeric(working["amount_count_20"], errors="coerce")

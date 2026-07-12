@@ -51,6 +51,7 @@ def label_fixture_inputs() -> dict[str, pd.DataFrame]:
     }
     daily_rows: list[dict[str, object]] = []
     adj_rows: list[dict[str, object]] = []
+    limit_rows: list[dict[str, object]] = []
     universe_rows: list[dict[str, object]] = []
     for day_index, trade_date in enumerate(trade_dates):
         for code in codes:
@@ -75,6 +76,20 @@ def label_fixture_inputs() -> dict[str, pd.DataFrame]:
             if code == "000001.SZ" and trade_date == "20240108":
                 adj_factor = 2.0
             adj_rows.append({"ts_code": code, "trade_date": trade_date, "adj_factor": adj_factor})
+            up_limit = open_price + 10.0
+            down_limit = open_price - 10.0
+            if code == "000005.SZ" and trade_date == "20240103":
+                up_limit = open_price
+            if code == "000006.SZ" and trade_date == "20240108":
+                down_limit = open_price
+            limit_rows.append(
+                {
+                    "ts_code": code,
+                    "trade_date": trade_date,
+                    "up_limit": up_limit,
+                    "down_limit": down_limit,
+                }
+            )
 
             is_limit_up = code == "000005.SZ" and trade_date == "20240103"
             is_limit_down = code == "000006.SZ" and trade_date == "20240108"
@@ -181,6 +196,7 @@ def label_fixture_inputs() -> dict[str, pd.DataFrame]:
         ),
         "daily": pd.DataFrame(daily_rows),
         "adj_factor": pd.DataFrame(adj_rows),
+        "stk_limit": pd.DataFrame(limit_rows),
         "index_daily": pd.DataFrame(index_rows),
         "universe": pd.DataFrame(universe_rows),
     }
@@ -227,7 +243,7 @@ def test_label_builder_covers_core_availability_rules_and_adjusted_prices() -> N
 
     suspended_entry = rows.loc[("000004.SZ", 3)]
     assert not bool(suspended_entry["is_label_available"])
-    assert suspended_entry["label_unavailable_reason"] == "entry_not_buyable"
+    assert suspended_entry["label_unavailable_reason"] == "entry_suspended"
 
     limit_up_entry = rows.loc[("000005.SZ", 3)]
     assert not bool(limit_up_entry["is_label_available"])
@@ -256,6 +272,88 @@ def test_vectorized_labels_match_iterative_reference() -> None:
         normalize_missing_values(iterative),
         check_dtype=False,
     )
+
+
+def test_entry_open_below_up_limit_is_buyable_even_if_close_later_limit_up() -> None:
+    inputs = label_fixture_inputs()
+    entry_mask = (inputs["daily"]["ts_code"] == "000005.SZ") & (
+        inputs["daily"]["trade_date"] == "20240103"
+    )
+    limit_mask = (inputs["stk_limit"]["ts_code"] == "000005.SZ") & (
+        inputs["stk_limit"]["trade_date"] == "20240103"
+    )
+    entry_open = float(inputs["daily"].loc[entry_mask, "open"].iloc[0])
+    inputs["stk_limit"].loc[limit_mask, "up_limit"] = entry_open + 1.0
+    inputs["daily"].loc[entry_mask, "close"] = entry_open + 1.0
+    universe_mask = (inputs["universe"]["ts_code"] == "000005.SZ") & (
+        inputs["universe"]["trade_date"] == "20240103"
+    )
+    inputs["universe"].loc[universe_mask, ["is_limit_up", "can_buy"]] = [True, False]
+
+    frame = build_label_frame(inputs, default_label_settings(), "20240102", "20240102", (3,))
+    row = frame.set_index(["ts_code", "horizon"]).loc[("000005.SZ", 3)]
+
+    assert bool(row["is_label_available"])
+
+
+def test_entry_open_equals_up_limit_is_not_buyable() -> None:
+    frame = build_label_frame(
+        label_fixture_inputs(), default_label_settings(), "20240102", "20240102", (3,)
+    )
+    row = frame.set_index(["ts_code", "horizon"]).loc[("000005.SZ", 3)]
+
+    assert not bool(row["is_label_available"])
+    assert row["label_unavailable_reason"] == "entry_not_buyable"
+
+
+def test_entry_open_within_limit_tolerance_is_not_buyable() -> None:
+    inputs = label_fixture_inputs()
+    entry_mask = (inputs["daily"]["ts_code"] == "000005.SZ") & (
+        inputs["daily"]["trade_date"] == "20240103"
+    )
+    limit_mask = (inputs["stk_limit"]["ts_code"] == "000005.SZ") & (
+        inputs["stk_limit"]["trade_date"] == "20240103"
+    )
+    entry_open = float(inputs["daily"].loc[entry_mask, "open"].iloc[0])
+    inputs["stk_limit"].loc[limit_mask, "up_limit"] = entry_open + 5e-7
+
+    frame = build_label_frame(inputs, default_label_settings(), "20240102", "20240102", (3,))
+    row = frame.set_index(["ts_code", "horizon"]).loc[("000005.SZ", 3)]
+
+    assert not bool(row["is_label_available"])
+    assert row["label_unavailable_reason"] == "entry_not_buyable"
+
+
+def test_signal_date_limit_status_does_not_determine_entry_tradability() -> None:
+    inputs = label_fixture_inputs()
+    signal_mask = (inputs["universe"]["ts_code"] == "000001.SZ") & (
+        inputs["universe"]["trade_date"] == "20240102"
+    )
+    inputs["universe"].loc[signal_mask, ["is_limit_up", "can_buy"]] = [True, False]
+
+    frame = build_label_frame(inputs, default_label_settings(), "20240102", "20240102", (3,))
+    row = frame.set_index(["ts_code", "horizon"]).loc[("000001.SZ", 3)]
+
+    assert bool(row["is_label_available"])
+
+
+def test_suspended_exit_date_is_unavailable_unless_delayed_exit_enabled() -> None:
+    inputs = label_fixture_inputs()
+    exit_mask = (inputs["universe"]["ts_code"] == "000001.SZ") & (
+        inputs["universe"]["trade_date"] == "20240108"
+    )
+    inputs["universe"].loc[exit_mask, ["is_suspended", "can_sell"]] = [True, False]
+
+    no_delay = build_label_frame(inputs, default_label_settings(), "20240102", "20240102", (3,))
+    no_delay_row = no_delay.set_index(["ts_code", "horizon"]).loc[("000001.SZ", 3)]
+    assert not bool(no_delay_row["is_label_available"])
+    assert no_delay_row["label_unavailable_reason"] == "exit_suspended"
+
+    delayed_settings = default_label_settings().model_copy(update={"delay_unsellable_exit": True})
+    delayed = build_label_frame(inputs, delayed_settings, "20240102", "20240102", (3,))
+    delayed_row = delayed.set_index(["ts_code", "horizon"]).loc[("000001.SZ", 3)]
+    assert bool(delayed_row["is_label_available"])
+    assert delayed_row["exit_date"] == "20240109"
 
 
 def normalize_missing_values(frame: pd.DataFrame) -> pd.DataFrame:
@@ -310,7 +408,7 @@ def test_label_store_builder_is_idempotent_with_fixture_data(tmp_path, monkeypat
     settings = load_settings("config/default.yaml")
     raw_store = ParquetDataStore(tmp_path / "raw")
     inputs = label_fixture_inputs()
-    for name in ("trade_cal", "daily", "adj_factor", "index_daily"):
+    for name in ("trade_cal", "daily", "adj_factor", "stk_limit", "index_daily"):
         raw_store.write(get_dataset_spec(name), inputs[name])
     universe_store = UniverseStore(tmp_path / "processed")
     universe_store.write(inputs["universe"])
@@ -340,3 +438,126 @@ def test_label_validator_detects_row_count_mismatch_against_base_universe(tmp_pa
 
     assert not result.ok
     assert any("label row count must match in_base_universe" in error for error in result.errors)
+
+
+def test_label_validator_accepts_row_count_matching_base_universe(tmp_path) -> None:
+    inputs = label_fixture_inputs()
+    universe_store = UniverseStore(tmp_path / "processed")
+    universe_store.write(inputs["universe"])
+    label_store = LabelStore(tmp_path / "processed")
+    labels = build_label_frame(inputs, default_label_settings(), "20240102", "20240102", (3,))
+    label_store.write(labels)
+
+    result = LabelValidator(
+        label_store,
+        quantile_buckets=5,
+        universe_store=universe_store,
+    ).validate("20240102", "20240102")
+
+    assert result.ok
+
+
+def test_label_validation_detects_duplicate_rows() -> None:
+    labels = build_label_frame(
+        label_fixture_inputs(),
+        default_label_settings(),
+        "20240102",
+        "20240102",
+        (3,),
+    )
+    duplicated = pd.concat([labels, labels.iloc[[0]]], ignore_index=True)
+
+    result = validate_label_frame(duplicated, quantile_buckets=5)
+
+    assert not result.ok
+    assert any("duplicate label rows" in error for error in result.errors)
+
+
+def test_label_validation_allows_data_tail_insufficient_future_dates() -> None:
+    labels = build_label_frame(
+        label_fixture_inputs(),
+        default_label_settings(),
+        "20240119",
+        "20240119",
+        (10,),
+    )
+
+    result = validate_label_frame(labels, quantile_buckets=5)
+
+    assert result.ok
+    assert set(labels["label_unavailable_reason"]) == {"insufficient_future_calendar"}
+
+
+def test_label_validation_distinguishes_common_unavailable_reasons() -> None:
+    labels = build_label_frame(
+        label_fixture_inputs(),
+        default_label_settings(),
+        "20240102",
+        "20240102",
+        (3, 5),
+    )
+    unavailable = ~labels["is_label_available"].astype(bool)
+    reasons = set(labels.loc[unavailable, "label_unavailable_reason"])
+
+    assert {
+        "missing_entry_price",
+        "missing_exit_price",
+        "entry_suspended",
+        "entry_not_buyable",
+        "exit_not_sellable",
+        "missing_benchmark_price",
+    }.issubset(reasons)
+    assert validate_label_frame(labels, quantile_buckets=5).ok
+
+
+def test_label_validation_requires_available_return_fields() -> None:
+    labels = build_label_frame(
+        label_fixture_inputs(),
+        default_label_settings(),
+        "20240102",
+        "20240102",
+        (3,),
+    )
+    available_index = labels.index[labels["is_label_available"].astype(bool)][0]
+    labels.loc[available_index, "future_excess_ret"] = pd.NA
+
+    result = validate_label_frame(labels, quantile_buckets=5)
+
+    assert not result.ok
+    assert "future_excess_ret must be non-null when is_label_available=true" in result.errors
+
+
+def test_label_validation_rejects_unavailable_return_fields() -> None:
+    labels = build_label_frame(
+        label_fixture_inputs(),
+        default_label_settings(),
+        "20240102",
+        "20240102",
+        (3,),
+    )
+    unavailable_index = labels.index[~labels["is_label_available"].astype(bool)][0]
+    labels.loc[unavailable_index, "benchmark_forward_ret"] = 0.01
+
+    result = validate_label_frame(labels, quantile_buckets=5)
+
+    assert not result.ok
+    assert "benchmark_forward_ret must be null when is_label_available=false" in result.errors
+
+
+def test_label_validation_rejects_invalid_rank_and_quantile_values() -> None:
+    labels = build_label_frame(
+        label_fixture_inputs(),
+        default_label_settings(),
+        "20240102",
+        "20240102",
+        (3,),
+    )
+    available_index = labels.index[labels["is_label_available"].astype(bool)][0]
+    labels.loc[available_index, "future_rank_pct"] = 1.5
+    labels.loc[available_index, "future_quantile"] = 5
+
+    result = validate_label_frame(labels, quantile_buckets=5)
+
+    assert not result.ok
+    assert "future_rank_pct must be between 0 and 1 when available" in result.errors
+    assert "future_quantile must be in the configured bucket range when available" in result.errors

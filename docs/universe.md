@@ -13,7 +13,7 @@ If a stock is not listed on a specific date, it remains in the daily table with 
 `in_model_universe` is a filtered subset for later stock selection research. The default rules exclude:
 
 - stocks with fewer than 180 listed trading days;
-- ST or `*ST` names;
+- historical ST-like names from `namechange`;
 - suspended stocks;
 - rows without usable price data;
 - rows whose trailing 20-day average amount is below `universe.min_avg_amount`;
@@ -27,11 +27,19 @@ Tradability is separate from membership. `is_suspended`, `is_limit_up`, `is_limi
 
 These flags do not permanently remove a stock from the universe.
 
+## Historical ST State
+
+`is_st` is derived from `namechange` intervals, not from the current `stock_basic.name` applied across all historical dates. The effective interval uses `start_date` and `end_date`; when `start_date` is missing, `ann_date` is used as a conservative fallback. A missing `end_date` means the interval is active through the latest available trading date.
+
+The ST matcher normalizes names to uppercase and treats names containing `ST` or the Chinese delisting marker `退` as ST-like. This covers common forms such as `ST`, `*ST`, `SST`, and `S*ST`.
+
+If `namechange` is unavailable or incomplete for a stock, the builder does not claim point-in-time certainty. As a limited fallback, the current `stock_basic.name` is only used on the latest available `daily` date, not on all historical dates.
+
 ## Known Limitations
 
 Tushare `stock_basic` is a snapshot. This project expects it to be downloaded with list statuses `L`, `D`, and `P`; if delisting fields are incomplete, explicit delisting is only available where `delist_date` exists. For codes found only in `daily`, the builder uses the first and last available `daily` dates as a conservative metadata fallback.
 
-ST status currently comes from the available stock name. If historical name-change or special-treatment data is incomplete, past ST flags may be approximate. Do not treat this as a final production ST filter until historical ST events are validated.
+Historical ST status depends on `namechange` coverage. If Tushare omits a historical name interval or effective date, `is_st` may be incomplete for that stock/date. Treat this as the safest available approximation until it is cross-validated against an independent ST event source.
 
 When `trade_cal` does not cover dates before a stock's `list_date`, list age before the first available calendar date is approximated by weekdays. This prevents old stocks from being treated as brand-new at the start of a local data window, but exact listed trading-day counts require a longer authoritative calendar.
 

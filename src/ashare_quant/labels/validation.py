@@ -12,6 +12,21 @@ from ashare_quant.universe.storage import UniverseStore
 
 type DataFrame = pd.DataFrame
 
+UNAVAILABLE_REASONS: frozenset[str] = frozenset(
+    {
+        "entry_not_buyable",
+        "exit_not_sellable",
+        "entry_suspended",
+        "exit_suspended",
+        "entry_not_in_base_universe",
+        "exit_not_in_base_universe",
+        "missing_entry_price",
+        "missing_exit_price",
+        "missing_benchmark_price",
+        "insufficient_future_calendar",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class LabelValidationResult:
@@ -134,6 +149,27 @@ def validate_label_frame(frame: DataFrame, quantile_buckets: int) -> LabelValida
         warnings.append("labels are empty or not built")
         return LabelValidationResult(ok=True, warnings=tuple(warnings))
 
+    required_columns = {
+        "trade_date",
+        "ts_code",
+        "horizon",
+        "entry_date",
+        "exit_date",
+        "stock_forward_ret",
+        "benchmark_forward_ret",
+        "future_excess_ret",
+        "future_rank_pct",
+        "future_quantile",
+        "is_label_available",
+        "label_unavailable_reason",
+    }
+    missing_columns = sorted(required_columns - set(frame.columns))
+    if missing_columns:
+        return LabelValidationResult(
+            ok=False,
+            errors=(f"labels are missing required columns: {missing_columns}",),
+        )
+
     if frame.duplicated(subset=["trade_date", "ts_code", "horizon"]).any():
         duplicate_count = int(frame.duplicated(subset=["trade_date", "ts_code", "horizon"]).sum())
         errors.append(f"duplicate label rows={duplicate_count}")
@@ -143,42 +179,53 @@ def validate_label_frame(frame: DataFrame, quantile_buckets: int) -> LabelValida
     exit_date = frame["exit_date"].astype(str)
     available = frame["is_label_available"].astype(bool)
     has_entry_date = entry_date.ne("") & frame["entry_date"].notna()
+    has_exit_date = exit_date.ne("") & frame["exit_date"].notna()
 
     if ((entry_date <= trade_date) & has_entry_date).any():
         errors.append("entry_date must be greater than trade_date")
-    if ((exit_date <= entry_date) & available).any():
-        errors.append("exit_date must be greater than entry_date for available labels")
+    if ((exit_date <= entry_date) & has_entry_date & has_exit_date).any():
+        errors.append("exit_date must be greater than entry_date")
 
     unavailable = ~available
-    if frame.loc[unavailable, "stock_forward_ret"].notna().any():
-        errors.append("stock_forward_ret must be null when is_label_available=false")
-    if frame.loc[unavailable, "future_excess_ret"].notna().any():
-        errors.append("future_excess_ret must be null when is_label_available=false")
+    reason = frame["label_unavailable_reason"].fillna("").astype(str)
+    if reason.loc[available].ne("").any():
+        errors.append("available labels must have empty label_unavailable_reason")
+    if reason.loc[unavailable].eq("").any():
+        errors.append("unavailable labels must have label_unavailable_reason")
+    unknown_reasons = sorted(set(reason.loc[unavailable]) - UNAVAILABLE_REASONS - {""})
+    if unknown_reasons:
+        errors.append(f"unknown label_unavailable_reason values: {unknown_reasons}")
+
+    for column in ("stock_forward_ret", "benchmark_forward_ret", "future_excess_ret"):
+        values = pd.to_numeric(frame.loc[available, column], errors="coerce")
+        if values.isna().any():
+            errors.append(f"{column} must be non-null when is_label_available=true")
+        if frame.loc[unavailable, column].notna().any():
+            errors.append(f"{column} must be null when is_label_available=false")
+
+    unavailable_rank = frame.loc[unavailable, "future_rank_pct"]
+    unavailable_quantile = frame.loc[unavailable, "future_quantile"]
+    if unavailable_rank.notna().any():
+        errors.append("future_rank_pct must be null when is_label_available=false")
+    if unavailable_quantile.notna().any():
+        errors.append("future_quantile must be null when is_label_available=false")
 
     rank = pd.to_numeric(frame.loc[available, "future_rank_pct"], errors="coerce")
-    if rank.isna().any() or ((rank < 0) | (rank > 1)).any():
+    if not rank.empty and (rank.isna().any() or ((rank < 0) | (rank > 1)).any()):
         errors.append("future_rank_pct must be between 0 and 1 when available")
 
     quantile = pd.to_numeric(frame.loc[available, "future_quantile"], errors="coerce")
-    if quantile.isna().any() or ((quantile < 0) | (quantile >= quantile_buckets)).any():
+    if not quantile.empty and (
+        quantile.isna().any() or ((quantile < 0) | (quantile >= quantile_buckets)).any()
+    ):
         errors.append("future_quantile must be in the configured bucket range when available")
 
-    tail_available = (
-        frame.groupby(["horizon", "trade_date"])["is_label_available"]
-        .any()
-        .reset_index()
-        .sort_values(["horizon", "trade_date"])
-    )
-    for horizon, group in tail_available.groupby("horizon", sort=True):
-        dates_with_available = group.loc[group["is_label_available"].astype(bool), "trade_date"]
-        if dates_with_available.empty:
-            continue
-        last_available_date = str(dates_with_available.max())
-        later_available = group.loc[
-            (group["trade_date"].astype(str) > last_available_date)
-            & group["is_label_available"].astype(bool)
-        ]
-        if not later_available.empty:
-            errors.append(f"horizon {horizon} has available labels after its last available date")
+    insufficient_future = reason.eq("insufficient_future_calendar")
+    if insufficient_future.any():
+        if available.loc[insufficient_future].any():
+            errors.append("insufficient_future_calendar labels must be unavailable")
+        future_return_columns = ["stock_forward_ret", "future_excess_ret"]
+        if frame.loc[insufficient_future, future_return_columns].notna().any().any():
+            errors.append("insufficient_future_calendar labels must not contain future returns")
 
     return LabelValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))

@@ -85,6 +85,7 @@ class LabelSettings(BaseModel):
     allow_limit_down_exit: bool = False
     delay_unsellable_exit: bool = False
     max_exit_delay_days: int = Field(default=5, ge=0)
+    price_tolerance: float = Field(default=1e-6, ge=0)
     price_adjustment: Literal["open_times_adj_factor"] = "open_times_adj_factor"
 
 

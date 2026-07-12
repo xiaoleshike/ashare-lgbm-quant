@@ -101,6 +101,7 @@ class LabelBuilder:
             "trade_cal": calendar,
             "daily": self._raw_store.read_dataset(get_dataset_spec("daily")),
             "adj_factor": self._raw_store.read_dataset(get_dataset_spec("adj_factor")),
+            "stk_limit": self._raw_store.read_dataset(get_dataset_spec("stk_limit")),
             "index_daily": self._raw_store.read_dataset(get_dataset_spec("index_daily")),
             "universe": self._universe_store.read(start_date, future_end),
         }
@@ -136,6 +137,7 @@ def build_label_frame_vectorized(
         return pd.DataFrame(columns=list(LABEL_COLUMNS))
 
     prices = adjusted_stock_open_prices(inputs["daily"], inputs["adj_factor"])
+    limits = limit_prices(inputs.get("stk_limit", pd.DataFrame()))
     benchmark = benchmark_open_prices(inputs["index_daily"], settings.benchmark_index_code)
     universe = normalize_universe(inputs["universe"])
     signal_universe = universe[
@@ -145,7 +147,7 @@ def build_label_frame_vectorized(
         return pd.DataFrame(columns=list(LABEL_COLUMNS))
 
     frame = build_signal_horizon_grid(signal_universe, trade_dates, signal_dates, horizons)
-    frame = attach_label_inputs_duckdb(frame, universe, prices, benchmark)
+    frame = attach_label_inputs_duckdb(frame, universe, prices, limits, benchmark)
     frame = assign_label_availability(frame, settings)
     frame = add_ranking_labels(frame[list(LABEL_COLUMNS)], settings.quantile_buckets)
     return frame.sort_values(["trade_date", "horizon", "ts_code"]).reset_index(drop=True)
@@ -166,6 +168,7 @@ def build_label_frame_iterative(
         return pd.DataFrame(columns=list(LABEL_COLUMNS))
 
     prices = adjusted_stock_open_prices(inputs["daily"], inputs["adj_factor"])
+    limits = limit_prices(inputs.get("stk_limit", pd.DataFrame()))
     benchmark = benchmark_open_prices(inputs["index_daily"], settings.benchmark_index_code)
     universe = normalize_universe(inputs["universe"])
     signal_universe = universe[
@@ -186,6 +189,7 @@ def build_label_frame_iterative(
                     horizon=horizon,
                     trade_dates=trade_dates,
                     prices=prices,
+                    limits=limits,
                     benchmark=benchmark,
                     universe=universe,
                     settings=settings,
@@ -316,7 +320,11 @@ def attach_prices_and_benchmark(
 
 
 def attach_label_inputs_duckdb(
-    frame: DataFrame, universe: DataFrame, prices: DataFrame, benchmark: DataFrame
+    frame: DataFrame,
+    universe: DataFrame,
+    prices: DataFrame,
+    limits: DataFrame,
+    benchmark: DataFrame,
 ) -> DataFrame:
     """Attach universe flags, prices, and benchmark prices using DuckDB joins."""
 
@@ -325,10 +333,6 @@ def attach_label_inputs_duckdb(
             "trade_date",
             "ts_code",
             "in_base_universe",
-            "can_buy",
-            "can_sell",
-            "is_limit_up",
-            "is_limit_down",
             "is_suspended",
         ]
     ].drop_duplicates(subset=["trade_date", "ts_code"], keep="last")
@@ -336,40 +340,54 @@ def attach_label_inputs_duckdb(
         columns={
             "trade_date": "entry_date",
             "in_base_universe": "entry_in_base_universe",
-            "can_buy": "entry_can_buy",
-            "is_limit_up": "entry_is_limit_up",
             "is_suspended": "entry_is_suspended",
         }
     )[[
         "entry_date",
         "ts_code",
         "entry_in_base_universe",
-        "entry_can_buy",
-        "entry_is_limit_up",
         "entry_is_suspended",
     ]]
     exit_flags = universe_flags.rename(
         columns={
             "trade_date": "exit_date",
             "in_base_universe": "exit_in_base_universe",
-            "can_sell": "exit_can_sell",
-            "is_limit_down": "exit_is_limit_down",
             "is_suspended": "exit_is_suspended",
         }
     )[[
         "exit_date",
         "ts_code",
         "exit_in_base_universe",
-        "exit_can_sell",
-        "exit_is_limit_down",
         "exit_is_suspended",
     ]]
     entry_prices = prices.rename(
-        columns={"trade_date": "entry_date", "adjusted_open": "entry_price"}
-    )[["ts_code", "entry_date", "entry_price"]]
+        columns={
+            "trade_date": "entry_date",
+            "adjusted_open": "entry_price",
+            "open": "entry_open_price",
+        }
+    )[["ts_code", "entry_date", "entry_price", "entry_open_price"]]
     exit_prices = prices.rename(
-        columns={"trade_date": "exit_date", "adjusted_open": "exit_price"}
-    )[["ts_code", "exit_date", "exit_price"]]
+        columns={
+            "trade_date": "exit_date",
+            "adjusted_open": "exit_price",
+            "open": "exit_open_price",
+        }
+    )[["ts_code", "exit_date", "exit_price", "exit_open_price"]]
+    entry_limits = limits.rename(
+        columns={
+            "trade_date": "entry_date",
+            "up_limit": "entry_up_limit",
+            "down_limit": "entry_down_limit",
+        }
+    )[["ts_code", "entry_date", "entry_up_limit", "entry_down_limit"]]
+    exit_limits = limits.rename(
+        columns={
+            "trade_date": "exit_date",
+            "up_limit": "exit_up_limit",
+            "down_limit": "exit_down_limit",
+        }
+    )[["ts_code", "exit_date", "exit_up_limit", "exit_down_limit"]]
     benchmark_entry = benchmark.rename(
         columns={"trade_date": "entry_date", "benchmark_open": "benchmark_entry_price"}
     )[["entry_date", "benchmark_entry_price"]]
@@ -384,6 +402,8 @@ def attach_label_inputs_duckdb(
         connection.register("exit_flags", exit_flags)
         connection.register("entry_prices", entry_prices)
         connection.register("exit_prices", exit_prices)
+        connection.register("entry_limits", entry_limits)
+        connection.register("exit_limits", exit_limits)
         connection.register("benchmark_entry", benchmark_entry)
         connection.register("benchmark_exit", benchmark_exit)
         return connection.execute(
@@ -391,15 +411,17 @@ def attach_label_inputs_duckdb(
             SELECT
                 base_frame.*,
                 entry_flags.entry_in_base_universe,
-                entry_flags.entry_can_buy,
-                entry_flags.entry_is_limit_up,
                 entry_flags.entry_is_suspended,
                 exit_flags.exit_in_base_universe,
-                exit_flags.exit_can_sell,
-                exit_flags.exit_is_limit_down,
                 exit_flags.exit_is_suspended,
                 entry_prices.entry_price,
+                entry_prices.entry_open_price,
                 exit_prices.exit_price,
+                exit_prices.exit_open_price,
+                entry_limits.entry_up_limit,
+                entry_limits.entry_down_limit,
+                exit_limits.exit_up_limit,
+                exit_limits.exit_down_limit,
                 benchmark_entry.benchmark_entry_price,
                 benchmark_exit.benchmark_exit_price
             FROM base_frame
@@ -415,6 +437,12 @@ def attach_label_inputs_duckdb(
             LEFT JOIN exit_prices
               ON base_frame.ts_code = exit_prices.ts_code
              AND base_frame.exit_date = exit_prices.exit_date
+            LEFT JOIN entry_limits
+              ON base_frame.ts_code = entry_limits.ts_code
+             AND base_frame.entry_date = entry_limits.entry_date
+            LEFT JOIN exit_limits
+              ON base_frame.ts_code = exit_limits.ts_code
+             AND base_frame.exit_date = exit_limits.exit_date
             LEFT JOIN benchmark_entry
               ON base_frame.entry_date = benchmark_entry.entry_date
             LEFT JOIN benchmark_exit
@@ -438,13 +466,15 @@ def assign_label_availability(frame: DataFrame, settings: LabelSettings) -> Data
         working["entry_in_base_universe"].fillna(False).astype(bool).eq(False),
         "entry_not_in_base_universe",
     )
+    set_first_reason(working, invalid_positive_price(working["entry_price"]), "missing_entry_price")
+    set_first_reason(working, invalid_positive_price(working["exit_price"]), "missing_exit_price")
+    set_first_reason(
+        working,
+        working["entry_is_suspended"].fillna(False).astype(bool),
+        "entry_suspended",
+    )
     if settings.skip_unbuyable_entry:
-        allowed_limit_up = (
-            settings.allow_limit_up_entry
-            & working["entry_is_limit_up"].fillna(False).astype(bool)
-            & working["entry_is_suspended"].fillna(False).astype(bool).eq(False)
-        )
-        entry_buyable = working["entry_can_buy"].fillna(False).astype(bool) | allowed_limit_up
+        entry_buyable = entry_open_buyable(working, settings)
         set_first_reason(working, entry_buyable.eq(False), "entry_not_buyable")
 
     set_first_reason(
@@ -452,16 +482,14 @@ def assign_label_availability(frame: DataFrame, settings: LabelSettings) -> Data
         working["exit_in_base_universe"].fillna(False).astype(bool).eq(False),
         "exit_not_in_base_universe",
     )
-    allowed_limit_down = (
-        settings.allow_limit_down_exit
-        & working["exit_is_limit_down"].fillna(False).astype(bool)
-        & working["exit_is_suspended"].fillna(False).astype(bool).eq(False)
+    set_first_reason(
+        working,
+        working["exit_is_suspended"].fillna(False).astype(bool),
+        "exit_suspended",
     )
-    exit_sellable = working["exit_can_sell"].fillna(False).astype(bool) | allowed_limit_down
+    exit_sellable = exit_open_sellable(working, settings)
     set_first_reason(working, exit_sellable.eq(False), "exit_not_sellable")
 
-    set_first_reason(working, invalid_positive_price(working["entry_price"]), "missing_entry_price")
-    set_first_reason(working, invalid_positive_price(working["exit_price"]), "missing_exit_price")
     benchmark_missing = invalid_positive_price(
         working["benchmark_entry_price"]
     ) | invalid_positive_price(working["benchmark_exit_price"])
@@ -502,12 +530,56 @@ def invalid_positive_price(values: pd.Series) -> pd.Series:
     return numeric.isna() | numeric.le(0)
 
 
+def entry_open_buyable(frame: DataFrame, settings: LabelSettings) -> pd.Series:
+    """Return whether entry can be bought at the entry-date open."""
+
+    open_price = pd.to_numeric(frame["entry_open_price"], errors="coerce")
+    up_limit = pd.to_numeric(frame["entry_up_limit"], errors="coerce")
+    down_limit = pd.to_numeric(frame["entry_down_limit"], errors="coerce")
+    suspended = frame["entry_is_suspended"].fillna(False).astype(bool)
+    has_open = open_price.notna() & open_price.gt(0)
+    usable_limit = usable_limit_prices(up_limit, down_limit)
+    at_limit_up_open = usable_limit & open_price.ge(up_limit - settings.price_tolerance)
+    if settings.allow_limit_up_entry:
+        at_limit_up_open = pd.Series(False, index=frame.index)
+    return has_open & ~suspended & ~at_limit_up_open
+
+
+def exit_open_sellable(frame: DataFrame, settings: LabelSettings) -> pd.Series:
+    """Return whether exit can be sold at the exit-date open."""
+
+    open_price = pd.to_numeric(frame["exit_open_price"], errors="coerce")
+    up_limit = pd.to_numeric(frame["exit_up_limit"], errors="coerce")
+    down_limit = pd.to_numeric(frame["exit_down_limit"], errors="coerce")
+    suspended = frame["exit_is_suspended"].fillna(False).astype(bool)
+    has_open = open_price.notna() & open_price.gt(0)
+    usable_limit = usable_limit_prices(up_limit, down_limit)
+    at_limit_down_open = usable_limit & open_price.le(down_limit + settings.price_tolerance)
+    if settings.allow_limit_down_exit:
+        at_limit_down_open = pd.Series(False, index=frame.index)
+    return has_open & ~suspended & ~at_limit_down_open
+
+
+def usable_limit_prices(up_limit: pd.Series, down_limit: pd.Series) -> pd.Series:
+    """Return rows with meaningful daily limit prices."""
+
+    no_price_limit = up_limit.eq(99999.99) & down_limit.eq(0)
+    return (
+        up_limit.notna()
+        & down_limit.notna()
+        & up_limit.gt(0)
+        & down_limit.gt(0)
+        & ~no_price_limit
+    )
+
+
 def build_one_label(
     trade_date: str,
     ts_code: str,
     horizon: int,
     trade_dates: list[str],
     prices: DataFrame,
+    limits: DataFrame,
     benchmark: DataFrame,
     universe: DataFrame,
     settings: LabelSettings,
@@ -523,17 +595,19 @@ def build_one_label(
             trade_date, ts_code, horizon, entry_date, "", "insufficient_future_calendar"
         )
 
-    entry_check = check_entry_tradable(universe, ts_code, entry_date, settings)
+    entry_check = check_entry_tradable(universe, prices, limits, ts_code, entry_date, settings)
     if entry_check is not None:
         return unavailable_row(trade_date, ts_code, horizon, entry_date, exit_date, entry_check)
 
     final_exit_date = exit_date
-    exit_check = check_exit_tradable(universe, ts_code, final_exit_date, settings)
+    exit_check = check_exit_tradable(universe, prices, limits, ts_code, final_exit_date, settings)
     if exit_check is not None and settings.delay_unsellable_exit:
         delayed = find_delayed_exit_date(
             trade_dates=trade_dates,
             ts_code=ts_code,
             start_exit_date=exit_date,
+            prices=prices,
+            limits=limits,
             universe=universe,
             settings=settings,
         )
@@ -647,7 +721,24 @@ def adjusted_stock_open_prices(daily: DataFrame, adj_factor: DataFrame) -> DataF
     adj_work["adj_factor"] = pd.to_numeric(adj_work["adj_factor"], errors="coerce")
     merged = daily_work.merge(adj_work, on=["ts_code", "trade_date"], how="left")
     merged["adjusted_open"] = merged["open"] * merged["adj_factor"]
-    return merged[["ts_code", "trade_date", "adjusted_open"]].drop_duplicates(
+    return merged[["ts_code", "trade_date", "open", "adjusted_open"]].drop_duplicates(
+        subset=["ts_code", "trade_date"], keep="last"
+    )
+
+
+def limit_prices(stk_limit: DataFrame) -> DataFrame:
+    """Return raw daily limit prices used for open execution checks."""
+
+    if stk_limit.empty or not {"ts_code", "trade_date"}.issubset(stk_limit.columns):
+        return pd.DataFrame(columns=["ts_code", "trade_date", "up_limit", "down_limit"])
+    frame = stk_limit.copy()
+    frame["ts_code"] = frame["ts_code"].astype(str)
+    frame["trade_date"] = frame["trade_date"].astype(str)
+    for column in ("up_limit", "down_limit"):
+        if column not in frame.columns:
+            frame[column] = pd.NA
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame[["ts_code", "trade_date", "up_limit", "down_limit"]].drop_duplicates(
         subset=["ts_code", "trade_date"], keep="last"
     )
 
@@ -695,6 +786,8 @@ def normalize_universe(universe: DataFrame) -> DataFrame:
 
 def check_entry_tradable(
     universe: DataFrame,
+    prices: DataFrame,
+    limits: DataFrame,
     ts_code: str,
     entry_date: str,
     settings: LabelSettings,
@@ -706,15 +799,25 @@ def check_entry_tradable(
         return "entry_not_in_base_universe"
     if not settings.skip_unbuyable_entry:
         return None
-    if bool(row["can_buy"]):
-        return None
-    if settings.allow_limit_up_entry and bool(row["is_limit_up"]) and not bool(row["is_suspended"]):
-        return None
-    return "entry_not_buyable"
+    if bool(row["is_suspended"]):
+        return "entry_suspended"
+    open_price = lookup_raw_open(prices, ts_code, entry_date)
+    if open_price is None:
+        return "missing_entry_price"
+    up_limit, down_limit = usable_scalar_limit_prices(limits, ts_code, entry_date)
+    if (
+        not settings.allow_limit_up_entry
+        and up_limit is not None
+        and open_price >= up_limit - settings.price_tolerance
+    ):
+        return "entry_not_buyable"
+    return None
 
 
 def check_exit_tradable(
     universe: DataFrame,
+    prices: DataFrame,
+    limits: DataFrame,
     ts_code: str,
     exit_date: str,
     settings: LabelSettings,
@@ -724,21 +827,27 @@ def check_exit_tradable(
     row = universe_row(universe, ts_code, exit_date)
     if row is None or not bool(row["in_base_universe"]):
         return "exit_not_in_base_universe"
-    if bool(row["can_sell"]):
-        return None
+    if bool(row["is_suspended"]):
+        return "exit_suspended"
+    open_price = lookup_raw_open(prices, ts_code, exit_date)
+    if open_price is None:
+        return "missing_exit_price"
+    _, down_limit = usable_scalar_limit_prices(limits, ts_code, exit_date)
     if (
-        settings.allow_limit_down_exit
-        and bool(row["is_limit_down"])
-        and not bool(row["is_suspended"])
+        not settings.allow_limit_down_exit
+        and down_limit is not None
+        and open_price <= down_limit + settings.price_tolerance
     ):
-        return None
-    return "exit_not_sellable"
+        return "exit_not_sellable"
+    return None
 
 
 def find_delayed_exit_date(
     trade_dates: list[str],
     ts_code: str,
     start_exit_date: str,
+    prices: DataFrame,
+    limits: DataFrame,
     universe: DataFrame,
     settings: LabelSettings,
 ) -> str | None:
@@ -748,7 +857,7 @@ def find_delayed_exit_date(
     for delay, candidate in enumerate(candidates, start=1):
         if delay > settings.max_exit_delay_days:
             return None
-        if check_exit_tradable(universe, ts_code, candidate, settings) is None:
+        if check_exit_tradable(universe, prices, limits, ts_code, candidate, settings) is None:
             return candidate
     return None
 
@@ -772,6 +881,55 @@ def lookup_price(prices: DataFrame, ts_code: str, trade_date: str) -> float | No
     if pd.isna(value) or float(value) <= 0:
         return None
     return float(value)
+
+
+def lookup_raw_open(prices: DataFrame, ts_code: str, trade_date: str) -> float | None:
+    """Lookup one unadjusted stock open price."""
+
+    match = prices[(prices["ts_code"] == ts_code) & (prices["trade_date"] == trade_date)]
+    if match.empty or "open" not in match.columns:
+        return None
+    value = pd.to_numeric(match.iloc[-1]["open"], errors="coerce")
+    if pd.isna(value) or float(value) <= 0:
+        return None
+    return float(value)
+
+
+def lookup_limit_prices(
+    limits: DataFrame, ts_code: str, trade_date: str
+) -> tuple[float | None, float | None]:
+    """Lookup raw up/down limit prices for one stock/date."""
+
+    match = limits[(limits["ts_code"] == ts_code) & (limits["trade_date"] == trade_date)]
+    if match.empty:
+        return None, None
+    up_limit = pd.to_numeric(pd.Series([match.iloc[-1].get("up_limit")]), errors="coerce").iloc[0]
+    down_limit = pd.to_numeric(
+        pd.Series([match.iloc[-1].get("down_limit")]), errors="coerce"
+    ).iloc[0]
+    return (
+        None if pd.isna(up_limit) else float(up_limit),
+        None if pd.isna(down_limit) else float(down_limit),
+    )
+
+
+def limit_prices_are_usable(up_limit: float | None, down_limit: float | None) -> bool:
+    """Return whether scalar limit prices are meaningful execution constraints."""
+
+    if up_limit is None or down_limit is None:
+        return False
+    return up_limit > 0 and down_limit > 0 and not (up_limit == 99999.99 and down_limit == 0)
+
+
+def usable_scalar_limit_prices(
+    limits: DataFrame, ts_code: str, trade_date: str
+) -> tuple[float | None, float | None]:
+    """Lookup scalar limit prices and discard non-usable sentinels."""
+
+    up_limit, down_limit = lookup_limit_prices(limits, ts_code, trade_date)
+    if not limit_prices_are_usable(up_limit, down_limit):
+        return None, None
+    return up_limit, down_limit
 
 
 def lookup_benchmark_price(benchmark: DataFrame, trade_date: str) -> float | None:
