@@ -248,16 +248,6 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
             ]
         )
 
-    for window in settings.return_windows:
-        ret_name = f"ret_{window}d"
-        if ret_name in working.columns:
-            working = working.with_columns(
-                (
-                    pl.col(ret_name)
-                    - pl.col(ret_name).mean().over(["trade_date", "industry"])
-                ).alias(f"industry_excess_ret_{window}d")
-            )
-
     working = working.with_columns(
         [
             inverse_expr("pe").alias("earnings_yield"),
@@ -278,12 +268,6 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
             if base in working.columns:
                 working = working.with_columns(
                     eligible_percent_rank_expr(base, ["trade_date"]).alias(spec.name)
-                )
-        elif spec.family == "industry_neutral_percentile_ranks":
-            base = spec.required_source_columns[0]
-            if base in working.columns:
-                working = working.with_columns(
-                    eligible_percent_rank_expr(base, ["trade_date", "industry"]).alias(spec.name)
                 )
 
     return working.drop(
@@ -574,7 +558,6 @@ def add_return_features(frame: DataFrame, settings: FeatureSettings) -> DataFram
         working[f"market_excess_ret_{window}d"] = working[f"ret_{window}d"] - grouped[
             "benchmark_ret_1d"
         ].transform(lambda values, w=window: compound_return(values, w, settings))
-        working[f"industry_excess_ret_{window}d"] = np.nan
     for window in settings.short_windows:
         ret_name = f"ret_{window}d"
         if ret_name in working.columns:
@@ -717,18 +700,13 @@ def add_beta_features(frame: DataFrame, settings: FeatureSettings) -> DataFrame:
 
 
 def add_industry_relative_features(frame: DataFrame, settings: FeatureSettings) -> DataFrame:
-    """Add industry-relative momentum using same-day industry averages."""
+    """Reject industry-relative computation without a verified PIT source."""
 
-    working = frame.copy()
-    for window in settings.return_windows:
-        ret_name = f"ret_{window}d"
-        if ret_name not in working.columns:
-            continue
-        industry_mean = working.groupby(["trade_date", "industry"], sort=False)[ret_name].transform(
-            "mean"
-        )
-        working[f"industry_excess_ret_{window}d"] = working[ret_name] - industry_mean
-    return working
+    del frame, settings
+    raise DataValidationError(
+        "industry-dependent features are disabled because no verified "
+        "point-in-time industry source is configured"
+    )
 
 
 def add_valuation_features(frame: DataFrame) -> DataFrame:
@@ -763,14 +741,6 @@ def add_rank_features(frame: DataFrame) -> DataFrame:
             base = spec.required_source_columns[0]
             if base in working.columns:
                 ranks = working.loc[eligible].groupby("trade_date")[base].rank(pct=True)
-                working[spec.name] = pd.NA
-                working.loc[eligible, spec.name] = ranks
-        elif spec.family == "industry_neutral_percentile_ranks":
-            base = spec.required_source_columns[0]
-            if base in working.columns:
-                ranks = working.loc[eligible].groupby(["trade_date", "industry"])[base].rank(
-                    pct=True
-                )
                 working[spec.name] = pd.NA
                 working.loc[eligible, spec.name] = ranks
     return working

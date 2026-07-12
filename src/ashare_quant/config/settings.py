@@ -102,6 +102,24 @@ class FeatureSettings(BaseModel):
     downside_mar: float = 0.0
     benchmark_index_code: str = "000300.SH"
     include_fundamentals: bool = True
+    enable_industry_features: bool = False
+    enable_unsafe_fina_indicator_features: bool = False
+
+    @model_validator(mode="after")
+    def reject_unsafe_research_features(self) -> FeatureSettings:
+        """Reject feature families without production-grade PIT guarantees."""
+
+        if self.enable_industry_features:
+            raise ValueError(
+                "industry-dependent features are disabled because no verified "
+                "point-in-time industry source is configured"
+            )
+        if self.enable_unsafe_fina_indicator_features:
+            raise ValueError(
+                "direct fina_indicator features are disabled because local "
+                "fina_indicator data lacks f_ann_date and is not revision-safe"
+            )
+        return self
 
 
 class AppSettings(BaseModel):

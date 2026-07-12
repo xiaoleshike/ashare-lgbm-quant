@@ -388,4 +388,4 @@ def test_features_registry_cli_reports_count(capsys) -> None:
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert "feature_count=204" in captured.out
+    assert "feature_count=153" in captured.out

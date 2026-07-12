@@ -90,6 +90,8 @@ features:
   min_period_fraction: 0.6
   benchmark_index_code: 000300.SH
   include_fundamentals: true
+  enable_industry_features: false
+  enable_unsafe_fina_indicator_features: false
 backtest:
   execution: next_open
   initial_cash: 1000000.0

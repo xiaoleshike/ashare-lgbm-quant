@@ -8,8 +8,17 @@ import pytest
 from ashare_quant.config import load_settings
 from ashare_quant.data.datasets import DatasetSpec
 from ashare_quant.data.exceptions import DataValidationError
-from ashare_quant.features import FEATURE_REGISTRY, FeatureBuilder, build_feature_frame
-from ashare_quant.features.fundamentals import build_fundamental_features
+from ashare_quant.features import (
+    DISABLED_FEATURE_REGISTRY,
+    FEATURE_REGISTRY,
+    FeatureBuilder,
+    build_feature_frame,
+)
+from ashare_quant.features.fundamentals import (
+    build_fundamental_features,
+    prepare_fina_indicator,
+    validate_financial_registry_sources,
+)
 
 
 def feature_fixture_inputs(days: int = 140) -> dict[str, pd.DataFrame]:
@@ -89,7 +98,7 @@ def feature_fixture_inputs(days: int = 140) -> dict[str, pd.DataFrame]:
             "roa": [5.0, 8.0, 7.0],
             "grossprofit_margin": [30.0, 35.0, 40.0],
             "netprofit_margin": [12.0, 14.0, 13.0],
-            "revenue_yoy": [8.0, 12.0, 9.0],
+            "or_yoy": [8.0, 12.0, 9.0],
             "netprofit_yoy": [6.0, 10.0, 7.0],
         }
     )
@@ -134,8 +143,9 @@ def feature_fixture_inputs(days: int = 140) -> dict[str, pd.DataFrame]:
 
 
 def test_feature_registry_count_is_in_target_range() -> None:
-    assert 160 <= len(FEATURE_REGISTRY) <= 220
+    assert 150 <= len(FEATURE_REGISTRY) <= 220
     assert all(spec.availability_lag for spec in FEATURE_REGISTRY)
+    assert all(spec.enabled and spec.point_in_time_safe for spec in FEATURE_REGISTRY)
 
 
 def test_features_are_deterministic_and_have_rank_boundaries() -> None:
@@ -146,9 +156,7 @@ def test_features_are_deterministic_and_have_rank_boundaries() -> None:
     second = build_feature_frame(inputs, settings, "20240520", "20240520")
 
     pd.testing.assert_frame_equal(first, second)
-    rank_columns = [
-        column for column in first.columns if column.startswith(("cs_rank_", "ind_rank_"))
-    ]
+    rank_columns = [column for column in first.columns if column.startswith("cs_rank_")]
     assert rank_columns
     for column in rank_columns:
         values = first[column].dropna()
@@ -311,17 +319,86 @@ def test_same_date_same_value_rank_is_deterministic_for_eligible_stocks() -> Non
     assert pd.isna(rows.loc["000003.SZ", "cs_rank_ret_1d"])
 
 
-def test_industry_neutral_rank_uses_only_eligible_stocks() -> None:
+def test_industry_dependent_features_are_not_generated_from_current_industry() -> None:
     settings = load_settings("config/default.yaml")
     inputs = feature_fixture_inputs(days=8)
     set_one_day_return_fixture(inputs, "20240103", "20240104")
-    mark_ineligible(inputs, "000003.SZ", "20240104")
 
     frame = build_feature_frame(inputs, settings, "20240104", "20240104")
-    rows = frame.set_index("ts_code")
 
-    assert rows.loc["000002.SZ", "ind_rank_ret_1d"] == pytest.approx(1.0)
-    assert pd.isna(rows.loc["000003.SZ", "ind_rank_ret_1d"])
+    assert not any(column.startswith("industry_excess_ret_") for column in frame.columns)
+    assert not any(column.startswith("ind_rank_") for column in frame.columns)
+    assert "cs_rank_ret_1d" in frame.columns
+
+
+def test_current_industry_metadata_cannot_enter_production_feature_registry() -> None:
+    active_names = {spec.name for spec in FEATURE_REGISTRY}
+
+    assert "industry" not in active_names
+    assert not any("universe.industry" in spec.required_source_columns for spec in FEATURE_REGISTRY)
+    assert not any("industry_excess_ret_" in spec.name for spec in FEATURE_REGISTRY)
+    assert not any(spec.name.startswith("ind_rank_") for spec in FEATURE_REGISTRY)
+
+
+def test_disabled_industry_features_have_explicit_unsafe_metadata() -> None:
+    assert DISABLED_FEATURE_REGISTRY
+    assert all(not spec.enabled for spec in DISABLED_FEATURE_REGISTRY)
+    assert all(not spec.point_in_time_safe for spec in DISABLED_FEATURE_REGISTRY)
+    assert all(spec.disabled_reason for spec in DISABLED_FEATURE_REGISTRY)
+
+
+def test_unsafe_fina_indicator_features_are_excluded_by_default() -> None:
+    disabled_names = {
+        spec.name for spec in DISABLED_FEATURE_REGISTRY if "fina_indicator" in spec.source_datasets
+    }
+    active_names = {spec.name for spec in FEATURE_REGISTRY}
+
+    assert disabled_names == {
+        "roe",
+        "roa",
+        "grossprofit_margin",
+        "netprofit_margin",
+        "revenue_yoy",
+        "netprofit_yoy",
+        "roe_delta",
+        "revenue_yoy_delta",
+        "netprofit_yoy_delta",
+    }
+    assert active_names.isdisjoint(disabled_names)
+
+
+def test_statement_derived_financial_features_remain_enabled() -> None:
+    active = {spec.name: spec for spec in FEATURE_REGISTRY}
+
+    assert {"debt_to_assets", "current_ratio", "ocf_to_profit"}.issubset(active)
+    assert active["debt_to_assets"].source_datasets == ("balancesheet",)
+    assert active["current_ratio"].source_datasets == ("balancesheet",)
+    assert active["ocf_to_profit"].source_datasets == ("cashflow", "income")
+
+
+def test_update_flag_does_not_make_fina_indicator_revision_safe() -> None:
+    disabled = {
+        spec.name: spec
+        for spec in DISABLED_FEATURE_REGISTRY
+        if "fina_indicator" in spec.source_datasets
+    }
+
+    assert disabled["revenue_yoy"].point_in_time_safe is False
+    assert "update_flag is not an availability timestamp" in disabled["revenue_yoy"].disabled_reason
+
+
+def test_model_feature_enumeration_excludes_unsafe_fina_indicator_features() -> None:
+    frame = build_feature_frame(
+        feature_fixture_inputs(),
+        load_settings("config/default.yaml"),
+        "20240520",
+        "20240524",
+    )
+
+    assert "revenue_yoy" not in frame.columns
+    assert "roe" not in frame.columns
+    assert "debt_to_assets" in frame.columns
+    assert all("fina_indicator" not in spec.source_datasets for spec in FEATURE_REGISTRY)
 
 
 def test_downside_vol_all_positive_returns_is_zero_after_warmup() -> None:
@@ -405,11 +482,22 @@ def test_downside_vol_old_all_null_behavior_is_prevented() -> None:
 
 
 def test_point_in_time_financial_join_uses_announcement_date() -> None:
-    settings = load_settings("config/default.yaml")
     inputs = feature_fixture_inputs()
 
-    before = build_feature_frame(inputs, settings, "20240520", "20240520")
-    after = build_feature_frame(inputs, settings, "20240610", "20240610")
+    before = build_fundamental_features(
+        pd.DataFrame({"trade_date": ["20240520"], "ts_code": ["000001.SZ"]}),
+        inputs["fina_indicator"],
+        empty_financial_frame(),
+        empty_financial_frame(),
+        empty_financial_frame(),
+    )
+    after = build_fundamental_features(
+        pd.DataFrame({"trade_date": ["20240610"], "ts_code": ["000001.SZ"]}),
+        inputs["fina_indicator"],
+        empty_financial_frame(),
+        empty_financial_frame(),
+        empty_financial_frame(),
+    )
     before_roe = before.set_index("ts_code").loc["000001.SZ", "roe"]
     after_roe = after.set_index("ts_code").loc["000001.SZ", "roe"]
 
@@ -489,6 +577,95 @@ def test_financial_ann_date_fallback_is_used_only_when_f_ann_date_missing() -> N
     )
 
     assert frame.set_index("trade_date").loc["20240201", "roe"] == 11.0
+
+
+def test_revenue_yoy_uses_operating_revenue_yoy_or_yoy() -> None:
+    base = financial_base(["20240201"])
+    fina_indicator = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20231231"],
+            "ann_date": ["20240201"],
+            "f_ann_date": ["20240201"],
+            "or_yoy": [8.5],
+            "tr_yoy": [99.0],
+        }
+    )
+
+    frame = build_fundamental_features(
+        base,
+        fina_indicator,
+        empty_financial_frame(),
+        empty_financial_frame(),
+        empty_financial_frame(),
+    )
+
+    assert frame.set_index("trade_date").loc["20240201", "revenue_yoy"] == 8.5
+
+
+def test_tr_yoy_is_not_used_as_revenue_yoy() -> None:
+    prepared = prepare_fina_indicator(
+        pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "end_date": ["20231231"],
+                "ann_date": ["20240201"],
+                "f_ann_date": ["20240201"],
+                "tr_yoy": [99.0],
+            }
+        )
+    )
+
+    assert "revenue_yoy" not in prepared.columns
+
+
+def test_missing_or_yoy_results_in_null_revenue_yoy_without_fallback() -> None:
+    base = financial_base(["20240201"])
+    fina_indicator = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20231231"],
+            "ann_date": ["20240201"],
+            "f_ann_date": ["20240201"],
+            "tr_yoy": [99.0],
+            "netprofit_yoy": [5.0],
+        }
+    )
+
+    frame = build_fundamental_features(
+        base,
+        fina_indicator,
+        empty_financial_frame(),
+        empty_financial_frame(),
+        empty_financial_frame(),
+    )
+
+    assert pd.isna(frame.set_index("trade_date").loc["20240201", "revenue_yoy"])
+
+
+def test_financial_feature_registry_sources_match_known_schema() -> None:
+    required_columns = tuple(
+        source
+        for spec in FEATURE_REGISTRY
+        if spec.availability_lag == "financial_ann_date_lte_trade_date"
+        for source in spec.required_source_columns
+    )
+
+    assert validate_financial_registry_sources(required_columns) == []
+
+
+def test_generated_revenue_yoy_is_not_systematically_null_with_valid_or_yoy() -> None:
+    inputs = feature_fixture_inputs()
+    base = financial_base(["20240520", "20240521", "20240522"])
+    frame = build_fundamental_features(
+        base,
+        inputs["fina_indicator"],
+        empty_financial_frame(),
+        empty_financial_frame(),
+        empty_financial_frame(),
+    )
+
+    assert frame["revenue_yoy"].notna().any()
 
 
 def test_ocf_to_profit_uses_same_end_date_and_later_component_availability() -> None:

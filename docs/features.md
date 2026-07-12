@@ -27,7 +27,8 @@ current row and prior rows only.
 
 ## Feature Families
 
-The registry currently contains 204 candidate features across these groups:
+The production registry currently contains 153 point-in-time-safe candidate
+features across these groups:
 
 - returns and momentum;
 - short-term reversal;
@@ -39,8 +40,8 @@ The registry currently contains 204 candidate features across these groups:
 - volume, turnover, amount, liquidity, and Amihud illiquidity;
 - price-volume correlation;
 - benchmark beta and residual volatility;
-- market-relative and industry-relative momentum;
-- cross-sectional and industry-neutral percentile ranks;
+- market-relative momentum;
+- market-wide cross-sectional percentile ranks;
 - valuation;
 - profitability, growth, balance-sheet quality, cash-flow quality, and changes.
 
@@ -64,11 +65,29 @@ base features rather than every generated column.
 The first implementation uses pandas for correctness and testability. Large
 full-history production runs may later be optimized with Polars or DuckDB.
 
-Industry-relative features depend on the current `universe_daily.industry`
-field. If historical industry classifications change and only current industry
-is available, this can introduce classification drift. Treat this as an input
-data limitation until historical industry data is added.
+`stock_basic.industry` is a current snapshot and is retained in
+`universe_daily` only as descriptive display metadata. It is not treated as a
+historical classification. Until a verified point-in-time industry membership
+source is added, the production registry disables all 7
+`industry_excess_ret_*`, 7 `cs_rank_industry_excess_ret_*`, and 28 `ind_rank_*`
+features. Setting `features.enable_industry_features: true` fails configuration
+validation rather than silently using the current industry snapshot.
 
 Financial statement fields vary by Tushare endpoint and account permission. When
 source columns are absent, the corresponding feature remains missing rather than
 being inferred from future data.
+
+`revenue_yoy` is defined as operating revenue year-over-year growth and is
+sourced from Tushare `fina_indicator.or_yoy`. `fina_indicator.tr_yoy` represents
+total operating revenue year-over-year growth and is not substituted into
+`revenue_yoy`.
+
+The local `fina_indicator` table does not contain `f_ann_date`, so later
+revisions cannot be assigned a reliable revision availability date. The support
+code can still compute direct `fina_indicator` fields for exploratory research,
+but the production registry disables these features by default: `roe`, `roa`,
+`grossprofit_margin`, `netprofit_margin`, `revenue_yoy`, `netprofit_yoy`,
+`roe_delta`, `revenue_yoy_delta`, and `netprofit_yoy_delta`. `update_flag` is
+not treated as an availability timestamp. Statement-derived features using
+tables with `f_ann_date` remain enabled: `debt_to_assets`, `current_ratio`, and
+`ocf_to_profit`.

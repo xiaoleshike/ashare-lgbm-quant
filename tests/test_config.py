@@ -66,6 +66,27 @@ def test_feature_settings_are_loaded_from_default_config() -> None:
     assert settings.features.benchmark_index_code == "000300.SH"
     assert settings.features.benchmark_index_code in settings.data.index_codes
     assert settings.features.include_fundamentals is True
+    assert settings.features.enable_industry_features is False
+    assert settings.features.enable_unsafe_fina_indicator_features is False
+
+
+def test_config_rejects_industry_features_without_pit_source(tmp_path: Path) -> None:
+    config_file = tmp_path / "unsafe_industry_features.yaml"
+    config_file.write_text("features:\n  enable_industry_features: true\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="no verified point-in-time industry source"):
+        load_settings(config_file)
+
+
+def test_config_rejects_unsafe_fina_indicator_features(tmp_path: Path) -> None:
+    config_file = tmp_path / "unsafe_fina_indicator_features.yaml"
+    config_file.write_text(
+        "features:\n  enable_unsafe_fina_indicator_features: true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="fina_indicator data lacks f_ann_date"):
+        load_settings(config_file)
 
 
 def test_default_config_downloads_configured_benchmark_index() -> None:

@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+INDUSTRY_FEATURE_DISABLED_REASON = (
+    "disabled: current stock_basic.industry is not a verified point-in-time historical source"
+)
+FINA_INDICATOR_DISABLED_REASON = (
+    "disabled: local fina_indicator lacks f_ann_date, so revisions cannot be assigned "
+    "revision-safe availability dates; update_flag is not an availability timestamp"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +24,10 @@ class FeatureSpec:
     minimum_history: int
     availability_lag: str
     description: str
+    point_in_time_safe: bool = True
+    enabled: bool = True
+    disabled_reason: str | None = None
+    source_datasets: tuple[str, ...] = ()
 
 
 def build_feature_registry() -> tuple[FeatureSpec, ...]:
@@ -239,29 +251,90 @@ def build_feature_registry() -> tuple[FeatureSpec, ...]:
     )
 
     fundamental_names = {
-        "roe": "Return on equity from point-in-time financial indicators.",
-        "roa": "Return on assets from point-in-time financial indicators.",
-        "grossprofit_margin": "Gross profit margin from announced financial data.",
-        "netprofit_margin": "Net profit margin from announced financial data.",
-        "debt_to_assets": "Debt to assets from point-in-time balance sheet.",
-        "current_ratio": "Current assets divided by current liabilities.",
-        "ocf_to_profit": "Operating cash flow divided by net profit.",
-        "revenue_yoy": "Revenue growth from point-in-time indicators.",
-        "netprofit_yoy": "Net profit growth from point-in-time indicators.",
-        "roe_delta": "Change in announced ROE versus previous announcement.",
-        "revenue_yoy_delta": "Change in revenue growth versus previous announcement.",
-        "netprofit_yoy_delta": "Change in net profit growth versus previous announcement.",
+        "roe": (
+            "Return on equity from point-in-time financial indicators.",
+            ("fina_indicator.roe", "financial.availability_date"),
+            ("fina_indicator",),
+        ),
+        "roa": (
+            "Return on assets from point-in-time financial indicators.",
+            ("fina_indicator.roa", "financial.availability_date"),
+            ("fina_indicator",),
+        ),
+        "grossprofit_margin": (
+            "Gross profit margin from announced financial data.",
+            ("fina_indicator.grossprofit_margin", "financial.availability_date"),
+            ("fina_indicator",),
+        ),
+        "netprofit_margin": (
+            "Net profit margin from announced financial data.",
+            ("fina_indicator.netprofit_margin", "financial.availability_date"),
+            ("fina_indicator",),
+        ),
+        "debt_to_assets": (
+            "Debt to assets from point-in-time balance sheet.",
+            (
+                "balancesheet.total_liab",
+                "balancesheet.total_assets",
+                "financial.availability_date",
+            ),
+            ("balancesheet",),
+        ),
+        "current_ratio": (
+            "Current assets divided by current liabilities.",
+            (
+                "balancesheet.total_cur_assets",
+                "balancesheet.total_cur_liab",
+                "financial.availability_date",
+            ),
+            ("balancesheet",),
+        ),
+        "ocf_to_profit": (
+            "Operating cash flow divided by net profit.",
+            (
+                "cashflow.n_cashflow_act",
+                "income.n_income",
+                "financial.availability_date",
+            ),
+            ("cashflow", "income"),
+        ),
+        "revenue_yoy": (
+            "Operating revenue year-over-year growth from point-in-time indicators.",
+            ("fina_indicator.or_yoy", "financial.availability_date"),
+            ("fina_indicator",),
+        ),
+        "netprofit_yoy": (
+            "Net profit growth from point-in-time indicators.",
+            ("fina_indicator.netprofit_yoy", "financial.availability_date"),
+            ("fina_indicator",),
+        ),
+        "roe_delta": (
+            "Change in announced ROE versus previous announcement.",
+            ("fina_indicator.roe", "financial.availability_date"),
+            ("fina_indicator",),
+        ),
+        "revenue_yoy_delta": (
+            "Change in operating revenue growth versus previous announcement.",
+            ("fina_indicator.or_yoy", "financial.availability_date"),
+            ("fina_indicator",),
+        ),
+        "netprofit_yoy_delta": (
+            "Change in net profit growth versus previous announcement.",
+            ("fina_indicator.netprofit_yoy", "financial.availability_date"),
+            ("fina_indicator",),
+        ),
     }
-    for name, description in fundamental_names.items():
+    for name, (description, required_source_columns, source_datasets) in fundamental_names.items():
         specs.append(
             FeatureSpec(
                 name=name,
                 family=fundamental_family(name),
-                required_source_columns=("financial.ann_date",),
+                required_source_columns=required_source_columns,
                 lookback=0,
                 minimum_history=0,
                 availability_lag="financial_ann_date_lte_trade_date",
                 description=description,
+                source_datasets=source_datasets,
             )
         )
 
@@ -292,7 +365,35 @@ def build_feature_registry() -> tuple[FeatureSpec, ...]:
                 description=f"Within-industry percentile rank of {base_name}.",
             )
         )
-    return tuple(specs)
+    return tuple(disable_unsafe_feature(spec) for spec in specs)
+
+
+def disable_unsafe_feature(spec: FeatureSpec) -> FeatureSpec:
+    """Mark features that lack production-grade PIT safety as disabled."""
+
+    depends_on_industry = (
+        spec.family in {"industry_relative_momentum", "industry_neutral_percentile_ranks"}
+        or any("industry_excess_ret_" in source for source in spec.required_source_columns)
+    )
+    depends_on_fina_indicator = "fina_indicator" in spec.source_datasets
+    if depends_on_industry:
+        return replace(
+            spec,
+            point_in_time_safe=False,
+            enabled=False,
+            disabled_reason=INDUSTRY_FEATURE_DISABLED_REASON,
+        )
+    if depends_on_fina_indicator:
+        return replace(
+            spec,
+            point_in_time_safe=False,
+            enabled=False,
+            disabled_reason=FINA_INDICATOR_DISABLED_REASON,
+        )
+    return replace(
+        spec,
+        source_datasets=spec.source_datasets or infer_source_datasets(spec.required_source_columns),
+    )
 
 
 def market_spec(name: str, family: str, window: int, description: str) -> FeatureSpec:
@@ -306,6 +407,7 @@ def market_spec(name: str, family: str, window: int, description: str) -> Featur
         minimum_history=max(1, int(window * 0.6)),
         availability_lag="after_close_trade_date",
         description=description,
+        source_datasets=("daily", "adj_factor"),
     )
 
 
@@ -320,7 +422,21 @@ def daily_basic_spec(name: str, family: str, description: str) -> FeatureSpec:
         minimum_history=1,
         availability_lag="after_close_trade_date",
         description=description,
+        source_datasets=("daily_basic",),
     )
+
+
+def infer_source_datasets(required_source_columns: tuple[str, ...]) -> tuple[str, ...]:
+    """Infer source dataset names from dotted registry source columns."""
+
+    datasets = []
+    for source in required_source_columns:
+        if "." not in source:
+            continue
+        dataset = source.split(".", 1)[0]
+        if dataset != "financial" and dataset not in datasets:
+            datasets.append(dataset)
+    return tuple(datasets)
 
 
 def fundamental_family(name: str) -> str:
@@ -350,4 +466,10 @@ def availability_for_base(specs: list[FeatureSpec], base_name: str) -> str:
     return "after_close_trade_date"
 
 
-FEATURE_REGISTRY: tuple[FeatureSpec, ...] = build_feature_registry()
+ALL_FEATURE_REGISTRY: tuple[FeatureSpec, ...] = build_feature_registry()
+FEATURE_REGISTRY: tuple[FeatureSpec, ...] = tuple(
+    spec for spec in ALL_FEATURE_REGISTRY if spec.enabled and spec.point_in_time_safe
+)
+DISABLED_FEATURE_REGISTRY: tuple[FeatureSpec, ...] = tuple(
+    spec for spec in ALL_FEATURE_REGISTRY if not spec.enabled
+)

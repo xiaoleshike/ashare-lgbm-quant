@@ -8,6 +8,64 @@ import pandas as pd
 
 type DataFrame = pd.DataFrame
 
+FINANCIAL_SOURCE_SCHEMA: dict[str, frozenset[str]] = {
+    "fina_indicator": frozenset(
+        {
+            "ts_code",
+            "end_date",
+            "ann_date",
+            "f_ann_date",
+            "report_type",
+            "update_flag",
+            "roe",
+            "roa",
+            "grossprofit_margin",
+            "netprofit_margin",
+            "or_yoy",
+            "tr_yoy",
+            "netprofit_yoy",
+        }
+    ),
+    "income": frozenset(
+        {
+            "ts_code",
+            "end_date",
+            "ann_date",
+            "f_ann_date",
+            "report_type",
+            "update_flag",
+            "revenue",
+            "n_income",
+            "total_profit",
+        }
+    ),
+    "balancesheet": frozenset(
+        {
+            "ts_code",
+            "end_date",
+            "ann_date",
+            "f_ann_date",
+            "report_type",
+            "update_flag",
+            "total_assets",
+            "total_liab",
+            "total_cur_assets",
+            "total_cur_liab",
+        }
+    ),
+    "cashflow": frozenset(
+        {
+            "ts_code",
+            "end_date",
+            "ann_date",
+            "f_ann_date",
+            "report_type",
+            "update_flag",
+            "n_cashflow_act",
+        }
+    ),
+}
+
 
 def build_fundamental_features(
     base: DataFrame,
@@ -44,10 +102,16 @@ def prepare_fina_indicator(frame: DataFrame) -> DataFrame:
         "roa",
         "grossprofit_margin",
         "netprofit_margin",
-        "revenue_yoy",
+        "or_yoy",
         "netprofit_yoy",
     ]
-    return prepare_announced_frame(frame, columns, "fina_indicator")
+    prepared = prepare_announced_frame(frame, columns, "fina_indicator")
+    if "or_yoy" in prepared.columns:
+        prepared = prepared.rename(columns={"or_yoy": "revenue_yoy"})
+        prepared["revenue_yoy_delta"] = prepared.groupby("ts_code", sort=False)[
+            "revenue_yoy"
+        ].diff()
+    return prepared
 
 
 def prepare_income(frame: DataFrame) -> DataFrame:
@@ -318,3 +382,22 @@ def valid_date_or_empty(values: pd.Series) -> pd.Series:
 
     text = values.fillna("").astype(str).str.replace(r"\.0$", "", regex=True)
     return text.where(text.str.fullmatch(r"\d{8}"), "")
+
+
+def validate_financial_registry_sources(
+    registry_required_columns: tuple[str, ...],
+    source_schema: dict[str, frozenset[str]] | None = None,
+) -> list[str]:
+    """Return configured financial source columns that are not in the known schema."""
+
+    schema = FINANCIAL_SOURCE_SCHEMA if source_schema is None else source_schema
+    missing: list[str] = []
+    for source in registry_required_columns:
+        if "." not in source:
+            continue
+        table, column = source.split(".", 1)
+        if table not in schema:
+            continue
+        if column not in schema[table]:
+            missing.append(source)
+    return missing
