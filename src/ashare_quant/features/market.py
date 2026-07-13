@@ -112,7 +112,8 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
     )
     working = working.with_columns(pl.col("gap_open_ret").abs().alias("gap_abs"))
 
-    for window in settings.return_windows:
+    return_windows = tuple(dict.fromkeys((*settings.return_windows, *settings.short_windows)))
+    for window in return_windows:
         minp = min_periods(window, settings)
         expressions: list[pl.Expr] = []
         if window != 1:
@@ -130,19 +131,20 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
         else:
             expressions.append(pl.col("logret_1d").alias("logret_sum_1d"))
         working = working.with_columns(expressions)
-        working = working.with_columns(
-            (
-                pl.col(f"ret_{window}d")
-                - (
-                    (pl.col("benchmark_ret_1d") + 1.0)
-                        .log()
-                        .rolling_sum(window_size=window, min_samples=minp)
-                        .over("ts_code")
-                        .exp()
-                    - 1.0
-                )
-            ).alias(f"market_excess_ret_{window}d")
-        )
+        if window in settings.return_windows:
+            working = working.with_columns(
+                (
+                    pl.col(f"ret_{window}d")
+                    - (
+                        (pl.col("benchmark_ret_1d") + 1.0)
+                            .log()
+                            .rolling_sum(window_size=window, min_samples=minp)
+                            .over("ts_code")
+                            .exp()
+                        - 1.0
+                    )
+                ).alias(f"market_excess_ret_{window}d")
+            )
 
     for window in settings.short_windows:
         expressions = [
@@ -545,7 +547,8 @@ def add_return_features(frame: DataFrame, settings: FeatureSettings) -> DataFram
     grouped = working.groupby("ts_code", sort=False)
     working["ret_1d"] = grouped["adj_close"].pct_change()
     working["logret_1d"] = np.log1p(working["ret_1d"])
-    for window in settings.return_windows:
+    return_windows = tuple(dict.fromkeys((*settings.return_windows, *settings.short_windows)))
+    for window in return_windows:
         if window != 1:
             working[f"ret_{window}d"] = grouped["adj_close"].pct_change(window)
             working[f"logret_sum_{window}d"] = grouped["logret_1d"].transform(
@@ -555,9 +558,10 @@ def add_return_features(frame: DataFrame, settings: FeatureSettings) -> DataFram
             )
         else:
             working["logret_sum_1d"] = working["logret_1d"]
-        working[f"market_excess_ret_{window}d"] = working[f"ret_{window}d"] - grouped[
-            "benchmark_ret_1d"
-        ].transform(lambda values, w=window: compound_return(values, w, settings))
+        if window in settings.return_windows:
+            working[f"market_excess_ret_{window}d"] = working[f"ret_{window}d"] - grouped[
+                "benchmark_ret_1d"
+            ].transform(lambda values, w=window: compound_return(values, w, settings))
     for window in settings.short_windows:
         ret_name = f"ret_{window}d"
         if ret_name in working.columns:

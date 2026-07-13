@@ -319,6 +319,58 @@ def test_same_date_same_value_rank_is_deterministic_for_eligible_stocks() -> Non
     assert pd.isna(rows.loc["000003.SZ", "cs_rank_ret_1d"])
 
 
+def test_reversal_ret_2d_matches_negative_two_day_return() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    dates = first_trade_dates(inputs, 4)
+    set_return_sequence(inputs, "000001.SZ", dates[:3], [0.10, -0.05])
+
+    frame = build_feature_frame(inputs, settings, dates[2], dates[2])
+    row = frame.set_index("ts_code").loc["000001.SZ"]
+
+    expected_return = (1.10 * 0.95) - 1.0
+    assert row["reversal_ret_2d"] == pytest.approx(-expected_return)
+
+
+def test_reversal_ret_2d_is_null_during_warmup_and_suspension_gap() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    dates = first_trade_dates(inputs, 4)
+
+    warmup = build_feature_frame(inputs, settings, dates[1], dates[1])
+    assert pd.isna(warmup.set_index("ts_code").loc["000001.SZ", "reversal_ret_2d"])
+
+    suspend_stock_dates(inputs, "000001.SZ", [dates[1]])
+    after_gap = build_feature_frame(inputs, settings, dates[2], dates[2])
+    assert pd.isna(after_gap.set_index("ts_code").loc["000001.SZ", "reversal_ret_2d"])
+
+
+def test_cs_rank_reversal_ret_2d_uses_only_model_universe() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs(days=8)
+    dates = first_trade_dates(inputs, 3)
+    set_return_sequence(inputs, "000001.SZ", dates, [0.10, 0.00])
+    set_return_sequence(inputs, "000002.SZ", dates, [0.00, -0.10])
+    set_return_sequence(inputs, "000003.SZ", dates, [-0.50, -0.50])
+    mark_ineligible(inputs, "000003.SZ", dates[2])
+
+    frame = build_feature_frame(inputs, settings, dates[2], dates[2])
+    rows = frame.set_index("ts_code")
+
+    assert rows.loc["000001.SZ", "cs_rank_reversal_ret_2d"] == pytest.approx(0.5)
+    assert rows.loc["000002.SZ", "cs_rank_reversal_ret_2d"] == pytest.approx(1.0)
+    assert pd.isna(rows.loc["000003.SZ", "cs_rank_reversal_ret_2d"])
+
+
+def test_registered_active_features_include_non_null_reversal_ret_2d_outputs() -> None:
+    settings = load_settings("config/default.yaml")
+    frame = build_feature_frame(feature_fixture_inputs(), settings, "20240520", "20240524")
+
+    assert {spec.name for spec in FEATURE_REGISTRY} <= set(frame.columns)
+    assert frame["reversal_ret_2d"].notna().any()
+    assert frame["cs_rank_reversal_ret_2d"].notna().any()
+
+
 def test_industry_dependent_features_are_not_generated_from_current_industry() -> None:
     settings = load_settings("config/default.yaml")
     inputs = feature_fixture_inputs(days=8)
