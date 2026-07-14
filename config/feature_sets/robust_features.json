@@ -1,0 +1,27 @@
+{
+  "description": "Manually maintained stable subset for Phase 7 Experiment B.",
+  "features": [
+    "market_excess_ret_120d",
+    "turnover_rate",
+    "cs_rank_logret_sum_1d",
+    "cs_rank_market_excess_ret_20d",
+    "amount_cv_60d",
+    "residual_vol_20d",
+    "cs_rank_market_excess_ret_5d",
+    "residual_vol_60d",
+    "dist_low_120d",
+    "amount_cv_20d",
+    "market_excess_ret_5d",
+    "market_excess_ret_60d",
+    "cs_rank_positive_ret_ratio_5d",
+    "market_excess_ret_1d",
+    "logret_sum_120d",
+    "amihud_20d",
+    "cs_rank_ma_ratio_5d",
+    "market_excess_ret_10d",
+    "range_pos_120d",
+    "close_location_value"
+  ],
+  "name": "robust_20_v1",
+  "selection_policy": "Manual; changes require diagnostics evidence and code review."
+}

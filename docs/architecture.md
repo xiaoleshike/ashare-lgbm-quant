@@ -14,8 +14,11 @@ downloads, feature libraries, model training, or backtesting logic.
 - `ashare_quant.data`: future Tushare ingestion, retries, caching, and Parquet writes.
 - `ashare_quant.universe`: point-in-time universe construction and tradability filters.
 - `ashare_quant.features`: feature computation and diagnostics.
+- `ashare_quant.diagnostics`: chronological feature diagnostics, redundancy pruning, validation
+  ablations, and frozen out-of-sample evaluation.
 - `ashare_quant.labels`: forward return and excess-return label generation.
 - `ashare_quant.models`: LightGBM baselines, ranking experiments, and Optuna studies.
+  Phase 7 uses fixed-parameter, date-grouped lambdarank experiments with immutable model manifests.
 - `ashare_quant.validation`: chronological walk-forward validation utilities.
 - `ashare_quant.backtest`: out-of-sample backtesting with realistic execution rules.
 - `ashare_quant.strategy`: portfolio construction and Top-N recommendations.

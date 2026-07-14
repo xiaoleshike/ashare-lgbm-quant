@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import subprocess
@@ -16,9 +17,12 @@ from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
 from ashare_quant.data.ingestion import DataIngestionService, GapReport, build_store
 from ashare_quant.data.quality_logging import append_quality_event, append_validation_results
 from ashare_quant.data.validation import DataValidator, ValidationResult
+from ashare_quant.diagnostics import FeatureDiagnosticPipeline
+from ashare_quant.diagnostics.pipeline import ChronologicalSplit
 from ashare_quant.features import FEATURE_REGISTRY, FeatureBuilder, FeatureStore
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
+from ashare_quant.models import RankerBaselineRunner
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
 from ashare_quant.utils import configure_logging
@@ -46,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_universe_parser(subparsers)
     add_labels_parser(subparsers)
     add_features_parser(subparsers)
+    add_diagnostics_parser(subparsers)
+    add_models_parser(subparsers)
     return parser
 
 
@@ -196,6 +202,57 @@ def add_features_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     status_parser.add_argument("--date", default=None, help="Optional YYYYMMDD date.")
 
     features_subparsers.add_parser("registry", help="Show registered feature metadata summary.")
+
+
+def add_diagnostics_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Add leakage-controlled feature diagnostics commands."""
+
+    parser = subparsers.add_parser(
+        "diagnostics", help="Diagnose and select robust production features."
+    )
+    parser.add_argument(
+        "--processed-root", default=None, help="Override the configured processed data root."
+    )
+    parser.add_argument(
+        "--reports-root", default=None, help="Override the configured reports root."
+    )
+    commands = parser.add_subparsers(dest="diagnostics_command", required=True)
+    run_parser = commands.add_parser(
+        "run", help="Run train/validation diagnostics and one-time frozen test evaluation."
+    )
+    for period in ("train", "validation", "test"):
+        run_parser.add_argument(f"--{period}-start", required=True, help="Inclusive YYYYMMDD date.")
+        run_parser.add_argument(f"--{period}-end", required=True, help="Inclusive YYYYMMDD date.")
+    run_parser.add_argument("--horizon", type=int, default=None, help="Configured label horizon.")
+    commands.add_parser("status", help="Show the latest feature diagnostics report.")
+
+
+def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Add controlled baseline model experiment commands."""
+
+    parser = subparsers.add_parser("models", help="Run controlled baseline model experiments.")
+    parser.add_argument(
+        "--processed-root", default=None, help="Override the configured processed data root."
+    )
+    parser.add_argument(
+        "--output-root", default=None, help="Override the configured model artifact root."
+    )
+    commands = parser.add_subparsers(dest="models_command", required=True)
+    ranker = commands.add_parser(
+        "ranker-baseline", help="Run fixed top-50 and robust-subset lambdarank experiments."
+    )
+    ranker.add_argument(
+        "--recommended-features",
+        default=None,
+        help="Override diagnostics latest.json or recommended_features.json path.",
+    )
+    ranker.add_argument(
+        "--robust-features",
+        default=None,
+        help="Override the manually maintained robust feature-list JSON path.",
+    )
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -562,6 +619,99 @@ def run_features_command(args: argparse.Namespace) -> int:
     raise ValueError(f"Unsupported features command: {args.features_command}")
 
 
+def run_diagnostics_command(args: argparse.Namespace) -> int:
+    """Run one feature diagnostics subcommand."""
+
+    settings = load_settings(args.config)
+    configure_logging(settings.logging.level, settings.logging.json_logs)
+    processed_root = (
+        settings.paths.processed_data if args.processed_root is None else Path(args.processed_root)
+    )
+    reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    latest_path = reports_root / "feature_diagnostics" / "latest.json"
+    if args.diagnostics_command == "status":
+        if not latest_path.exists():
+            print("feature_diagnostics: exists=False")
+            return 0
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        report_dir = Path(str(latest["report_dir"]))
+        manifest_path = report_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        selection = json.loads(
+            (report_dir / "recommended_features.json").read_text(encoding="utf-8")
+        )
+        print(
+            f"feature_diagnostics: exists=True run_id={latest['run_id']} "
+            f"recommended_count={selection['recommended_feature_count']} "
+            f"git_commit={manifest['git_commit']} config_hash={manifest['config_hash']}"
+        )
+        return 0
+    if args.diagnostics_command == "run":
+        split = ChronologicalSplit(
+            train_start=args.train_start,
+            train_end=args.train_end,
+            validation_start=args.validation_start,
+            validation_end=args.validation_end,
+            test_start=args.test_start,
+            test_end=args.test_end,
+        )
+        pipeline = FeatureDiagnosticPipeline(
+            processed_root,
+            reports_root,
+            settings,
+            Path(effective_config_path(args.config)),
+        )
+        try:
+            result = pipeline.run(split, args.horizon)
+        except (DataValidationError, ValueError) as error:
+            print(f"diagnostics run failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"feature_diagnostics: report_dir={result.report_dir} "
+            f"recommended_count={result.recommended_count} train_rows={result.train_rows} "
+            f"validation_rows={result.validation_rows} test_rows={result.test_rows}"
+        )
+        return 0
+    raise ValueError(f"Unsupported diagnostics command: {args.diagnostics_command}")
+
+
+def run_models_command(args: argparse.Namespace) -> int:
+    """Run one model experiment command."""
+
+    settings = load_settings(args.config)
+    configure_logging(settings.logging.level, settings.logging.json_logs)
+    processed_root = (
+        settings.paths.processed_data if args.processed_root is None else Path(args.processed_root)
+    )
+    output_root = settings.paths.models if args.output_root is None else Path(args.output_root)
+    if args.models_command == "ranker-baseline":
+        runner = RankerBaselineRunner(
+            processed_root,
+            output_root,
+            settings,
+            Path(effective_config_path(args.config)),
+        )
+        try:
+            results = runner.run(
+                None
+                if args.recommended_features is None
+                else Path(args.recommended_features),
+                None if args.robust_features is None else Path(args.robust_features),
+            )
+        except (DataValidationError, ValueError) as error:
+            print(f"ranker baseline failed: {error}", file=sys.stderr)
+            return 2
+        for result in results:
+            print(
+                f"{result.experiment_name}: experiment_id={result.experiment_id} "
+                f"features={result.feature_count} "
+                f"validation_rank_ic={result.validation_rank_ic:.6f} "
+                f"test_rank_ic={result.test_rank_ic:.6f} output={result.output_dir}"
+            )
+        return 0
+    raise ValueError(f"Unsupported models command: {args.models_command}")
+
+
 def parse_horizons(value: str) -> tuple[int, ...]:
     """Parse comma-separated positive integer horizons."""
 
@@ -681,4 +831,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_labels_command(args)
     if args.command == "features":
         return run_features_command(args)
+    if args.command == "diagnostics":
+        return run_diagnostics_command(args)
+    if args.command == "models":
+        return run_models_command(args)
     raise ValueError(f"Unsupported command: {args.command}")

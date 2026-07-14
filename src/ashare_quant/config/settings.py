@@ -18,6 +18,7 @@ class PathSettings(BaseModel):
     parquet_store: Path = Path("data/parquet")
     duckdb_path: Path = Path("data/ashare_quant.duckdb")
     reports: Path = Path("reports")
+    models: Path = Path("models")
     data_quality_logs: Path = Path("logs/data_quality")
 
 
@@ -122,6 +123,85 @@ class FeatureSettings(BaseModel):
         return self
 
 
+class DiagnosticSettings(BaseModel):
+    """Leakage-controlled feature diagnostics and selection rules."""
+
+    label_horizon: int = Field(default=5, gt=0)
+    minimum_coverage: float = Field(default=0.4, ge=0.0, le=1.0)
+    minimum_daily_cross_section: int = Field(default=20, ge=3)
+    minimum_ic_days: int = Field(default=60, ge=2)
+    correlation_threshold: float = Field(default=0.85, gt=0.0, lt=1.0)
+    regime_return_threshold: float = Field(default=0.005, ge=0.0)
+    model_sample_rows: int = Field(default=500_000, ge=100)
+    correlation_sample_rows: int = Field(default=200_000, ge=100)
+    candidate_feature_counts: tuple[int, ...] = (30, 50, 70, 100, 130)
+    top_fraction: float = Field(default=0.1, gt=0.0, le=0.5)
+    annualization_days: int = Field(default=252, ge=1)
+    random_seed: int = 42
+    lgbm_num_boost_round: int = Field(default=150, ge=1)
+    lgbm_learning_rate: float = Field(default=0.05, gt=0.0)
+    lgbm_num_leaves: int = Field(default=31, ge=2)
+    lgbm_min_data_in_leaf: int = Field(default=100, ge=1)
+    lgbm_feature_fraction: float = Field(default=0.8, gt=0.0, le=1.0)
+    lgbm_bagging_fraction: float = Field(default=0.8, gt=0.0, le=1.0)
+    lgbm_bagging_freq: int = Field(default=1, ge=0)
+    permutation_repeats: int = Field(default=1, ge=1, le=10)
+
+
+class RankerSettings(BaseModel):
+    """Fixed LightGBM Ranker baseline experiment settings."""
+
+    label_horizon: int = Field(default=5, gt=0)
+    relevance_grades: int = Field(default=5, ge=2, le=31)
+    train_start: str = "20100101"
+    train_end: str = "20191231"
+    validation_start: str = "20200101"
+    validation_end: str = "20221231"
+    test_start: str = "20230101"
+    test_end: str = "20260710"
+    recommended_features_path: Path = Path("reports/feature_diagnostics/latest.json")
+    robust_features_path: Path = Path("config/feature_sets/robust_features.json")
+    n_estimators: int = Field(default=300, ge=1)
+    learning_rate: float = Field(default=0.03, gt=0.0)
+    num_leaves: int = Field(default=31, ge=2)
+    min_child_samples: int = Field(default=200, ge=1)
+    feature_fraction: float = Field(default=0.8, gt=0.0, le=1.0)
+    bagging_fraction: float = Field(default=0.8, gt=0.0, le=1.0)
+    bagging_freq: int = Field(default=1, ge=0)
+    reg_alpha: float = Field(default=0.0, ge=0.0)
+    reg_lambda: float = Field(default=1.0, ge=0.0)
+    random_seed: int = 42
+    minimum_group_size: int = Field(default=20, ge=2)
+    ndcg_at: tuple[int, ...] = (10, 50)
+    portfolio_fractions: tuple[float, ...] = (0.05, 0.10)
+
+    @model_validator(mode="after")
+    def validate_chronological_splits(self) -> RankerSettings:
+        """Require fixed, non-overlapping chronological experiment periods."""
+
+        dates = (
+            self.train_start,
+            self.train_end,
+            self.validation_start,
+            self.validation_end,
+            self.test_start,
+            self.test_end,
+        )
+        if any(len(value) != 8 or not value.isdigit() for value in dates):
+            raise ValueError("ranker split dates must use YYYYMMDD")
+        if not (
+            self.train_start <= self.train_end
+            < self.validation_start
+            <= self.validation_end
+            < self.test_start
+            <= self.test_end
+        ):
+            raise ValueError("ranker train, validation, and test periods must not overlap")
+        if any(value <= 0 or value > 1 for value in self.portfolio_fractions):
+            raise ValueError("ranker portfolio fractions must be in (0, 1]")
+        return self
+
+
 class AppSettings(BaseModel):
     """Top-level validated settings.
 
@@ -139,6 +219,8 @@ class AppSettings(BaseModel):
     universe: UniverseSettings = Field(default_factory=UniverseSettings)
     labels: LabelSettings = Field(default_factory=LabelSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
+    diagnostics: DiagnosticSettings = Field(default_factory=DiagnosticSettings)
+    ranker: RankerSettings = Field(default_factory=RankerSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     tushare_token: SecretStr | None = None
 

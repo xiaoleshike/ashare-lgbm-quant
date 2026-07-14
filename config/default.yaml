@@ -6,6 +6,7 @@ paths:
   parquet_store: data_on_sata/parquet
   duckdb_path: data/ashare_quant.duckdb
   reports: reports
+  models: models
   data_quality_logs: logs/data_quality
 logging:
   level: INFO
@@ -92,6 +93,60 @@ features:
   include_fundamentals: true
   enable_industry_features: false
   enable_unsafe_fina_indicator_features: false
+diagnostics:
+  label_horizon: 5
+  minimum_coverage: 0.4
+  minimum_daily_cross_section: 20
+  minimum_ic_days: 60
+  correlation_threshold: 0.85
+  regime_return_threshold: 0.005
+  model_sample_rows: 500000
+  correlation_sample_rows: 200000
+  candidate_feature_counts:
+    - 30
+    - 50
+    - 70
+    - 100
+    - 130
+  top_fraction: 0.1
+  annualization_days: 252
+  random_seed: 42
+  lgbm_num_boost_round: 150
+  lgbm_learning_rate: 0.05
+  lgbm_num_leaves: 31
+  lgbm_min_data_in_leaf: 100
+  lgbm_feature_fraction: 0.8
+  lgbm_bagging_fraction: 0.8
+  lgbm_bagging_freq: 1
+  permutation_repeats: 1
+ranker:
+  label_horizon: 5
+  relevance_grades: 5
+  train_start: "20100101"
+  train_end: "20191231"
+  validation_start: "20200101"
+  validation_end: "20221231"
+  test_start: "20230101"
+  test_end: "20260710"
+  recommended_features_path: reports/feature_diagnostics/latest.json
+  robust_features_path: config/feature_sets/robust_features.json
+  n_estimators: 300
+  learning_rate: 0.03
+  num_leaves: 31
+  min_child_samples: 200
+  feature_fraction: 0.8
+  bagging_fraction: 0.8
+  bagging_freq: 1
+  reg_alpha: 0.0
+  reg_lambda: 1.0
+  random_seed: 42
+  minimum_group_size: 20
+  ndcg_at:
+    - 10
+    - 50
+  portfolio_fractions:
+    - 0.05
+    - 0.10
 backtest:
   execution: next_open
   initial_cash: 1000000.0
