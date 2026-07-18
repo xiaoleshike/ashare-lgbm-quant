@@ -8,9 +8,10 @@ import logging
 import os
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from ashare_quant.backtest import BacktestRunner
 from ashare_quant.config import load_settings
 from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS
 from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
@@ -22,7 +23,12 @@ from ashare_quant.diagnostics.pipeline import ChronologicalSplit
 from ashare_quant.features import FEATURE_REGISTRY, FeatureBuilder, FeatureStore
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
-from ashare_quant.models import RankerBaselineRunner
+from ashare_quant.models import ProductionRankerTrainer, RankerBaselineRunner
+from ashare_quant.orchestration import (
+    DEFAULT_PRODUCTION_LOCK_PATH,
+    ProductionLockError,
+    run_with_production_lock,
+)
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
 from ashare_quant.utils import configure_logging
@@ -35,6 +41,21 @@ from ashare_quant.utils.manifest import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+def run_production_cli_command(
+    operation: Callable[[], int],
+    *,
+    lock_path: Path = DEFAULT_PRODUCTION_LOCK_PATH,
+    command: str | None = None,
+) -> int:
+    """Run a future production pipeline CLI handler under the repository lock."""
+
+    try:
+        return run_with_production_lock(operation, lock_path=lock_path, command=command)
+    except ProductionLockError as error:
+        print(f"production run blocked: {error}", file=sys.stderr)
+        return 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_features_parser(subparsers)
     add_diagnostics_parser(subparsers)
     add_models_parser(subparsers)
+    add_backtest_parser(subparsers)
     return parser
 
 
@@ -252,6 +274,50 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "--robust-features",
         default=None,
         help="Override the manually maintained robust feature-list JSON path.",
+    )
+    production = commands.add_parser(
+        "train-production", help="Train the final production Ranker on the approved full period."
+    )
+    production.add_argument(
+        "--feature-list",
+        default=None,
+        help="Override the configured frozen robust feature-list JSON path.",
+    )
+
+
+def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Add executable backtest commands."""
+
+    parser = subparsers.add_parser(
+        "backtest", help="Run executable portfolio simulations from model scores."
+    )
+    parser.add_argument(
+        "--storage-root",
+        default=None,
+        help="Override the configured canonical raw Parquet root.",
+    )
+    parser.add_argument(
+        "--processed-root", default=None, help="Override the configured processed data root."
+    )
+    parser.add_argument(
+        "--models-root", default=None, help="Override the configured model artifact root."
+    )
+    parser.add_argument(
+        "--output-root", default=None, help="Override the configured backtest output root."
+    )
+    commands = parser.add_subparsers(dest="backtest_command", required=True)
+    run_parser = commands.add_parser("run", help="Run Top-N executable backtests.")
+    run_parser.add_argument(
+        "--model-dir",
+        default=None,
+        help="Saved Ranker experiment directory. Defaults to latest experiment_b_robust_*.",
+    )
+    run_parser.add_argument("--start-date", required=True, help="Inclusive YYYYMMDD start date.")
+    run_parser.add_argument("--end-date", required=True, help="Inclusive YYYYMMDD end date.")
+    run_parser.add_argument(
+        "--top-n",
+        default=None,
+        help="Comma-separated Top-N variants, default from config such as 10,20,50.",
     )
 
 
@@ -693,9 +759,7 @@ def run_models_command(args: argparse.Namespace) -> int:
         )
         try:
             results = runner.run(
-                None
-                if args.recommended_features is None
-                else Path(args.recommended_features),
+                None if args.recommended_features is None else Path(args.recommended_features),
                 None if args.robust_features is None else Path(args.robust_features),
             )
         except (DataValidationError, ValueError) as error:
@@ -709,7 +773,75 @@ def run_models_command(args: argparse.Namespace) -> int:
                 f"test_rank_ic={result.test_rank_ic:.6f} output={result.output_dir}"
             )
         return 0
+    if args.models_command == "train-production":
+        trainer = ProductionRankerTrainer(
+            processed_root,
+            output_root,
+            settings,
+            Path(effective_config_path(args.config)),
+        )
+        try:
+            production_result = trainer.train(
+                None if args.feature_list is None else Path(args.feature_list)
+            )
+        except (DataValidationError, ValueError) as error:
+            print(f"production training failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"production_ranker: output={production_result.output_dir} "
+            f"features={production_result.feature_count} "
+            f"train_rows={production_result.train_rows} "
+            f"train_groups={production_result.train_groups} "
+            f"train_start={production_result.train_start} train_end={production_result.train_end}"
+        )
+        return 0
     raise ValueError(f"Unsupported models command: {args.models_command}")
+
+
+def run_backtest_command(args: argparse.Namespace) -> int:
+    """Run one executable backtest command."""
+
+    settings = load_settings(args.config)
+    configure_logging(settings.logging.level, settings.logging.json_logs)
+    raw_root = (
+        settings.paths.parquet_store if args.storage_root is None else Path(args.storage_root)
+    )
+    processed_root = (
+        settings.paths.processed_data if args.processed_root is None else Path(args.processed_root)
+    )
+    models_root = settings.paths.models if args.models_root is None else Path(args.models_root)
+    output_root = settings.paths.backtests if args.output_root is None else Path(args.output_root)
+    if args.backtest_command == "run":
+        runner = BacktestRunner(
+            raw_root,
+            processed_root,
+            models_root,
+            output_root,
+            settings,
+            Path(effective_config_path(args.config)),
+        )
+        try:
+            result = runner.run(
+                model_dir=None if args.model_dir is None else Path(args.model_dir),
+                start_date=args.start_date,
+                end_date=args.end_date,
+                top_n=None if args.top_n is None else parse_top_n(args.top_n),
+            )
+        except (DataValidationError, ValueError) as error:
+            print(f"backtest run failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"backtest: experiment_id={result.experiment_id} output={result.output_dir} "
+            f"top_n={','.join(str(value) for value in result.top_n)}"
+        )
+        for top_n, metrics in result.metrics.items():
+            print(
+                f"top{top_n}: annual_return={metrics.get('annual_return')} "
+                f"sharpe={metrics.get('sharpe')} "
+                f"max_drawdown={metrics.get('maximum_drawdown')}"
+            )
+        return 0
+    raise ValueError(f"Unsupported backtest command: {args.backtest_command}")
 
 
 def parse_horizons(value: str) -> tuple[int, ...]:
@@ -719,6 +851,17 @@ def parse_horizons(value: str) -> tuple[int, ...]:
     if not horizons or any(horizon <= 0 for horizon in horizons):
         raise ValueError(f"horizons must be positive integers: {value}")
     return horizons
+
+
+def parse_top_n(value: str) -> tuple[int, ...]:
+    """Parse comma-separated positive Top-N values."""
+
+    values = tuple(int(part.strip()) for part in value.split(",") if part.strip())
+    if not values or any(item <= 0 for item in values):
+        raise ValueError(f"top-n values must be positive integers: {value}")
+    if len(set(values)) != len(values):
+        raise ValueError(f"top-n values must not contain duplicates: {value}")
+    return values
 
 
 def launch_baostock_previous_day_check(config_path: str | None, log_root: object) -> None:
@@ -835,4 +978,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_diagnostics_command(args)
     if args.command == "models":
         return run_models_command(args)
+    if args.command == "backtest":
+        return run_backtest_command(args)
     raise ValueError(f"Unsupported command: {args.command}")

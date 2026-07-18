@@ -19,6 +19,7 @@ class PathSettings(BaseModel):
     duckdb_path: Path = Path("data/ashare_quant.duckdb")
     reports: Path = Path("reports")
     models: Path = Path("models")
+    backtests: Path = Path("backtests")
     data_quality_logs: Path = Path("logs/data_quality")
 
 
@@ -53,12 +54,26 @@ class DataSettings(BaseModel):
 
 
 class BacktestSettings(BaseModel):
-    """Default assumptions for later out-of-sample backtests."""
+    """Executable portfolio backtest assumptions."""
 
     execution: Literal["next_open", "next_vwap"] = "next_open"
     initial_cash: float = Field(default=1_000_000.0, gt=0)
-    commission_bps: float = Field(default=3.0, ge=0)
-    slippage_bps: float = Field(default=5.0, ge=0)
+    top_n: tuple[PositiveInt, ...] = (10, 20, 50)
+    holding_period_days: PositiveInt = 5
+    commission: float = Field(default=0.00025, ge=0)
+    stamp_duty: float = Field(default=0.001, ge=0)
+    slippage: float = Field(default=0.0005, ge=0)
+    benchmark_index_code: str = "000300.SH"
+    annualization_days: PositiveInt = 252
+    sell_delay_max_days: int = Field(default=20, ge=0)
+
+    @model_validator(mode="after")
+    def validate_backtest_settings(self) -> BacktestSettings:
+        """Require supported execution and non-duplicated Top-N values."""
+
+        if len(set(self.top_n)) != len(self.top_n):
+            raise ValueError("backtest.top_n must not contain duplicates")
+        return self
 
 
 class UniverseSettings(BaseModel):
@@ -190,7 +205,8 @@ class RankerSettings(BaseModel):
         if any(len(value) != 8 or not value.isdigit() for value in dates):
             raise ValueError("ranker split dates must use YYYYMMDD")
         if not (
-            self.train_start <= self.train_end
+            self.train_start
+            <= self.train_end
             < self.validation_start
             <= self.validation_end
             < self.test_start
@@ -199,6 +215,29 @@ class RankerSettings(BaseModel):
             raise ValueError("ranker train, validation, and test periods must not overlap")
         if any(value <= 0 or value > 1 for value in self.portfolio_fractions):
             raise ValueError("ranker portfolio fractions must be in (0, 1]")
+        return self
+
+
+class ProductionModelSettings(BaseModel):
+    """Final production Ranker training settings after validation approval."""
+
+    train_start: str = "20100101"
+    train_end: str = "20260710"
+    feature_list_path: Path = Path("config/feature_sets/robust_features.json")
+    output_dir_name: str = "production"
+
+    @model_validator(mode="after")
+    def validate_training_range(self) -> ProductionModelSettings:
+        """Require one chronological production training period."""
+
+        if any(
+            len(value) != 8 or not value.isdigit() for value in (self.train_start, self.train_end)
+        ):
+            raise ValueError("production model train dates must use YYYYMMDD")
+        if self.train_start > self.train_end:
+            raise ValueError("production model train_start must be <= train_end")
+        if not self.output_dir_name or "/" in self.output_dir_name:
+            raise ValueError("production model output_dir_name must be a simple directory name")
         return self
 
 
@@ -221,6 +260,7 @@ class AppSettings(BaseModel):
     features: FeatureSettings = Field(default_factory=FeatureSettings)
     diagnostics: DiagnosticSettings = Field(default_factory=DiagnosticSettings)
     ranker: RankerSettings = Field(default_factory=RankerSettings)
+    production_model: ProductionModelSettings = Field(default_factory=ProductionModelSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     tushare_token: SecretStr | None = None
 

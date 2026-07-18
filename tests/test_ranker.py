@@ -15,6 +15,7 @@ from ashare_quant.models.feature_lists import (
     load_recommended_features,
     load_robust_features,
 )
+from ashare_quant.models.production import ProductionRankerTrainer
 from ashare_quant.models.ranker import RankerBaselineRunner
 from ashare_quant.models.ranker_data import RankerDataLoader, RankerDataset
 from ashare_quant.models.ranker_metrics import evaluate_ranker, ndcg
@@ -140,6 +141,102 @@ def test_ranker_runner_writes_two_complete_experiments(tmp_path: Path) -> None:
         assert manifest["train_start"] == "20200102"
         assert manifest["train_end"] == "20200103"
         assert manifest["feature_list_hash"]
+
+
+def test_production_trainer_uses_all_configured_dates_and_frozen_features(tmp_path: Path) -> None:
+    all_features = tuple(spec.name for spec in FEATURE_REGISTRY[:8])
+    robust_features = all_features[:4]
+    processed = tmp_path / "processed"
+    output = tmp_path / "models"
+    robust_path = tmp_path / "robust_features.json"
+    config_path = tmp_path / "config.yaml"
+    write_ranker_fixture(processed, all_features)
+    robust_path.write_text(
+        json.dumps({"name": "production_robust", "features": list(robust_features)}),
+        encoding="utf-8",
+    )
+    config_path.write_text("project_name: production-test\n", encoding="utf-8")
+    settings = AppSettings(
+        ranker=RankerSettings(
+            n_estimators=3,
+            num_leaves=3,
+            min_child_samples=2,
+            feature_fraction=1.0,
+            bagging_fraction=1.0,
+            minimum_group_size=3,
+        ),
+        production_model={
+            "train_start": "20200102",
+            "train_end": "20200107",
+            "feature_list_path": robust_path,
+        },
+    )
+
+    result = ProductionRankerTrainer(processed, output, settings, config_path).train()
+
+    assert result.output_dir == output / "production"
+    assert result.train_start == "20200102"
+    assert result.train_end == "20200107"
+    assert result.train_groups == 6
+    feature_payload = json.loads((result.output_dir / "feature_list.json").read_text("utf-8"))
+    metrics = json.loads((result.output_dir / "metrics.json").read_text("utf-8"))
+    manifest = json.loads((result.output_dir / "manifest.json").read_text("utf-8"))
+    assert tuple(feature_payload["features"]) == robust_features
+    assert feature_payload["feature_hash"] == feature_list_hash(robust_features)
+    assert metrics["train_min_date"] == "20200102"
+    assert metrics["train_max_date"] == "20200107"
+    assert metrics["unique_train_dates"] == 6
+    assert "validation" not in metrics
+    assert "test" not in metrics
+    assert manifest["training_start"] == "20200102"
+    assert manifest["training_end"] == "20200107"
+    assert "validation_start" not in manifest
+    assert "test_start" not in manifest
+
+
+def test_production_training_replaces_artifacts_reproducibly(tmp_path: Path) -> None:
+    all_features = tuple(spec.name for spec in FEATURE_REGISTRY[:6])
+    robust_features = all_features[:3]
+    processed = tmp_path / "processed"
+    output = tmp_path / "models"
+    robust_path = tmp_path / "robust_features.json"
+    config_path = tmp_path / "config.yaml"
+    write_ranker_fixture(processed, all_features)
+    robust_path.write_text(
+        json.dumps({"name": "production_robust", "features": list(robust_features)}),
+        encoding="utf-8",
+    )
+    config_path.write_text("project_name: production-test\n", encoding="utf-8")
+    settings = AppSettings(
+        ranker=RankerSettings(
+            n_estimators=3,
+            num_leaves=3,
+            min_child_samples=2,
+            feature_fraction=1.0,
+            bagging_fraction=1.0,
+            minimum_group_size=3,
+        ),
+        production_model={
+            "train_start": "20200102",
+            "train_end": "20200107",
+            "feature_list_path": robust_path,
+        },
+    )
+    trainer = ProductionRankerTrainer(processed, output, settings, config_path)
+
+    first = trainer.train()
+    first_feature_list = (first.output_dir / "feature_list.json").read_text("utf-8")
+    first_metrics = json.loads((first.output_dir / "metrics.json").read_text("utf-8"))
+    second = trainer.train()
+    second_feature_list = (second.output_dir / "feature_list.json").read_text("utf-8")
+    second_metrics = json.loads((second.output_dir / "metrics.json").read_text("utf-8"))
+
+    assert first.output_dir == second.output_dir == output / "production"
+    assert first_feature_list == second_feature_list
+    assert first_metrics["train_rows"] == second_metrics["train_rows"]
+    assert first_metrics["train_groups"] == second_metrics["train_groups"]
+    assert first_metrics["feature_importance"] == second_metrics["feature_importance"]
+    assert (output / "production" / "model.txt").exists()
 
 
 def write_ranker_fixture(processed: Path, feature_names: tuple[str, ...]) -> None:

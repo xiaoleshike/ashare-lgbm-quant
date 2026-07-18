@@ -22,6 +22,7 @@ dependencies = [
     "pydantic>=2.7",
     "python-dotenv>=1.0",
     "PyYAML>=6.0",
+    "scikit-learn>=1.5",
     "tushare>=1.4",
 ]
 

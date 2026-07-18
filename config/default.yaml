@@ -7,6 +7,7 @@ paths:
   duckdb_path: data/ashare_quant.duckdb
   reports: reports
   models: models
+  backtests: backtests
   data_quality_logs: logs/data_quality
 logging:
   level: INFO
@@ -147,8 +148,22 @@ ranker:
   portfolio_fractions:
     - 0.05
     - 0.10
+production_model:
+  train_start: "20100101"
+  train_end: "20260710"
+  feature_list_path: config/feature_sets/robust_features.json
+  output_dir_name: production
 backtest:
   execution: next_open
   initial_cash: 1000000.0
-  commission_bps: 3.0
-  slippage_bps: 5.0
+  top_n:
+    - 10
+    - 20
+    - 50
+  holding_period_days: 5
+  commission: 0.00025
+  stamp_duty: 0.001
+  slippage: 0.0005
+  benchmark_index_code: 000300.SH
+  annualization_days: 252
+  sell_delay_max_days: 20

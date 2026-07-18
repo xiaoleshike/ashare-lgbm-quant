@@ -48,3 +48,58 @@ ashare-quant data init --dataset income --dataset balancesheet --start-date 2020
 
 Use `--all-datasets` only when you intentionally want every configured Tushare
 endpoint, including ETF, option, financial, macro, reference, and special datasets.
+
+## Feature diagnostics
+
+After rebuilding and validating universe, labels, and features, run leakage-controlled diagnostics
+with explicit chronological periods:
+
+```bash
+ashare-quant --config config/default.yaml diagnostics run \
+  --train-start 20100101 --train-end 20191231 \
+  --validation-start 20200101 --validation-end 20221231 \
+  --test-start 20230101 --test-end 20260710 --horizon 5
+ashare-quant --config config/default.yaml diagnostics status
+```
+
+Reports are written under `reports/feature_diagnostics/`. See
+`docs/feature_diagnostics.md` for metric definitions and the test-period isolation contract.
+
+## Ranker baseline
+
+Run the fixed Experiment A top-50 and Experiment B robust-subset baselines after diagnostics:
+
+```bash
+ashare-quant --config config/default.yaml models ranker-baseline
+```
+
+Artifacts are written to `models/<experiment-id>/`. These experiments report ranking diagnostics
+and equal-weighted top-bucket forward returns; they are not transaction-cost or execution-aware
+backtests. See `docs/ranker_baseline.md` for target and split semantics.
+
+## Production model
+
+After selecting the robust baseline, train the final fixed-parameter Ranker on the full approved
+history:
+
+```bash
+ashare-quant --config config/default.yaml models train-production
+```
+
+The production artifact is written to `models/production/` and uses
+`config/feature_sets/robust_features.json`. It does not run validation/test evaluation. See
+`docs/production_model.md`.
+
+## Executable backtest
+
+Run the Phase 8 portfolio simulation from a saved Ranker model:
+
+```bash
+ashare-quant --config config/default.yaml backtest run \
+  --model-dir models/<experiment-id> \
+  --start-date 20230101 --end-date 20260710
+```
+
+Outputs are written to `backtests/<experiment-id>_backtest_<timestamp>/`. The default simulation
+uses next-day open execution, 5-trading-day holding periods, Top-10/20/50 selections, commission,
+stamp duty, slippage, and suspension/limit-up/limit-down constraints. See `docs/backtest.md`.

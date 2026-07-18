@@ -1,0 +1,44 @@
+{
+  "10": {
+    "annual_return": 2.797181696569145,
+    "annual_volatility": 0.7904720002437656,
+    "average_holding_period": 1098.0,
+    "average_turnover": 0.39969752800378183,
+    "days": 730,
+    "excess_return_vs_benchmark": 4.565226956729357,
+    "filled_trades": 6314,
+    "maximum_drawdown": -0.4063642935717572,
+    "rejected_trades": 2181,
+    "sharpe": 3.5386221089507925,
+    "total_return": 46.70879401263387,
+    "win_rate": 0.5465753424657535
+  },
+  "20": {
+    "annual_return": 1.6416602217144156,
+    "annual_volatility": 0.5641817973349119,
+    "average_holding_period": 1581.0,
+    "average_turnover": 0.40064695387274574,
+    "days": 730,
+    "excess_return_vs_benchmark": 3.0821749296989083,
+    "filled_trades": 11333,
+    "maximum_drawdown": -0.32396539033145144,
+    "rejected_trades": 2730,
+    "sharpe": 2.9098071392400606,
+    "total_return": 15.676460619325397,
+    "win_rate": 0.5561643835616439
+  },
+  "50": {
+    "annual_return": 0.7798452963116729,
+    "annual_volatility": 0.516120888423532,
+    "average_holding_period": 2572.0,
+    "average_turnover": 0.400820348165069,
+    "days": 730,
+    "excess_return_vs_benchmark": 1.8767579940252643,
+    "filled_trades": 26338,
+    "maximum_drawdown": -0.43924371619072,
+    "rejected_trades": 2979,
+    "sharpe": 1.5109741027798258,
+    "total_return": 4.312680220319468,
+    "win_rate": 0.563013698630137
+  }
+}

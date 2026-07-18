@@ -1,0 +1,27 @@
+{
+  "artifact_name": "ranker_executable_backtest",
+  "benchmark_index_code": "000300.SH",
+  "commission": 0.00025,
+  "completed_at": "2026-07-18T16:35:11.576369+00:00",
+  "config_hash": "687b2f2e6721479eb0143778569354bb934026f1540078c307aaef966e68ff9d",
+  "config_path": "config/default.yaml",
+  "end_date": "20260717",
+  "execution": "signal_close_t_next_open",
+  "experiment_id": "production_backtest_20260718T163510869569Z",
+  "feature_count": 20,
+  "feature_list_hash": "b0f86a6bbba82d29b599b4780c96623db5ca5b953939d40eb1d6df52226442cb",
+  "git_commit": "c180d835f09d9f1635d54af2ed8b4ecb7475e08c",
+  "git_dirty": true,
+  "holding_period_days": 5,
+  "model_dir": "models/production",
+  "model_manifest": null,
+  "schema_version": 1,
+  "slippage": 0.0005,
+  "stamp_duty": 0.001,
+  "start_date": "20230713",
+  "top_n": [
+    10,
+    20,
+    50
+  ]
+}
