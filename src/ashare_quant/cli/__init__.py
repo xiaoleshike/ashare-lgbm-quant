@@ -29,7 +29,7 @@ from ashare_quant.features import (
 )
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
-from ashare_quant.models import ProductionRankerTrainer, RankerBaselineRunner
+from ashare_quant.models import ModelRegistry, ProductionRankerTrainer, RankerBaselineRunner
 from ashare_quant.orchestration import (
     DEFAULT_PRODUCTION_LOCK_PATH,
     DailyPipelineOrchestrator,
@@ -272,7 +272,7 @@ def add_diagnostics_parser(
 
 
 def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Add controlled baseline model experiment commands."""
+    """Add controlled model experiment and lifecycle commands."""
 
     parser = subparsers.add_parser("models", help="Run controlled baseline model experiments.")
     parser.add_argument(
@@ -303,6 +303,12 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         default=None,
         help="Override the configured frozen robust feature-list JSON path.",
     )
+    commands.add_parser("list", help="List registered models, including retired models.")
+    commands.add_parser("champion", help="Show the current production champion model.")
+    promote = commands.add_parser("promote", help="Explicitly promote a validated candidate.")
+    promote.add_argument("model_id", help="Registered model identifier.")
+    retire = commands.add_parser("retire", help="Retire a registered model.")
+    retire.add_argument("model_id", help="Registered model identifier.")
 
 
 def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -801,6 +807,42 @@ def run_models_command(args: argparse.Namespace) -> int:
         settings.paths.processed_data if args.processed_root is None else Path(args.processed_root)
     )
     output_root = settings.paths.models if args.output_root is None else Path(args.output_root)
+    if args.models_command in {"list", "champion", "promote", "retire"}:
+        registry = ModelRegistry(output_root)
+        try:
+            if args.models_command == "list":
+                print("model_id\tstatus\tcreated_time\ttest_rank_ic\ttest_sharpe\tfeature_count")
+                for model in registry.list_models():
+                    print(
+                        f"{model.model_id}\t{model.status}\t{model.creation_time}\t"
+                        f"{_format_registry_metric(model.test_metrics, 'rank_ic')}\t"
+                        f"{_format_registry_metric(model.test_metrics, 'sharpe')}\t"
+                        f"{model.feature_count}"
+                    )
+                return 0
+            if args.models_command == "champion":
+                champion = registry.get_champion()
+                if champion is None:
+                    print("model_champion: none")
+                else:
+                    print(
+                        f"model_champion: model_id={champion.model_id} "
+                        f"model_type={champion.model_type} artifact_path={champion.artifact_path}"
+                    )
+                return 0
+            if args.models_command == "promote":
+                promoted = registry.promote_model(args.model_id)
+                print(
+                    f"model_promoted: model_id={promoted.model_id} "
+                    f"model_type={promoted.model_type} status={promoted.status}"
+                )
+                return 0
+            retired = registry.retire_model(args.model_id)
+            print(f"model_retired: model_id={retired.model_id} status={retired.status}")
+            return 0
+        except (DataValidationError, OSError, ProductionLockError) as error:
+            print(f"model registry operation failed: {error}", file=sys.stderr)
+            return 2
     if args.models_command == "ranker-baseline":
         runner = RankerBaselineRunner(
             processed_root,
@@ -847,6 +889,11 @@ def run_models_command(args: argparse.Namespace) -> int:
         )
         return 0
     raise ValueError(f"Unsupported models command: {args.models_command}")
+
+
+def _format_registry_metric(metrics: dict[str, object], name: str) -> str:
+    value = metrics.get(name)
+    return "-" if not isinstance(value, (int, float)) else f"{float(value):.6f}"
 
 
 def run_backtest_command(args: argparse.Namespace) -> int:
