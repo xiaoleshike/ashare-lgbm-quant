@@ -260,6 +260,29 @@ def test_data_gaps_cli_reports_missing_trading_days(tmp_path, capsys) -> None:
     assert "first=20240103" in captured.out
 
 
+def test_gap_status_distinguishes_repairable_and_pre_inception_dates(capsys) -> None:
+    from ashare_quant.cli import print_gap_reports
+    from ashare_quant.data.ingestion import GapReport
+
+    print_gap_reports(
+        [
+            GapReport(
+                dataset="index_daily",
+                start_date="20100104",
+                end_date="20100601",
+                expected_dates=2,
+                missing_dates=("20100601",),
+                missing_by_entity={"399006.SZ": ("20100601",)},
+                excluded_before_inception_by_entity={"399006.SZ": ("20100104", "20100528")},
+            )
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "missing=1 first=20100601" in output
+    assert "excluded_before_inception=2 first=20100104,20100528" in output
+
+
 def test_universe_build_cli_with_fixture_raw_store(tmp_path, monkeypatch, capsys) -> None:
     import pandas as pd
 
@@ -298,6 +321,60 @@ def test_universe_build_cli_with_fixture_raw_store(tmp_path, monkeypatch, capsys
         output_root / "universe_daily" / "year=2024" / "month=01" / "data.parquet"
     )
     assert len(stored) == 8
+
+
+def test_universe_incremental_manifest_describes_complete_canonical_store(
+    tmp_path, monkeypatch
+) -> None:
+    import json
+
+    from ashare_quant.data.datasets import get_dataset_spec
+    from ashare_quant.data.storage import ParquetDataStore
+    from test_universe import fixture_inputs
+
+    monkeypatch.setenv("TUSHARE_TOKEN", "hidden-token")
+    raw_root = tmp_path / "raw"
+    output_root = tmp_path / "processed"
+    raw_store = ParquetDataStore(raw_root)
+    for name, frame in fixture_inputs().items():
+        raw_store.write(get_dataset_spec(name), frame)
+
+    for trade_date in ("20240104", "20240105", "20240105"):
+        exit_code = main(
+            [
+                "--config",
+                "config/default.yaml",
+                "universe",
+                "--storage-root",
+                str(raw_root),
+                "--output-root",
+                str(output_root),
+                "build",
+                "--start-date",
+                trade_date,
+                "--end-date",
+                trade_date,
+            ]
+        )
+        assert exit_code == 0
+
+    manifest = json.loads(
+        (output_root / "universe_daily" / "_manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["row_count"] == 16
+    assert manifest["canonical_artifact"] == {
+        "row_count": 16,
+        "partition_count": 1,
+        "min_date": "20240104",
+        "max_date": "20240105",
+    }
+    assert manifest["build_scope"] == {
+        "build_start_date": "20240105",
+        "build_end_date": "20240105",
+        "rows_written_or_replaced": 8,
+        "partitions_changed": 1,
+    }
 
 
 def test_labels_build_cli_with_fixture_data(tmp_path, monkeypatch, capsys) -> None:
@@ -346,9 +423,7 @@ def test_labels_build_cli_with_fixture_data(tmp_path, monkeypatch, capsys) -> No
     )
     assert len(stored) == 7
     manifest = json.loads(
-        (
-            processed_root / "labels_forward" / "_manifest.json"
-        ).read_text(encoding="utf-8")
+        (processed_root / "labels_forward" / "_manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["artifact_name"] == "labels_forward"
     assert manifest["label_horizons"] == [3]

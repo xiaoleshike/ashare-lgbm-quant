@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -43,6 +44,7 @@ class DataSettings(BaseModel):
     default_start_date: str = "20100101"
     calendar_exchange: str = "SSE"
     index_codes: tuple[str, ...] = ("000001.SH", "000300.SH", "399001.SZ", "399006.SZ")
+    index_first_available_dates: dict[str, str] = Field(default_factory=dict)
     fund_markets: tuple[str, ...] = ("E",)
     hs_types: tuple[str, ...] = ("SH", "SZ")
     stock_list_statuses: tuple[str, ...] = ("L", "D", "P")
@@ -51,6 +53,29 @@ class DataSettings(BaseModel):
     finance_revision_lookback_days: int = Field(default=550, ge=1)
     snapshot_refresh_policy: Literal["manual", "always", "ttl_days"] = "manual"
     snapshot_refresh_ttl_days: int = Field(default=7, ge=1)
+
+    @model_validator(mode="after")
+    def validate_index_first_available_dates(self) -> DataSettings:
+        """Validate optional per-index inception boundaries used by gap detection."""
+
+        unknown_codes = sorted(set(self.index_first_available_dates) - set(self.index_codes))
+        if unknown_codes:
+            raise ValueError(
+                "data.index_first_available_dates contains codes not present in "
+                f"data.index_codes: {unknown_codes}"
+            )
+        for code, value in self.index_first_available_dates.items():
+            try:
+                parsed = datetime.strptime(value, "%Y%m%d")
+            except ValueError as error:
+                raise ValueError(
+                    f"data.index_first_available_dates[{code}] must be YYYYMMDD: {value}"
+                ) from error
+            if parsed.strftime("%Y%m%d") != value:
+                raise ValueError(
+                    f"data.index_first_available_dates[{code}] must be YYYYMMDD: {value}"
+                )
+        return self
 
 
 class BacktestSettings(BaseModel):
@@ -241,6 +266,79 @@ class ProductionModelSettings(BaseModel):
         return self
 
 
+class ProductionFreshnessSettings(BaseModel):
+    """Session-aware raw and processed artifact readiness thresholds."""
+
+    hard_datasets: tuple[str, ...] = (
+        "daily",
+        "adj_factor",
+        "daily_basic",
+        "stk_limit",
+        "index_daily",
+    )
+    legitimate_empty_datasets: tuple[str, ...] = ("suspend_d",)
+    soft_dataset_max_lag_calendar_days: dict[str, int] = Field(
+        default_factory=lambda: {
+            "income": 550,
+            "balancesheet": 550,
+            "cashflow": 550,
+            "fina_indicator": 550,
+        }
+    )
+    event_datasets: tuple[str, ...] = ("namechange",)
+    snapshot_max_age_days: dict[str, int] = Field(default_factory=lambda: {"stock_basic": 14})
+    required_index_codes: tuple[str, ...] = ()
+    baseline_sessions: int = Field(default=20, ge=2)
+    minimum_baseline_sessions: int = Field(default=5, ge=1)
+    moderate_count_ratio_low: float = Field(default=0.80, gt=0)
+    moderate_count_ratio_high: float = Field(default=1.20, gt=0)
+    severe_count_ratio_low: float = Field(default=0.65, gt=0)
+    severe_count_ratio_high: float = Field(default=1.35, gt=0)
+    minimum_daily_rows: int = Field(default=1000, ge=1)
+    minimum_universe_rows: int = Field(default=1000, ge=1)
+    minimum_base_universe_rows: int = Field(default=500, ge=1)
+    minimum_model_universe_rows: int = Field(default=100, ge=1)
+    required_feature_list_path: Path | None = None
+    hard_required_features: tuple[str, ...] = ()
+    warning_features: tuple[str, ...] = (
+        "ret_1d",
+        "market_excess_ret_5d",
+        "turnover_rate",
+    )
+    structurally_sparse_features: tuple[str, ...] = (
+        "current_ratio",
+        "debt_to_assets",
+        "ocf_to_profit",
+        "dv_ttm",
+    )
+    hard_feature_missing_ratio: float = Field(default=0.20, ge=0, le=1)
+    warning_feature_missing_ratio: float = Field(default=0.50, ge=0, le=1)
+    git_dirty_policy: Literal["ignore", "warning", "fail"] = "warning"
+
+    @model_validator(mode="after")
+    def validate_threshold_order(self) -> ProductionFreshnessSettings:
+        """Require warning bands to sit inside hard-failure bands."""
+
+        if not (
+            self.severe_count_ratio_low
+            <= self.moderate_count_ratio_low
+            <= self.moderate_count_ratio_high
+            <= self.severe_count_ratio_high
+        ):
+            raise ValueError("production freshness count-ratio thresholds are inconsistent")
+        if self.minimum_baseline_sessions > self.baseline_sessions:
+            raise ValueError(
+                "production freshness minimum_baseline_sessions must not exceed baseline_sessions"
+            )
+        return self
+
+
+class ProductionSettings(BaseModel):
+    """Single-host production orchestration settings."""
+
+    freshness: ProductionFreshnessSettings = Field(default_factory=ProductionFreshnessSettings)
+
+
 class AppSettings(BaseModel):
     """Top-level validated settings.
 
@@ -261,6 +359,7 @@ class AppSettings(BaseModel):
     diagnostics: DiagnosticSettings = Field(default_factory=DiagnosticSettings)
     ranker: RankerSettings = Field(default_factory=RankerSettings)
     production_model: ProductionModelSettings = Field(default_factory=ProductionModelSettings)
+    production: ProductionSettings = Field(default_factory=ProductionSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     tushare_token: SecretStr | None = None
 

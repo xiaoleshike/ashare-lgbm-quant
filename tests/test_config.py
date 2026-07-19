@@ -17,6 +17,10 @@ def test_load_settings_reads_yaml_and_env_token(monkeypatch: pytest.MonkeyPatch)
     assert settings.data.endpoint_rate_limits_per_minute["cyq_chips"] == 200
     assert settings.data.snapshot_refresh_policy == "manual"
     assert settings.data.snapshot_refresh_ttl_days == 7
+    assert settings.data.index_first_available_dates["399006.SZ"] == "20100531"
+    assert settings.production.freshness.baseline_sessions == 20
+    assert settings.production.freshness.git_dirty_policy == "warning"
+    assert settings.production.freshness.hard_required_features == ()
 
 
 def test_load_settings_does_not_require_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,6 +37,41 @@ def test_invalid_config_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError):
         load_settings(config_file)
+
+
+def test_invalid_freshness_threshold_order_is_rejected(tmp_path: Path) -> None:
+    config_file = tmp_path / "invalid_freshness.yaml"
+    config_file.write_text(
+        "production:\n  freshness:\n"
+        "    severe_count_ratio_low: 0.9\n"
+        "    moderate_count_ratio_low: 0.8\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="count-ratio thresholds"):
+        load_settings(config_file)
+
+
+def test_index_inception_boundary_requires_configured_code_and_valid_date(
+    tmp_path: Path,
+) -> None:
+    unknown_code = tmp_path / "unknown_index.yaml"
+    unknown_code.write_text(
+        "data:\n  index_codes: [000300.SH]\n"
+        "  index_first_available_dates:\n    399006.SZ: '20100531'\n",
+        encoding="utf-8",
+    )
+    invalid_date = tmp_path / "invalid_date.yaml"
+    invalid_date.write_text(
+        "data:\n  index_codes: [399006.SZ]\n"
+        "  index_first_available_dates:\n    399006.SZ: '201005'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="not present in data.index_codes"):
+        load_settings(unknown_code)
+    with pytest.raises(ValidationError, match="must be YYYYMMDD"):
+        load_settings(invalid_date)
 
 
 def test_universe_settings_are_loaded_from_default_config() -> None:

@@ -26,6 +26,7 @@ class UniverseBuildResult:
     end_date: str
     rows_written: int
     rows_built: int
+    partitions_changed: int
     validation: UniverseValidationResult
 
 
@@ -50,18 +51,18 @@ class UniverseBuilder:
         rows_written = 0
         errors: list[str] = []
         warnings: list[str] = []
+        changed_partitions: set[str] = set()
         for chunk_start, chunk_end in year_date_ranges(
             open_trade_dates(inputs["trade_cal"], start_date, end_date)
         ):
-            frame = build_universe_frame(
-                inputs, self._settings.universe, chunk_start, chunk_end
-            )
+            frame = build_universe_frame(inputs, self._settings.universe, chunk_start, chunk_end)
             rows_built += len(frame)
             validation = validate_universe_frame(frame)
             errors.extend(validation.errors)
             warnings.extend(validation.warnings)
             if not validation.ok:
                 continue
+            changed_partitions.update(frame["trade_date"].astype(str).str[:6].unique())
             rows_written += self._universe_store.write(frame)
         validation = UniverseValidationResult(
             ok=not errors,
@@ -73,6 +74,7 @@ class UniverseBuilder:
             end_date=end_date,
             rows_written=rows_written,
             rows_built=rows_built,
+            partitions_changed=len(changed_partitions),
             validation=validation,
         )
 

@@ -28,6 +28,7 @@ class FeatureBuildResult:
     end_date: str
     rows_built: int
     rows_written: int
+    partitions_changed: int
     feature_count: int
     elapsed_seconds: float
     missing_value_stats: dict[str, float]
@@ -56,10 +57,13 @@ class FeatureBuilder:
         rows_written = 0
         missing_counts: dict[str, int] = {}
         observed_counts: dict[str, int] = {}
+        changed_partitions: set[str] = set()
         feature_count = len(registered_feature_names(FEATURE_REGISTRY))
         for chunk_start, chunk_end in month_date_ranges(start_date, end_date):
             frame = self.preview(chunk_start, chunk_end)
             rows_built += len(frame)
+            if not frame.empty:
+                changed_partitions.update(frame["trade_date"].astype(str).str[:6].unique())
             rows_written += self._feature_store.write(frame)
             feature_columns = feature_column_names(frame)
             feature_count = len(feature_columns) if feature_columns else feature_count
@@ -79,6 +83,7 @@ class FeatureBuilder:
             end_date=end_date,
             rows_built=rows_built,
             rows_written=rows_written,
+            partitions_changed=len(changed_partitions),
             feature_count=feature_count,
             elapsed_seconds=elapsed,
             missing_value_stats=missing_stats,

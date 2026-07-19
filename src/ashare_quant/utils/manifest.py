@@ -11,10 +11,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
+
 from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.storage import ParquetDataStore
 
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +29,17 @@ class ManifestStatus:
     current_git_revision: str | None = None
     config_hash_match: bool | None = None
     reason: str = "missing"
+
+
+@dataclass(frozen=True, slots=True)
+class ParquetArtifactStatistics:
+    """Exact canonical statistics derived cheaply from Parquet metadata."""
+
+    row_count: int
+    partition_count: int
+    min_date: str | None
+    max_date: str | None
+    column_names: tuple[str, ...]
 
 
 def utc_now_iso() -> str:
@@ -45,11 +58,29 @@ def write_build_manifest(
     end_date: str,
     row_count: int,
     source_fingerprints: dict[str, dict[str, Any]],
+    canonical_statistics: ParquetArtifactStatistics | None = None,
+    partitions_changed: int | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically write one processed artifact provenance manifest."""
 
     git_info = current_git_info()
+    build_scope = {
+        "build_start_date": start_date,
+        "build_end_date": end_date,
+        "rows_written_or_replaced": row_count,
+        "partitions_changed": partitions_changed,
+    }
+    canonical_artifact: dict[str, Any] | None = None
+    canonical_row_count = row_count
+    if canonical_statistics is not None:
+        canonical_row_count = canonical_statistics.row_count
+        canonical_artifact = {
+            "row_count": canonical_statistics.row_count,
+            "partition_count": canonical_statistics.partition_count,
+            "min_date": canonical_statistics.min_date,
+            "max_date": canonical_statistics.max_date,
+        }
     manifest: dict[str, Any] = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "artifact_name": artifact_name,
@@ -61,14 +92,64 @@ def write_build_manifest(
         "config_hash": config_hash(config_path),
         "requested_start_date": start_date,
         "requested_end_date": end_date,
-        "row_count": row_count,
+        "row_count": canonical_row_count,
         "output_path": str(artifact_dir),
         "source_fingerprints": source_fingerprints,
+        "build_scope": build_scope,
     }
+    if canonical_artifact is not None:
+        manifest["canonical_artifact"] = canonical_artifact
     if extra:
         manifest.update(extra)
+        if canonical_artifact is not None and "feature_count" in extra:
+            canonical_artifact["feature_count"] = extra["feature_count"]
     atomic_write_json(manifest_path(artifact_dir), manifest)
     return manifest
+
+
+def parquet_artifact_statistics(
+    artifact_dir: Path,
+    *,
+    date_column: str = "trade_date",
+) -> ParquetArtifactStatistics:
+    """Return exact row/schema/date statistics without loading full Parquet tables."""
+
+    files = sorted(artifact_dir.glob("**/*.parquet"))
+    row_count = 0
+    column_names: set[str] = set()
+    minimums: list[str] = []
+    maximums: list[str] = []
+    for path in files:
+        parquet_file = pq.ParquetFile(path)  # type: ignore[no-untyped-call]
+        metadata = parquet_file.metadata
+        row_count += metadata.num_rows
+        names = parquet_file.schema_arrow.names
+        column_names.update(names)
+        if date_column not in names or metadata.num_rows == 0:
+            continue
+        date_index = names.index(date_column)
+        file_has_complete_statistics = True
+        for row_group_index in range(metadata.num_row_groups):
+            statistics = metadata.row_group(row_group_index).column(date_index).statistics
+            if statistics is None or not statistics.has_min_max:
+                file_has_complete_statistics = False
+                break
+            minimums.append(_parquet_statistic_string(statistics.min))
+            maximums.append(_parquet_statistic_string(statistics.max))
+        if not file_has_complete_statistics:
+            table = pq.read_table(path, columns=[date_column])  # type: ignore[no-untyped-call]
+            dates = table.column(date_column).to_pylist()
+            date_values = [str(value) for value in dates if value is not None]
+            if date_values:
+                minimums.append(min(date_values))
+                maximums.append(max(date_values))
+    return ParquetArtifactStatistics(
+        row_count=row_count,
+        partition_count=len(files),
+        min_date=min(minimums) if minimums else None,
+        max_date=max(maximums) if maximums else None,
+        column_names=tuple(sorted(column_names)),
+    )
 
 
 def manifest_path(artifact_dir: Path) -> Path:
@@ -232,4 +313,10 @@ def as_optional_str(value: object) -> str | None:
 
     if value is None:
         return None
+    return str(value)
+
+
+def _parquet_statistic_string(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
     return str(value)

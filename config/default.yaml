@@ -28,6 +28,8 @@ data:
     - 000300.SH
     - 399001.SZ
     - 399006.SZ
+  index_first_available_dates:
+    399006.SZ: "20100531"
   fund_markets:
     - E
   hs_types:
@@ -153,6 +155,50 @@ production_model:
   train_end: "20260710"
   feature_list_path: config/feature_sets/robust_features.json
   output_dir_name: production
+production:
+  freshness:
+    hard_datasets:
+      - daily
+      - adj_factor
+      - daily_basic
+      - stk_limit
+      - index_daily
+    legitimate_empty_datasets:
+      - suspend_d
+    soft_dataset_max_lag_calendar_days:
+      income: 550
+      balancesheet: 550
+      cashflow: 550
+      fina_indicator: 550
+    event_datasets:
+      - namechange
+    snapshot_max_age_days:
+      stock_basic: 14
+    required_index_codes: []
+    baseline_sessions: 20
+    minimum_baseline_sessions: 5
+    moderate_count_ratio_low: 0.80
+    moderate_count_ratio_high: 1.20
+    severe_count_ratio_low: 0.65
+    severe_count_ratio_high: 1.35
+    minimum_daily_rows: 1000
+    minimum_universe_rows: 1000
+    minimum_base_universe_rows: 500
+    minimum_model_universe_rows: 100
+    required_feature_list_path: null
+    hard_required_features: []
+    warning_features:
+      - ret_1d
+      - market_excess_ret_5d
+      - turnover_rate
+    structurally_sparse_features:
+      - current_ratio
+      - debt_to_assets
+      - ocf_to_profit
+      - dv_ttm
+    hard_feature_missing_ratio: 0.20
+    warning_feature_missing_ratio: 0.50
+    git_dirty_policy: warning
 backtest:
   execution: next_open
   initial_cash: 1000000.0

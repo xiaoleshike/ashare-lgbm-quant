@@ -45,6 +45,7 @@ class GapReport:
     expected_dates: int
     missing_dates: tuple[str, ...] = ()
     missing_by_entity: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    excluded_before_inception_by_entity: dict[str, tuple[str, ...]] = field(default_factory=dict)
     skipped: bool = False
     message: str = ""
 
@@ -53,6 +54,12 @@ class GapReport:
         """Return whether this report contains missing expected coverage."""
 
         return bool(self.missing_dates or self.missing_by_entity)
+
+    @property
+    def excluded_before_inception(self) -> int:
+        """Return expected entity-date pairs excluded before configured inception."""
+
+        return sum(len(dates) for dates in self.excluded_before_inception_by_entity.values())
 
 
 class DataIngestionService:
@@ -143,8 +150,7 @@ class DataIngestionService:
         start = start_date or self._settings.data.default_start_date
         end = end_date or today_yyyymmdd()
         return [
-            self._scan_dataset_gaps(get_dataset_spec(name), start, end)
-            for name in dataset_names
+            self._scan_dataset_gaps(get_dataset_spec(name), start, end) for name in dataset_names
         ]
 
     def repair_gaps(
@@ -280,6 +286,8 @@ class DataIngestionService:
         end_date: str,
     ) -> GapReport:
         missing_by_code: dict[str, tuple[str, ...]] = {}
+        excluded_by_code: dict[str, tuple[str, ...]] = {}
+        expected_dates = 0
         if frame.empty or not {"ts_code", "trade_date"}.issubset(frame.columns):
             present: dict[str, set[str]] = {}
         else:
@@ -292,9 +300,23 @@ class DataIngestionService:
             }
         for code in self._settings.data.index_codes:
             code_present = present.get(code, set())
-            missing_dates = tuple(
+            first_available_date = self._settings.data.index_first_available_dates.get(code)
+            excluded_dates = tuple(
                 date
                 for date in open_dates
+                if first_available_date is not None and date < first_available_date
+            )
+            if excluded_dates:
+                excluded_by_code[code] = excluded_dates
+            eligible_dates = tuple(
+                date
+                for date in open_dates
+                if first_available_date is None or date >= first_available_date
+            )
+            expected_dates += len(eligible_dates)
+            missing_dates = tuple(
+                date
+                for date in eligible_dates
                 if date not in code_present and not self._has_allowed_empty_marker(spec, date, code)
             )
             if missing_dates:
@@ -306,9 +328,10 @@ class DataIngestionService:
             spec.name,
             start_date,
             end_date,
-            expected_dates=len(open_dates) * len(self._settings.data.index_codes),
+            expected_dates=expected_dates,
             missing_dates=union_missing,
             missing_by_entity=missing_by_code,
+            excluded_before_inception_by_entity=excluded_by_code,
         )
 
     def _repair_dataset_gaps(self, spec: DatasetSpec, report: GapReport) -> int:
@@ -359,9 +382,7 @@ class DataIngestionService:
             and spec.fetch_mode in {"trade_date", "index_codes"}
         )
 
-    def _should_skip_snapshot_refresh(
-        self, spec: DatasetSpec, refresh_snapshots: bool
-    ) -> bool:
+    def _should_skip_snapshot_refresh(self, spec: DatasetSpec, refresh_snapshots: bool) -> bool:
         """Return whether an existing snapshot should be preserved for this update."""
 
         if refresh_snapshots:
@@ -566,8 +587,12 @@ class DataIngestionService:
             return
         if spec.fetch_mode == "index_codes":
             for code in self._settings.data.index_codes:
+                first_available_date = self._settings.data.index_first_available_dates.get(code)
+                entity_start = max(start_date, first_available_date or start_date)
+                if entity_start > end_date:
+                    continue
                 for chunk_start, chunk_end in iter_year_chunks(
-                    start_date, end_date, self._settings.data.date_range_chunk_years
+                    entity_start, end_date, self._settings.data.date_range_chunk_years
                 ):
                     frame = self._query(
                         spec,

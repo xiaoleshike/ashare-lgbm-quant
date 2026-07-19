@@ -20,13 +20,23 @@ from ashare_quant.data.quality_logging import append_quality_event, append_valid
 from ashare_quant.data.validation import DataValidator, ValidationResult
 from ashare_quant.diagnostics import FeatureDiagnosticPipeline
 from ashare_quant.diagnostics.pipeline import ChronologicalSplit
-from ashare_quant.features import FEATURE_REGISTRY, FeatureBuilder, FeatureStore
+from ashare_quant.features import (
+    FEATURE_REGISTRY,
+    FeatureBuilder,
+    FeatureStore,
+    FeatureValidationResult,
+    FeatureValidator,
+)
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
 from ashare_quant.models import ProductionRankerTrainer, RankerBaselineRunner
 from ashare_quant.orchestration import (
     DEFAULT_PRODUCTION_LOCK_PATH,
+    DailyPipelineOrchestrator,
+    FreshnessService,
+    GateResult,
     ProductionLockError,
+    resolve_completed_trading_date,
     run_with_production_lock,
 )
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
@@ -34,6 +44,7 @@ from ashare_quant.universe.validation import UniverseValidationResult
 from ashare_quant.utils import configure_logging
 from ashare_quant.utils.manifest import (
     artifact_manifest_status,
+    parquet_artifact_statistics,
     processed_source_fingerprint,
     raw_source_fingerprints,
     utc_now_iso,
@@ -74,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_diagnostics_parser(subparsers)
     add_models_parser(subparsers)
     add_backtest_parser(subparsers)
+    add_pipeline_parser(subparsers)
     return parser
 
 
@@ -223,6 +235,14 @@ def add_features_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     status_parser = features_subparsers.add_parser("status", help="Show feature matrix status.")
     status_parser.add_argument("--date", default=None, help="Optional YYYYMMDD date.")
 
+    validate_parser = features_subparsers.add_parser(
+        "validate", help="Validate stored production feature rows."
+    )
+    validate_parser.add_argument(
+        "--start-date", default=None, help="Inclusive YYYYMMDD start date."
+    )
+    validate_parser.add_argument("--end-date", default=None, help="Inclusive YYYYMMDD end date.")
+
     features_subparsers.add_parser("registry", help="Show registered feature metadata summary.")
 
 
@@ -319,6 +339,23 @@ def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.Argument
         default=None,
         help="Comma-separated Top-N variants, default from config such as 10,20,50.",
     )
+
+
+def add_pipeline_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Add locked production orchestration commands."""
+
+    parser = subparsers.add_parser("pipeline", help="Run locked production workflows.")
+    commands = parser.add_subparsers(dest="pipeline_command", required=True)
+    daily = commands.add_parser("daily", help="Update and validate daily production artifacts.")
+    daily.add_argument(
+        "--as-of",
+        default=None,
+        help="Completed open trading date in YYYYMMDD; defaults to latest completed date.",
+    )
+    readiness = commands.add_parser(
+        "readiness", help="Run read-only raw, universe, and feature readiness gates."
+    )
+    readiness.add_argument("--as-of", required=True, help="Completed session in YYYYMMDD.")
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -488,6 +525,7 @@ def run_universe_command(args: argparse.Namespace) -> int:
         )
         print_universe_validation_result(build_result.validation)
         if build_result.validation.ok:
+            canonical_statistics = parquet_artifact_statistics(universe_store.dataset_dir)
             write_build_manifest(
                 universe_store.dataset_dir,
                 artifact_name="universe_daily",
@@ -496,6 +534,8 @@ def run_universe_command(args: argparse.Namespace) -> int:
                 start_date=build_result.start_date,
                 end_date=build_result.end_date,
                 row_count=build_result.rows_written,
+                canonical_statistics=canonical_statistics,
+                partitions_changed=build_result.partitions_changed,
                 source_fingerprints=raw_source_fingerprints(
                     raw_store,
                     (
@@ -629,6 +669,11 @@ def run_features_command(args: argparse.Namespace) -> int:
         )
         return 0
 
+    if args.features_command == "validate":
+        validation_result = FeatureValidator(feature_store).validate(args.start_date, args.end_date)
+        print_feature_validation_result(validation_result)
+        return 0 if validation_result.ok else 1
+
     if args.features_command == "build":
         universe_store = UniverseStore(processed_root)
         builder = FeatureBuilder(raw_store, universe_store, feature_store, settings)
@@ -647,7 +692,7 @@ def run_features_command(args: argparse.Namespace) -> int:
         )[:10]
         for name, ratio in missing_preview:
             print(f"missing_ratio {name}={ratio:.4f}")
-        universe_status = universe_store.status()
+        universe_statistics = parquet_artifact_statistics(universe_store.dataset_dir)
         source_fingerprints = raw_source_fingerprints(
             raw_store,
             (
@@ -664,10 +709,14 @@ def run_features_command(args: argparse.Namespace) -> int:
         )
         source_fingerprints["universe_daily"] = processed_source_fingerprint(
             universe_store.dataset_dir,
-            rows=universe_status.rows,
-            partitions=universe_status.partitions,
-            min_date=universe_status.min_date,
-            max_date=universe_status.max_date,
+            rows=universe_statistics.row_count,
+            partitions=universe_statistics.partition_count,
+            min_date=universe_statistics.min_date,
+            max_date=universe_statistics.max_date,
+        )
+        canonical_statistics = parquet_artifact_statistics(feature_store.dataset_dir)
+        canonical_feature_count = len(
+            set(canonical_statistics.column_names) - {"trade_date", "ts_code"}
         )
         write_build_manifest(
             feature_store.dataset_dir,
@@ -677,8 +726,10 @@ def run_features_command(args: argparse.Namespace) -> int:
             start_date=result.start_date,
             end_date=result.end_date,
             row_count=result.rows_written,
+            canonical_statistics=canonical_statistics,
+            partitions_changed=result.partitions_changed,
             source_fingerprints=source_fingerprints,
-            extra={"feature_count": result.feature_count},
+            extra={"feature_count": canonical_feature_count},
         )
         return 0
 
@@ -844,6 +895,113 @@ def run_backtest_command(args: argparse.Namespace) -> int:
     raise ValueError(f"Unsupported backtest command: {args.backtest_command}")
 
 
+def run_pipeline_command(args: argparse.Namespace) -> int:
+    """Run one locked production orchestration command."""
+
+    settings = load_settings(args.config)
+    configure_logging(settings.logging.level, settings.logging.json_logs)
+    config_path = Path(effective_config_path(args.config))
+    raw_store = build_store(None, settings)
+    universe_store = UniverseStore(settings.paths.processed_data)
+    feature_store = FeatureStore(settings.paths.processed_data)
+    freshness = FreshnessService(
+        settings,
+        raw_store,
+        universe_store,
+        feature_store,
+        config_path=config_path,
+    )
+
+    if args.pipeline_command == "readiness":
+        try:
+            as_of = resolve_completed_trading_date(raw_store, args.as_of)
+            results = freshness.check_all(as_of)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"pipeline_readiness: NOT_READY error={error}", file=sys.stderr)
+            return 1
+        print_readiness_results(results)
+        return 0 if all(result.ready for result in results) else 1
+
+    if args.pipeline_command != "daily":
+        raise ValueError(f"Unsupported pipeline command: {args.pipeline_command}")
+
+    def execute_stage(arguments: tuple[str, ...]) -> int:
+        return main(("--config", str(config_path), *arguments))
+
+    orchestrator = DailyPipelineOrchestrator(
+        executor=execute_stage,
+        as_of_resolver=lambda requested: resolve_completed_trading_date(raw_store, requested),
+        config_path=config_path,
+        processed_root=settings.paths.processed_data,
+        readiness_executor=lambda gate, as_of: execute_readiness_gate(freshness, gate, as_of),
+    )
+    try:
+        result = orchestrator.run(args.as_of)
+    except ProductionLockError as error:
+        print(f"production run blocked: {error}", file=sys.stderr)
+        return 3
+    if result.status == "success":
+        print(
+            f"pipeline_daily: status=success run_id={result.run.run_id} "
+            f"as_of={result.as_of} manifest={result.run.manifest_path}"
+        )
+        return 0
+    print(
+        f"pipeline_daily: status=failed run_id={result.run.run_id} "
+        f"as_of={result.as_of} failed_stage={result.failed_stage} "
+        f"message={result.error_message} manifest={result.run.manifest_path}",
+        file=sys.stderr,
+    )
+    return result.exit_code or 2
+
+
+def execute_readiness_gate(
+    service: FreshnessService,
+    gate_name: str,
+    as_of: str,
+) -> GateResult:
+    """Dispatch one named pipeline gate to the shared readiness service."""
+
+    methods = {
+        "raw_freshness_gate": service.check_raw,
+        "universe_readiness_gate": service.check_universe,
+        "features_readiness_gate": service.check_features,
+    }
+    try:
+        method = methods[gate_name]
+    except KeyError as error:
+        raise ValueError(f"unsupported readiness gate: {gate_name}") from error
+    return method(as_of)
+
+
+def print_readiness_results(results: Sequence[GateResult]) -> None:
+    """Print compact human-readable readiness output while retaining structured APIs."""
+
+    ready = all(result.ready for result in results)
+    print(f"pipeline_readiness: {'READY' if ready else 'NOT_READY'}")
+    for result in results:
+        print(
+            f"{result.gate}: ready={result.ready} expected_as_of={result.expected_as_of} "
+            f"hard_failures={len(result.hard_failures)} warnings={len(result.warnings)}"
+        )
+        for failure in result.hard_failures:
+            print(f"  failure: {failure}")
+        for warning in result.warnings:
+            print(f"  warning: {warning}")
+        row_counts = result.details.get("row_counts")
+        if row_counts is not None:
+            print(f"  row_counts: {json.dumps(row_counts, sort_keys=True)}")
+        actual_dates = result.details.get("actual_max_dates")
+        if actual_dates is not None:
+            print(f"  actual_max_dates: {json.dumps(actual_dates, sort_keys=True)}")
+        artifact_manifest = result.details.get("artifact_manifest")
+        if artifact_manifest is not None:
+            print(f"  artifact_manifest: {json.dumps(artifact_manifest, sort_keys=True)}")
+        missingness = result.details.get("missingness_summary")
+        if missingness is not None:
+            print(f"  missingness_summary: {json.dumps(missingness, sort_keys=True)}")
+
+
 def parse_horizons(value: str) -> tuple[int, ...]:
     """Parse comma-separated positive integer horizons."""
 
@@ -909,6 +1067,7 @@ def print_gap_reports(reports: Sequence[GapReport]) -> None:
             f"{report.dataset}: gaps={report.has_gaps} skipped={report.skipped} "
             f"expected_dates={report.expected_dates} "
             f"missing_dates={len(report.missing_dates)} "
+            f"excluded_before_inception={report.excluded_before_inception} "
             f"start_date={report.start_date} end_date={report.end_date} "
             f"message={report.message}"
         )
@@ -916,6 +1075,10 @@ def print_gap_reports(reports: Sequence[GapReport]) -> None:
             for entity, dates in sorted(report.missing_by_entity.items()):
                 preview = ",".join(dates[:10])
                 print(f"  {entity}: missing={len(dates)} first={preview}")
+        if report.excluded_before_inception_by_entity:
+            for entity, dates in sorted(report.excluded_before_inception_by_entity.items()):
+                preview = ",".join(dates[:10])
+                print(f"  {entity}: excluded_before_inception={len(dates)} first={preview}")
         elif report.missing_dates:
             preview = ",".join(report.missing_dates[:20])
             print(f"  first={preview}")
@@ -935,6 +1098,16 @@ def print_label_validation_result(result: LabelValidationResult) -> None:
     """Print compact label validation output."""
 
     print(f"validation: ok={result.ok}")
+    for warning in result.warnings:
+        print(f"  warning: {warning}")
+    for error in result.errors:
+        print(f"  error: {error}")
+
+
+def print_feature_validation_result(result: FeatureValidationResult) -> None:
+    """Print compact production feature validation output."""
+
+    print(f"validation: ok={result.ok} rows={result.rows}")
     for warning in result.warnings:
         print(f"  warning: {warning}")
     for error in result.errors:
@@ -980,4 +1153,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_models_command(args)
     if args.command == "backtest":
         return run_backtest_command(args)
+    if args.command == "pipeline":
+        return run_pipeline_command(args)
     raise ValueError(f"Unsupported command: {args.command}")

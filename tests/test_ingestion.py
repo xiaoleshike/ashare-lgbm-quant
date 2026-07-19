@@ -479,6 +479,144 @@ def test_index_daily_gap_detection_is_per_index_code(tmp_path, monkeypatch) -> N
     assert report.missing_dates == ("20240103",)
 
 
+def test_index_gap_detection_excludes_dates_before_configured_inception(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    settings.data.index_codes = ("399006.SZ",)
+    settings.data.index_first_available_dates = {"399006.SZ": "20100531"}
+    store = ParquetDataStore(tmp_path)
+    store.write(
+        store_spec("trade_cal"),
+        pd.DataFrame(
+            {
+                "exchange": ["SSE"] * 4,
+                "cal_date": ["20100104", "20100528", "20100531", "20100601"],
+                "is_open": [1, 1, 1, 1],
+            }
+        ),
+    )
+    store.write(
+        store_spec("index_daily"),
+        pd.DataFrame(
+            {
+                "ts_code": ["399006.SZ"],
+                "trade_date": ["20100531"],
+                "close": [1000.0],
+            }
+        ),
+    )
+    service = DataIngestionService(settings=settings, store=store, client=MockClient())  # type: ignore[arg-type]
+
+    report = service.scan_gaps(("index_daily",), "20100104", "20100601")[0]
+
+    assert report.expected_dates == 2
+    assert report.missing_by_entity == {"399006.SZ": ("20100601",)}
+    assert report.excluded_before_inception_by_entity == {"399006.SZ": ("20100104", "20100528")}
+    assert report.excluded_before_inception == 2
+
+
+def test_index_gap_boundaries_are_per_code_and_absent_boundary_is_conservative(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    settings.data.index_codes = ("000300.SH", "399006.SZ")
+    settings.data.index_first_available_dates = {"399006.SZ": "20100531"}
+    store = ParquetDataStore(tmp_path)
+    store.write(
+        store_spec("trade_cal"),
+        pd.DataFrame(
+            {
+                "exchange": ["SSE", "SSE"],
+                "cal_date": ["20100104", "20100531"],
+                "is_open": [1, 1],
+            }
+        ),
+    )
+    service = DataIngestionService(settings=settings, store=store, client=MockClient())  # type: ignore[arg-type]
+
+    report = service.scan_gaps(("index_daily",), "20100104", "20100531")[0]
+
+    assert report.missing_by_entity == {
+        "000300.SH": ("20100104", "20100531"),
+        "399006.SZ": ("20100531",),
+    }
+    assert report.expected_dates == 3
+
+
+class IndexGapRepairClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def query(self, endpoint: str, **params: object) -> pd.DataFrame:
+        self.calls.append((endpoint, params))
+        assert endpoint == "index_daily"
+        trade_date = str(params["start_date"])
+        return pd.DataFrame(
+            {
+                "ts_code": [str(params["ts_code"])],
+                "trade_date": [trade_date],
+                "close": [1000.0],
+            }
+        )
+
+
+def test_index_gap_repair_never_requests_pre_inception_dates(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    settings.data.index_codes = ("399006.SZ",)
+    settings.data.index_first_available_dates = {"399006.SZ": "20100531"}
+    store = ParquetDataStore(tmp_path)
+    store.write(
+        store_spec("trade_cal"),
+        pd.DataFrame(
+            {
+                "exchange": ["SSE"] * 3,
+                "cal_date": ["20100104", "20100531", "20100601"],
+                "is_open": [1, 1, 1],
+            }
+        ),
+    )
+    client = IndexGapRepairClient()
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    result = service.repair_gaps(("index_daily",), "20100104", "20100601")
+
+    requested_dates = [str(params["start_date"]) for _, params in client.calls]
+    assert requested_dates == ["20100531", "20100601"]
+    assert result[0].rows_written == 2
+
+
+class EmptyIndexGapRepairClient:
+    def query(self, endpoint: str, **params: object) -> pd.DataFrame:
+        assert endpoint == "index_daily"
+        return pd.DataFrame()
+
+
+def test_empty_index_response_after_inception_remains_repairable(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    settings = load_settings("config/default.yaml")
+    settings.data.index_codes = ("399006.SZ",)
+    settings.data.index_first_available_dates = {"399006.SZ": "20100531"}
+    store = ParquetDataStore(tmp_path)
+    store.write(
+        store_spec("trade_cal"),
+        pd.DataFrame({"exchange": ["SSE"], "cal_date": ["20100531"], "is_open": [1]}),
+    )
+    service = DataIngestionService(
+        settings=settings,
+        store=store,
+        client=EmptyIndexGapRepairClient(),  # type: ignore[arg-type]
+    )
+
+    service.repair_gaps(("index_daily",), "20100531", "20100531")
+    report = service.scan_gaps(("index_daily",), "20100531", "20100531")[0]
+
+    assert report.missing_by_entity == {"399006.SZ": ("20100531",)}
+
+
 class GapRepairClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
