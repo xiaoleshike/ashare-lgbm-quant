@@ -29,7 +29,12 @@ from ashare_quant.features import (
 )
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
-from ashare_quant.models import ModelRegistry, ProductionRankerTrainer, RankerBaselineRunner
+from ashare_quant.models import (
+    ModelRegistry,
+    ProductionInferenceEngine,
+    ProductionRankerTrainer,
+    RankerBaselineRunner,
+)
 from ashare_quant.orchestration import (
     DEFAULT_PRODUCTION_LOCK_PATH,
     DailyPipelineOrchestrator,
@@ -279,7 +284,13 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "--processed-root", default=None, help="Override the configured processed data root."
     )
     parser.add_argument(
+        "--storage-root", default=None, help="Override the configured canonical raw Parquet root."
+    )
+    parser.add_argument(
         "--output-root", default=None, help="Override the configured model artifact root."
+    )
+    parser.add_argument(
+        "--reports-root", default=None, help="Override the configured report output root."
     )
     commands = parser.add_subparsers(dest="models_command", required=True)
     ranker = commands.add_parser(
@@ -309,6 +320,8 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     promote.add_argument("model_id", help="Registered model identifier.")
     retire = commands.add_parser("retire", help="Retire a registered model.")
     retire.add_argument("model_id", help="Registered model identifier.")
+    predict = commands.add_parser("predict", help="Score one completed session with the champion.")
+    predict.add_argument("--as-of", required=True, help="Completed session in YYYYMMDD.")
 
 
 def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -807,6 +820,38 @@ def run_models_command(args: argparse.Namespace) -> int:
         settings.paths.processed_data if args.processed_root is None else Path(args.processed_root)
     )
     output_root = settings.paths.models if args.output_root is None else Path(args.output_root)
+    reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    if args.models_command == "predict":
+        config_path = Path(effective_config_path(args.config))
+        raw_store = build_store(args.storage_root, settings)
+        universe_store = UniverseStore(processed_root)
+        feature_store = FeatureStore(processed_root)
+        freshness = FreshnessService(
+            settings,
+            raw_store,
+            universe_store,
+            feature_store,
+            config_path=config_path,
+        )
+        engine = ProductionInferenceEngine(
+            registry=ModelRegistry(output_root),
+            processed_root=processed_root,
+            reports_root=reports_root,
+            config_path=config_path,
+            freshness=freshness,
+        )
+        try:
+            inference_result = engine.predict(args.as_of)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"production prediction failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"prediction_output: date={inference_result.as_of} "
+            f"model_id={inference_result.model_id} "
+            f"stocks={inference_result.prediction_count} "
+            f"output={inference_result.output_dir / 'predictions.parquet'}"
+        )
+        return 0
     if args.models_command in {"list", "champion", "promote", "retire"}:
         registry = ModelRegistry(output_root)
         try:
