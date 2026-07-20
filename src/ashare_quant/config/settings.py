@@ -383,6 +383,33 @@ class StrategySettings(BaseModel):
     )
 
 
+class DailyResearchReportSettings(BaseModel):
+    """Thresholds for descriptive same-date candidate risk reporting."""
+
+    top_candidates: PositiveInt = 20
+    abnormal_return_abs_pct: float = Field(default=9.0, ge=0)
+    volatility_window: PositiveInt = 20
+    volatility_min_observations: PositiveInt = 10
+    high_volatility_pct: float = Field(default=4.0, ge=0)
+    low_liquidity_amount: float = Field(default=50_000.0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_volatility_observations(self) -> DailyResearchReportSettings:
+        """Keep minimum observations within the configured trailing window."""
+
+        if self.volatility_min_observations > self.volatility_window:
+            raise ValueError(
+                "research volatility_min_observations must not exceed volatility_window"
+            )
+        return self
+
+
+class ResearchSettings(BaseModel):
+    """Human-readable quantitative research reporting configuration."""
+
+    daily_report: DailyResearchReportSettings = Field(default_factory=DailyResearchReportSettings)
+
+
 class AppSettings(BaseModel):
     """Top-level validated settings.
 
@@ -405,6 +432,7 @@ class AppSettings(BaseModel):
     production_model: ProductionModelSettings = Field(default_factory=ProductionModelSettings)
     production: ProductionSettings = Field(default_factory=ProductionSettings)
     strategy: StrategySettings = Field(default_factory=StrategySettings)
+    research: ResearchSettings = Field(default_factory=ResearchSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     tushare_token: SecretStr | None = None
 

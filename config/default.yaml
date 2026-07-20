@@ -220,6 +220,14 @@ strategy:
     require_valid_ohlc: true
     require_valid_price_limits: true
     price_limit_tolerance: 0.000001
+research:
+  daily_report:
+    top_candidates: 20
+    abnormal_return_abs_pct: 9.0
+    volatility_window: 20
+    volatility_min_observations: 10
+    high_volatility_pct: 4.0
+    low_liquidity_amount: 50000.0
 backtest:
   execution: next_open
   initial_cash: 1000000.0

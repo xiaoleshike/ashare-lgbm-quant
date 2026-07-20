@@ -44,6 +44,7 @@ from ashare_quant.orchestration import (
     resolve_completed_trading_date,
     run_with_production_lock,
 )
+from ashare_quant.research import DailyResearchReportGenerator
 from ashare_quant.strategy import CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
@@ -91,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_diagnostics_parser(subparsers)
     add_models_parser(subparsers)
     add_strategy_parser(subparsers)
+    add_research_parser(subparsers)
     add_backtest_parser(subparsers)
     add_pipeline_parser(subparsers)
     return parser
@@ -344,6 +346,24 @@ def add_strategy_parser(subparsers: argparse._SubParsersAction[argparse.Argument
         "candidates", help="Apply configured signal-date filters to production predictions."
     )
     candidates.add_argument("--as-of", required=True, help="Prediction date in YYYYMMDD.")
+
+
+def add_research_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Add deterministic human-readable quantitative research reports."""
+
+    parser = subparsers.add_parser("research", help="Generate descriptive research reports.")
+    parser.add_argument(
+        "--storage-root", default=None, help="Override the configured canonical raw Parquet root."
+    )
+    parser.add_argument(
+        "--processed-root", default=None, help="Override the configured processed data root."
+    )
+    parser.add_argument(
+        "--reports-root", default=None, help="Override the configured report input/output root."
+    )
+    commands = parser.add_subparsers(dest="research_command", required=True)
+    report = commands.add_parser("report", help="Generate one daily quantitative research report.")
+    report.add_argument("--as-of", required=True, help="Candidate date in YYYYMMDD.")
 
 
 def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -996,6 +1016,38 @@ def run_strategy_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_research_command(args: argparse.Namespace) -> int:
+    """Generate one optional post-candidate research report."""
+
+    settings = load_settings(args.config)
+    configure_logging(settings.logging.level, settings.logging.json_logs)
+    if args.research_command != "report":
+        raise ValueError(f"Unsupported research command: {args.research_command}")
+    raw_root = (
+        settings.paths.parquet_store if args.storage_root is None else Path(args.storage_root)
+    )
+    processed_root = (
+        settings.paths.processed_data if args.processed_root is None else Path(args.processed_root)
+    )
+    reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    generator = DailyResearchReportGenerator(
+        raw_root=raw_root,
+        processed_root=processed_root,
+        reports_root=reports_root,
+        settings=settings.research.daily_report,
+    )
+    try:
+        result = generator.generate(args.as_of)
+    except (DataValidationError, OSError, ValueError) as error:
+        print(f"daily research report failed: {error}", file=sys.stderr)
+        return 2
+    print(
+        f"daily_research_report: date={result.as_of} candidates={result.candidate_count} "
+        f"model_id={result.model_id} output={result.report_path}"
+    )
+    return 0
+
+
 def run_backtest_command(args: argparse.Namespace) -> int:
     """Run one executable backtest command."""
 
@@ -1300,6 +1352,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_models_command(args)
     if args.command == "strategy":
         return run_strategy_command(args)
+    if args.command == "research":
+        return run_research_command(args)
     if args.command == "backtest":
         return run_backtest_command(args)
     if args.command == "pipeline":
