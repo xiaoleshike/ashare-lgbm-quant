@@ -199,6 +199,27 @@ production:
     hard_feature_missing_ratio: 0.20
     warning_feature_missing_ratio: 0.50
     git_dirty_policy: warning
+strategy:
+  candidate_selection:
+    max_candidates: 50
+    require_model_universe: true
+    exclude_st: true
+    exclude_suspended: true
+    exclude_low_liquidity: true
+    exclude_bj_market: true
+    exclude_star_market: false
+    exclude_chinext_market: false
+    min_list_trading_days: 180
+    require_daily_row: true
+    require_daily_basic_row: true
+    require_stk_limit_row: true
+    min_total_mv: 500000.0
+    min_daily_amount: 30000.0
+    min_turnover_rate: null
+    max_turnover_rate: null
+    require_valid_ohlc: true
+    require_valid_price_limits: true
+    price_limit_tolerance: 0.000001
 backtest:
   execution: next_open
   initial_cash: 1000000.0

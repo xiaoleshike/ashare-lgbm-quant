@@ -339,6 +339,50 @@ class ProductionSettings(BaseModel):
     freshness: ProductionFreshnessSettings = Field(default_factory=ProductionFreshnessSettings)
 
 
+class CandidateSelectionSettings(BaseModel):
+    """Point-in-time filters applied to model scores before any trading decision."""
+
+    max_candidates: PositiveInt = 50
+    require_model_universe: bool = True
+    exclude_st: bool = True
+    exclude_suspended: bool = True
+    exclude_low_liquidity: bool = True
+    exclude_bj_market: bool = True
+    exclude_star_market: bool = False
+    exclude_chinext_market: bool = False
+    min_list_trading_days: int = Field(default=180, ge=0)
+    require_daily_row: bool = True
+    require_daily_basic_row: bool = True
+    require_stk_limit_row: bool = True
+    min_total_mv: float | None = Field(default=500_000.0, ge=0)
+    min_daily_amount: float | None = Field(default=30_000.0, ge=0)
+    min_turnover_rate: float | None = Field(default=None, ge=0)
+    max_turnover_rate: float | None = Field(default=None, ge=0)
+    require_valid_ohlc: bool = True
+    require_valid_price_limits: bool = True
+    price_limit_tolerance: float = Field(default=1e-6, ge=0)
+
+    @model_validator(mode="after")
+    def validate_turnover_range(self) -> CandidateSelectionSettings:
+        """Require an ordered optional turnover-rate interval."""
+
+        if (
+            self.min_turnover_rate is not None
+            and self.max_turnover_rate is not None
+            and self.min_turnover_rate > self.max_turnover_rate
+        ):
+            raise ValueError("candidate min_turnover_rate must not exceed max_turnover_rate")
+        return self
+
+
+class StrategySettings(BaseModel):
+    """Configuration for model-score post-processing without order generation."""
+
+    candidate_selection: CandidateSelectionSettings = Field(
+        default_factory=CandidateSelectionSettings
+    )
+
+
 class AppSettings(BaseModel):
     """Top-level validated settings.
 
@@ -360,6 +404,7 @@ class AppSettings(BaseModel):
     ranker: RankerSettings = Field(default_factory=RankerSettings)
     production_model: ProductionModelSettings = Field(default_factory=ProductionModelSettings)
     production: ProductionSettings = Field(default_factory=ProductionSettings)
+    strategy: StrategySettings = Field(default_factory=StrategySettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     tushare_token: SecretStr | None = None
 

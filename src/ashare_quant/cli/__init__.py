@@ -44,6 +44,7 @@ from ashare_quant.orchestration import (
     resolve_completed_trading_date,
     run_with_production_lock,
 )
+from ashare_quant.strategy import CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
 from ashare_quant.utils import configure_logging
@@ -89,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_features_parser(subparsers)
     add_diagnostics_parser(subparsers)
     add_models_parser(subparsers)
+    add_strategy_parser(subparsers)
     add_backtest_parser(subparsers)
     add_pipeline_parser(subparsers)
     return parser
@@ -322,6 +324,26 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     retire.add_argument("model_id", help="Registered model identifier.")
     predict = commands.add_parser("predict", help="Score one completed session with the champion.")
     predict.add_argument("--as-of", required=True, help="Completed session in YYYYMMDD.")
+
+
+def add_strategy_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Add optional model-score candidate selection commands."""
+
+    parser = subparsers.add_parser("strategy", help="Filter model scores into research candidates.")
+    parser.add_argument(
+        "--storage-root", default=None, help="Override the configured canonical raw Parquet root."
+    )
+    parser.add_argument(
+        "--processed-root", default=None, help="Override the configured processed data root."
+    )
+    parser.add_argument(
+        "--reports-root", default=None, help="Override the configured report input/output root."
+    )
+    commands = parser.add_subparsers(dest="strategy_command", required=True)
+    candidates = commands.add_parser(
+        "candidates", help="Apply configured signal-date filters to production predictions."
+    )
+    candidates.add_argument("--as-of", required=True, help="Prediction date in YYYYMMDD.")
 
 
 def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -941,6 +963,39 @@ def _format_registry_metric(metrics: dict[str, object], name: str) -> str:
     return "-" if not isinstance(value, (int, float)) else f"{float(value):.6f}"
 
 
+def run_strategy_command(args: argparse.Namespace) -> int:
+    """Run one optional post-inference candidate selection command."""
+
+    settings = load_settings(args.config)
+    configure_logging(settings.logging.level, settings.logging.json_logs)
+    if args.strategy_command != "candidates":
+        raise ValueError(f"Unsupported strategy command: {args.strategy_command}")
+    raw_root = (
+        settings.paths.parquet_store if args.storage_root is None else Path(args.storage_root)
+    )
+    processed_root = (
+        settings.paths.processed_data if args.processed_root is None else Path(args.processed_root)
+    )
+    reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    selector = CandidateSelector(
+        raw_root=raw_root,
+        processed_root=processed_root,
+        reports_root=reports_root,
+        config_path=Path(effective_config_path(args.config)),
+        settings=settings.strategy.candidate_selection,
+    )
+    try:
+        result = selector.select(args.as_of)
+    except (DataValidationError, OSError, ValueError) as error:
+        print(f"strategy candidate selection failed: {error}", file=sys.stderr)
+        return 2
+    print(
+        f"strategy_candidates: date={result.as_of} candidates={result.candidate_count} "
+        f"output={result.output_path}"
+    )
+    return 0
+
+
 def run_backtest_command(args: argparse.Namespace) -> int:
     """Run one executable backtest command."""
 
@@ -1243,6 +1298,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_diagnostics_command(args)
     if args.command == "models":
         return run_models_command(args)
+    if args.command == "strategy":
+        return run_strategy_command(args)
     if args.command == "backtest":
         return run_backtest_command(args)
     if args.command == "pipeline":
