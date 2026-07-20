@@ -268,3 +268,34 @@ backtest:
   benchmark_index_code: 000300.SH
   annualization_days: 252
   sell_delay_max_days: 20
+  historical:
+    top_n:
+      - 10
+      - 20
+      - 50
+    holding_period_days: 5
+    require_out_of_sample: true
+    bull_annual_return_threshold: 0.10
+    bear_annual_return_threshold: -0.10
+    periods:
+      2015-2020:
+        start_date: "20150101"
+        end_date: "20191231"
+      2020-2023:
+        start_date: "20200101"
+        end_date: "20221231"
+      2023-2026:
+        start_date: "20230101"
+        end_date: "20261231"
+  diagnostics:
+    horizon: 5
+    score_layers:
+      - 0.01
+      - 0.05
+      - 0.10
+      - 0.20
+    bottom_fraction: 0.20
+    minimum_cross_section: 20
+    factor_quantiles: 5
+    shap_sample_rows: 10000
+    prediction_tolerance: 0.0000001

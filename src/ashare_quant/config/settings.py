@@ -78,6 +78,71 @@ class DataSettings(BaseModel):
         return self
 
 
+class HistoricalBacktestPeriodSettings(BaseModel):
+    """Named chronological evaluation period for a frozen champion model."""
+
+    start_date: str
+    end_date: str
+
+
+class HistoricalBacktestSettings(BaseModel):
+    """Research reporting rules layered over the executable backtest engine."""
+
+    top_n: tuple[PositiveInt, ...] = (10, 20, 50)
+    holding_period_days: PositiveInt = 5
+    require_out_of_sample: bool = True
+    bull_annual_return_threshold: float = 0.10
+    bear_annual_return_threshold: float = -0.10
+    periods: dict[str, HistoricalBacktestPeriodSettings] = Field(
+        default_factory=lambda: {
+            "2015-2020": HistoricalBacktestPeriodSettings(
+                start_date="20150101", end_date="20191231"
+            ),
+            "2020-2023": HistoricalBacktestPeriodSettings(
+                start_date="20200101", end_date="20221231"
+            ),
+            "2023-2026": HistoricalBacktestPeriodSettings(
+                start_date="20230101", end_date="20261231"
+            ),
+        }
+    )
+
+    @model_validator(mode="after")
+    def validate_historical_settings(self) -> HistoricalBacktestSettings:
+        """Require unique Top-N values and ordered regime/period boundaries."""
+
+        if len(set(self.top_n)) != len(self.top_n):
+            raise ValueError("historical backtest top_n must not contain duplicates")
+        if self.bear_annual_return_threshold >= self.bull_annual_return_threshold:
+            raise ValueError("historical backtest bear threshold must be below bull threshold")
+        for name, period in self.periods.items():
+            if period.start_date > period.end_date:
+                raise ValueError(f"historical backtest period is reversed: {name}")
+        return self
+
+
+class BacktestDiagnosticSettings(BaseModel):
+    """Post-hoc alpha diagnostics for one immutable historical backtest run."""
+
+    horizon: PositiveInt = 5
+    score_layers: tuple[float, ...] = (0.01, 0.05, 0.10, 0.20)
+    bottom_fraction: float = Field(default=0.20, gt=0, le=1)
+    minimum_cross_section: PositiveInt = 20
+    factor_quantiles: int = Field(default=5, ge=2)
+    shap_sample_rows: PositiveInt = 10_000
+    prediction_tolerance: float = Field(default=1e-7, gt=0)
+
+    @model_validator(mode="after")
+    def validate_score_layers(self) -> BacktestDiagnosticSettings:
+        """Require unique ascending fractions in the open unit interval."""
+
+        if tuple(sorted(set(self.score_layers))) != self.score_layers:
+            raise ValueError("backtest.diagnostics.score_layers must be unique and ascending")
+        if any(value <= 0 or value >= 1 for value in self.score_layers):
+            raise ValueError("backtest.diagnostics.score_layers must be between 0 and 1")
+        return self
+
+
 class BacktestSettings(BaseModel):
     """Executable portfolio backtest assumptions."""
 
@@ -91,6 +156,8 @@ class BacktestSettings(BaseModel):
     benchmark_index_code: str = "000300.SH"
     annualization_days: PositiveInt = 252
     sell_delay_max_days: int = Field(default=20, ge=0)
+    historical: HistoricalBacktestSettings = Field(default_factory=HistoricalBacktestSettings)
+    diagnostics: BacktestDiagnosticSettings = Field(default_factory=BacktestDiagnosticSettings)
 
     @model_validator(mode="after")
     def validate_backtest_settings(self) -> BacktestSettings:

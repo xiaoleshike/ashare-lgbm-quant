@@ -11,7 +11,11 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from ashare_quant.backtest import BacktestRunner
+from ashare_quant.backtest import (
+    BacktestDiagnosticEngine,
+    BacktestRunner,
+    HistoricalBacktestEngine,
+)
 from ashare_quant.config import load_settings
 from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS
 from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
@@ -413,6 +417,21 @@ def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.Argument
         default=None,
         help="Comma-separated Top-N variants, default from config such as 10,20,50.",
     )
+    historical = commands.add_parser(
+        "historical", help="Run an OOS historical champion selection backtest."
+    )
+    historical.add_argument(
+        "--period", default=None, help="Configured period such as 2020-2023 or 2023-2026."
+    )
+    historical.add_argument("--start-date", default=None, help="Inclusive YYYYMMDD start date.")
+    historical.add_argument("--end-date", default=None, help="Inclusive YYYYMMDD end date.")
+    historical.add_argument(
+        "--top-n", default=None, help="Comma-separated Top-N variants; defaults to 10,20,50."
+    )
+    diagnostics = commands.add_parser(
+        "diagnostics", help="Diagnose alpha in one immutable historical backtest run."
+    )
+    diagnostics.add_argument("--run-id", required=True, help="Historical backtest run ID.")
 
 
 def add_pipeline_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1113,6 +1132,62 @@ def run_backtest_command(args: argparse.Namespace) -> int:
     )
     models_root = settings.paths.models if args.models_root is None else Path(args.models_root)
     output_root = settings.paths.backtests if args.output_root is None else Path(args.output_root)
+    if args.backtest_command == "diagnostics":
+        historical_root = settings.paths.reports / "backtest"
+        diagnostic_root = (
+            settings.paths.reports / "backtest_diagnostics"
+            if args.output_root is None
+            else Path(args.output_root)
+        )
+        diagnostic_engine = BacktestDiagnosticEngine(
+            processed_root=processed_root,
+            backtest_root=historical_root,
+            output_root=diagnostic_root,
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            diagnostic_result = diagnostic_engine.run(args.run_id)
+        except (DataValidationError, ValueError) as error:
+            print(f"backtest diagnostics failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"backtest_diagnostics: run_id={diagnostic_result.run_id} "
+            f"predictions={diagnostic_result.prediction_rows} "
+            f"labelled={diagnostic_result.labelled_rows} "
+            f"ic_days={diagnostic_result.ic_days} output={diagnostic_result.output_dir}"
+        )
+        return 0
+    if args.backtest_command == "historical":
+        historical_output = (
+            settings.paths.reports / "backtest"
+            if args.output_root is None
+            else Path(args.output_root)
+        )
+        historical_engine = HistoricalBacktestEngine(
+            raw_root=raw_root,
+            processed_root=processed_root,
+            output_root=historical_output,
+            models_root=models_root,
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            historical_result = historical_engine.run(
+                period=args.period,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                top_n=None if args.top_n is None else parse_top_n(args.top_n),
+            )
+        except (DataValidationError, ValueError) as error:
+            print(f"historical backtest failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"historical_backtest: run_id={historical_result.run_id} "
+            f"model_id={historical_result.model_id} period={historical_result.start_date}.."
+            f"{historical_result.end_date} output={historical_result.output_dir}"
+        )
+        return 0
     if args.backtest_command == "run":
         runner = BacktestRunner(
             raw_root,
