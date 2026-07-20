@@ -228,6 +228,32 @@ research:
     volatility_min_observations: 10
     high_volatility_pct: 4.0
     low_liquidity_amount: 50000.0
+  explainability:
+    top_positive_features: 5
+    top_negative_features: 3
+    strong_percentile: 0.99
+    moderate_percentile: 0.95
+    minimum_history_sessions: 20
+    high_confidence_history_sessions: 60
+    maximum_history_sessions: 252
+    score_tolerance: 0.0000001
+    contribution_tolerance: 0.000001
+  decision_support:
+    gap_feature: gap_mean_1d
+    ma20_feature: ma_ratio_20d
+    amount_ratio_feature: amount_ratio_20d
+    liquidity_feature: amihud_20d
+    short_return_feature: ret_5d
+    volatility_feature: realized_vol_20d
+    maximum_abs_open_gap: 0.03
+    minimum_ma20_ratio: 0.0
+    minimum_amount_ratio: 0.8
+    minimum_turnover_rate: 0.5
+    maximum_amihud: 0.00001
+    excessive_short_return: 0.15
+    elevated_volatility: 0.04
+    liquidity_decline_amount_ratio: 0.6
+    score_tolerance: 0.0000001
 backtest:
   execution: next_open
   initial_cash: 1000000.0

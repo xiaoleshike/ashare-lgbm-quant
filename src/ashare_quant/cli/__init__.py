@@ -44,7 +44,11 @@ from ashare_quant.orchestration import (
     resolve_completed_trading_date,
     run_with_production_lock,
 )
-from ashare_quant.research import DailyResearchReportGenerator
+from ashare_quant.research import (
+    DailyResearchReportGenerator,
+    ExplainabilityEngine,
+    InvestmentDecisionSupport,
+)
 from ashare_quant.strategy import CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
@@ -361,9 +365,18 @@ def add_research_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     parser.add_argument(
         "--reports-root", default=None, help="Override the configured report input/output root."
     )
+    parser.add_argument(
+        "--models-root", default=None, help="Override the configured model registry root."
+    )
     commands = parser.add_subparsers(dest="research_command", required=True)
     report = commands.add_parser("report", help="Generate one daily quantitative research report.")
     report.add_argument("--as-of", required=True, help="Candidate date in YYYYMMDD.")
+    explain = commands.add_parser("explain", help="Explain unchanged champion-model scores.")
+    explain.add_argument("--as-of", required=True, help="Candidate date in YYYYMMDD.")
+    decision = commands.add_parser(
+        "decision", help="Generate human-review investment decision support."
+    )
+    decision.add_argument("--as-of", required=True, help="Candidate date in YYYYMMDD.")
 
 
 def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1021,8 +1034,6 @@ def run_research_command(args: argparse.Namespace) -> int:
 
     settings = load_settings(args.config)
     configure_logging(settings.logging.level, settings.logging.json_logs)
-    if args.research_command != "report":
-        raise ValueError(f"Unsupported research command: {args.research_command}")
     raw_root = (
         settings.paths.parquet_store if args.storage_root is None else Path(args.storage_root)
     )
@@ -1030,6 +1041,46 @@ def run_research_command(args: argparse.Namespace) -> int:
         settings.paths.processed_data if args.processed_root is None else Path(args.processed_root)
     )
     reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    if args.research_command == "decision":
+        support = InvestmentDecisionSupport(
+            raw_root=raw_root,
+            processed_root=processed_root,
+            reports_root=reports_root,
+            settings=settings.research.decision_support,
+        )
+        try:
+            decision_result = support.generate(args.as_of)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"investment decision support failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"decision_support: date={decision_result.as_of} "
+            f"candidates={decision_result.candidate_count} model_id={decision_result.model_id} "
+            f"output={decision_result.json_path}"
+        )
+        return 0
+    if args.research_command == "explain":
+        models_root = settings.paths.models if args.models_root is None else Path(args.models_root)
+        engine = ExplainabilityEngine(
+            registry=ModelRegistry(models_root),
+            processed_root=processed_root,
+            reports_root=reports_root,
+            settings=settings.research.explainability,
+        )
+        try:
+            explanation_result = engine.explain(args.as_of)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"research explanation failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"research_explanations: date={explanation_result.as_of} "
+            f"candidates={explanation_result.candidate_count} "
+            f"model_id={explanation_result.model_id} method={explanation_result.method} "
+            f"output={explanation_result.json_path}"
+        )
+        return 0
+    if args.research_command != "report":
+        raise ValueError(f"Unsupported research command: {args.research_command}")
     generator = DailyResearchReportGenerator(
         raw_root=raw_root,
         processed_root=processed_root,
@@ -1037,13 +1088,14 @@ def run_research_command(args: argparse.Namespace) -> int:
         settings=settings.research.daily_report,
     )
     try:
-        result = generator.generate(args.as_of)
+        report_result = generator.generate(args.as_of)
     except (DataValidationError, OSError, ValueError) as error:
         print(f"daily research report failed: {error}", file=sys.stderr)
         return 2
     print(
-        f"daily_research_report: date={result.as_of} candidates={result.candidate_count} "
-        f"model_id={result.model_id} output={result.report_path}"
+        f"daily_research_report: date={report_result.as_of} "
+        f"candidates={report_result.candidate_count} "
+        f"model_id={report_result.model_id} output={report_result.report_path}"
     )
     return 0
 

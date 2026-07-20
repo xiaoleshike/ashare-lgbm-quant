@@ -404,10 +404,66 @@ class DailyResearchReportSettings(BaseModel):
         return self
 
 
+class ExplainabilitySettings(BaseModel):
+    """Thresholds for read-only local model-score explanations."""
+
+    top_positive_features: PositiveInt = 5
+    top_negative_features: PositiveInt = 3
+    strong_percentile: float = Field(default=0.99, gt=0, le=1)
+    moderate_percentile: float = Field(default=0.95, gt=0, le=1)
+    minimum_history_sessions: PositiveInt = 20
+    high_confidence_history_sessions: PositiveInt = 60
+    maximum_history_sessions: PositiveInt = 252
+    score_tolerance: float = Field(default=1e-7, gt=0)
+    contribution_tolerance: float = Field(default=1e-6, gt=0)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> ExplainabilitySettings:
+        """Require ordered signal and same-model history thresholds."""
+
+        if self.moderate_percentile > self.strong_percentile:
+            raise ValueError(
+                "research explainability moderate_percentile must not exceed strong_percentile"
+            )
+        if self.minimum_history_sessions > self.high_confidence_history_sessions:
+            raise ValueError(
+                "research explainability minimum_history_sessions must not exceed "
+                "high_confidence_history_sessions"
+            )
+        if self.high_confidence_history_sessions > self.maximum_history_sessions:
+            raise ValueError(
+                "research explainability high_confidence_history_sessions must not exceed "
+                "maximum_history_sessions"
+            )
+        return self
+
+
+class DecisionSupportSettings(BaseModel):
+    """Configurable same-session observations for human investment review."""
+
+    gap_feature: str = "gap_mean_1d"
+    ma20_feature: str = "ma_ratio_20d"
+    amount_ratio_feature: str = "amount_ratio_20d"
+    liquidity_feature: str = "amihud_20d"
+    short_return_feature: str = "ret_5d"
+    volatility_feature: str = "realized_vol_20d"
+    maximum_abs_open_gap: float = Field(default=0.03, ge=0)
+    minimum_ma20_ratio: float = 0.0
+    minimum_amount_ratio: float = Field(default=0.8, ge=0)
+    minimum_turnover_rate: float = Field(default=0.5, ge=0)
+    maximum_amihud: float = Field(default=1e-5, gt=0)
+    excessive_short_return: float = Field(default=0.15, ge=0)
+    elevated_volatility: float = Field(default=0.04, ge=0)
+    liquidity_decline_amount_ratio: float = Field(default=0.6, ge=0)
+    score_tolerance: float = Field(default=1e-7, gt=0)
+
+
 class ResearchSettings(BaseModel):
     """Human-readable quantitative research reporting configuration."""
 
     daily_report: DailyResearchReportSettings = Field(default_factory=DailyResearchReportSettings)
+    explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
+    decision_support: DecisionSupportSettings = Field(default_factory=DecisionSupportSettings)
 
 
 class AppSettings(BaseModel):
