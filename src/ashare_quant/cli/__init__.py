@@ -34,9 +34,11 @@ from ashare_quant.features import (
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
 from ashare_quant.models import (
+    ModelDriftDiagnosticEngine,
     ModelRegistry,
     ProductionInferenceEngine,
     ProductionRankerTrainer,
+    PurgedWalkForwardPlanner,
     RankerBaselineRunner,
 )
 from ashare_quant.orchestration import (
@@ -334,6 +336,39 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     retire.add_argument("model_id", help="Registered model identifier.")
     predict = commands.add_parser("predict", help="Score one completed session with the champion.")
     predict.add_argument("--as-of", required=True, help="Completed session in YYYYMMDD.")
+    diagnostics = commands.add_parser(
+        "diagnostics", help="Run read-only diagnostics for registered model artifacts."
+    )
+    diagnostic_commands = diagnostics.add_subparsers(
+        dest="models_diagnostics_command", required=True
+    )
+    drift = diagnostic_commands.add_parser(
+        "drift", help="Diagnose feature, score, and feature-response drift."
+    )
+    drift.add_argument("--model-id", required=True, help="Registered model identifier.")
+    drift.add_argument("--start-date", required=True, help="Inclusive YYYYMMDD date.")
+    drift.add_argument("--end-date", required=True, help="Inclusive YYYYMMDD date.")
+    walk_forward = commands.add_parser(
+        "walk-forward-plan",
+        help="Build a purged chronological fold plan without fitting models.",
+    )
+    walk_forward.add_argument("--start-date", required=True, help="Inclusive YYYYMMDD date.")
+    walk_forward.add_argument("--end-date", required=True, help="Inclusive YYYYMMDD date.")
+    walk_forward.add_argument(
+        "--scheme", required=True, choices=("expanding", "rolling"), help="Training window scheme."
+    )
+    walk_forward.add_argument(
+        "--model-id", default=None, help="Registered model identity; defaults to champion."
+    )
+    walk_forward.add_argument(
+        "--purge-days", type=int, default=None, help="Override purged trading sessions."
+    )
+    walk_forward.add_argument(
+        "--embargo-days", type=int, default=None, help="Override embargo trading sessions."
+    )
+    walk_forward.add_argument(
+        "--rolling-years", type=int, default=None, help="Override rolling window years."
+    )
 
 
 def add_strategy_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -895,6 +930,62 @@ def run_models_command(args: argparse.Namespace) -> int:
     )
     output_root = settings.paths.models if args.output_root is None else Path(args.output_root)
     reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    if args.models_command == "walk-forward-plan":
+        raw_root = (
+            settings.paths.parquet_store if args.storage_root is None else Path(args.storage_root)
+        )
+        planner = PurgedWalkForwardPlanner(
+            raw_root=raw_root,
+            models_root=output_root,
+            reports_root=reports_root,
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            plan = planner.build(
+                start_date=args.start_date,
+                end_date=args.end_date,
+                scheme=args.scheme,
+                model_id=args.model_id,
+                purge_days=args.purge_days,
+                embargo_days=args.embargo_days,
+                rolling_years=args.rolling_years,
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"walk-forward planning failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"walk_forward_plan: run_id={plan.run_id} scheme={plan.scheme} "
+            f"model_id={plan.model_id} folds={plan.fold_count} output={plan.output_dir}"
+        )
+        return 0
+    if args.models_command == "diagnostics":
+        if args.models_diagnostics_command != "drift":
+            raise ValueError(
+                f"Unsupported models diagnostics command: {args.models_diagnostics_command}"
+            )
+        drift_engine = ModelDriftDiagnosticEngine(
+            processed_root=processed_root,
+            models_root=output_root,
+            reports_root=reports_root,
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            drift_result = drift_engine.run(
+                model_id=args.model_id,
+                start_date=args.start_date,
+                end_date=args.end_date,
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"model drift diagnostics failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"model_drift_diagnostics: run_id={drift_result.run_id} "
+            f"model_id={drift_result.model_id} features={drift_result.feature_count} "
+            f"months={drift_result.months} output={drift_result.output_dir}"
+        )
+        return 0
     if args.models_command == "predict":
         config_path = Path(effective_config_path(args.config))
         raw_store = build_store(args.storage_root, settings)
@@ -907,7 +998,7 @@ def run_models_command(args: argparse.Namespace) -> int:
             feature_store,
             config_path=config_path,
         )
-        engine = ProductionInferenceEngine(
+        inference_engine = ProductionInferenceEngine(
             registry=ModelRegistry(output_root),
             processed_root=processed_root,
             reports_root=reports_root,
@@ -915,7 +1006,7 @@ def run_models_command(args: argparse.Namespace) -> int:
             freshness=freshness,
         )
         try:
-            inference_result = engine.predict(args.as_of)
+            inference_result = inference_engine.predict(args.as_of)
         except (DataValidationError, OSError, ValueError) as error:
             print(f"production prediction failed: {error}", file=sys.stderr)
             return 2
@@ -977,12 +1068,14 @@ def run_models_command(args: argparse.Namespace) -> int:
         except (DataValidationError, ValueError) as error:
             print(f"ranker baseline failed: {error}", file=sys.stderr)
             return 2
-        for result in results:
+        for experiment_result in results:
             print(
-                f"{result.experiment_name}: experiment_id={result.experiment_id} "
-                f"features={result.feature_count} "
-                f"validation_rank_ic={result.validation_rank_ic:.6f} "
-                f"test_rank_ic={result.test_rank_ic:.6f} output={result.output_dir}"
+                f"{experiment_result.experiment_name}: "
+                f"experiment_id={experiment_result.experiment_id} "
+                f"features={experiment_result.feature_count} "
+                f"validation_rank_ic={experiment_result.validation_rank_ic:.6f} "
+                f"test_rank_ic={experiment_result.test_rank_ic:.6f} "
+                f"output={experiment_result.output_dir}"
             )
         return 0
     if args.models_command == "train-production":

@@ -122,6 +122,18 @@ diagnostics:
   lgbm_bagging_fraction: 0.8
   lgbm_bagging_freq: 1
   permutation_repeats: 1
+  model_drift:
+    label_horizon: 5
+    psi_bins: 10
+    score_reference_months: 12
+    reference_sample_rows: 200000
+    evaluation_sample_rows_per_month: 50000
+    minimum_daily_cross_section: 20
+    response_bucket_counts:
+      - 5
+      - 10
+    psi_warning_threshold: 0.10
+    psi_severe_threshold: 0.25
 ranker:
   label_horizon: 5
   relevance_grades: 5
@@ -150,6 +162,15 @@ ranker:
   portfolio_fractions:
     - 0.05
     - 0.10
+  walk_forward:
+    label_horizon: 5
+    annual_sessions: 252
+    minimum_training_years: 5
+    rolling_window_years: 5
+    validation_sessions: 252
+    purge_days: 6
+    embargo_days: 6
+    evaluation_frequency: monthly
 production_model:
   train_start: "20100101"
   train_end: "20260710"

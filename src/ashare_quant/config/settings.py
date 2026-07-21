@@ -230,6 +230,62 @@ class FeatureSettings(BaseModel):
         return self
 
 
+class ModelDriftDiagnosticSettings(BaseModel):
+    """Read-only champion drift diagnostics and deterministic sampling rules."""
+
+    label_horizon: int = Field(default=5, gt=0)
+    psi_bins: int = Field(default=10, ge=2, le=50)
+    score_reference_months: int = Field(default=12, ge=1)
+    reference_sample_rows: int = Field(default=200_000, ge=100)
+    evaluation_sample_rows_per_month: int = Field(default=50_000, ge=100)
+    minimum_daily_cross_section: int = Field(default=20, ge=3)
+    response_bucket_counts: tuple[int, ...] = (5, 10)
+    psi_warning_threshold: float = Field(default=0.10, ge=0)
+    psi_severe_threshold: float = Field(default=0.25, gt=0)
+
+    @model_validator(mode="after")
+    def validate_model_drift(self) -> ModelDriftDiagnosticSettings:
+        """Require ordered thresholds and unique supported response buckets."""
+
+        if self.psi_warning_threshold >= self.psi_severe_threshold:
+            raise ValueError("model drift PSI warning threshold must be below severe threshold")
+        if tuple(sorted(set(self.response_bucket_counts))) != self.response_bucket_counts:
+            raise ValueError("model drift response bucket counts must be unique and ascending")
+        if any(value < 2 for value in self.response_bucket_counts):
+            raise ValueError("model drift response bucket counts must be at least 2")
+        return self
+
+
+class WalkForwardPlanSettings(BaseModel):
+    """Trading-session boundaries for purged walk-forward experiment plans."""
+
+    label_horizon: PositiveInt = 5
+    annual_sessions: PositiveInt = 252
+    minimum_training_years: PositiveInt = 5
+    rolling_window_years: PositiveInt = 5
+    validation_sessions: PositiveInt = 252
+    purge_days: int = Field(default=6, ge=0)
+    embargo_days: int = Field(default=6, ge=0)
+    evaluation_frequency: Literal["monthly"] = "monthly"
+
+    @model_validator(mode="after")
+    def validate_leakage_boundaries(self) -> WalkForwardPlanSettings:
+        """Require labels to mature before the following window begins."""
+
+        # A signal on T enters on T+1 and exits H sessions after entry.
+        minimum_gap = self.label_horizon + 1
+        if self.purge_days < minimum_gap:
+            raise ValueError(
+                f"ranker.walk_forward.purge_days must be at least label_horizon + 1 ({minimum_gap})"
+            )
+        if self.embargo_days < minimum_gap:
+            raise ValueError(
+                "ranker.walk_forward.embargo_days must be at least "
+                f"label_horizon + 1 ({minimum_gap})"
+            )
+        return self
+
+
 class DiagnosticSettings(BaseModel):
     """Leakage-controlled feature diagnostics and selection rules."""
 
@@ -253,6 +309,7 @@ class DiagnosticSettings(BaseModel):
     lgbm_bagging_fraction: float = Field(default=0.8, gt=0.0, le=1.0)
     lgbm_bagging_freq: int = Field(default=1, ge=0)
     permutation_repeats: int = Field(default=1, ge=1, le=10)
+    model_drift: ModelDriftDiagnosticSettings = Field(default_factory=ModelDriftDiagnosticSettings)
 
 
 class RankerSettings(BaseModel):
@@ -281,6 +338,7 @@ class RankerSettings(BaseModel):
     minimum_group_size: int = Field(default=20, ge=2)
     ndcg_at: tuple[int, ...] = (10, 50)
     portfolio_fractions: tuple[float, ...] = (0.05, 0.10)
+    walk_forward: WalkForwardPlanSettings = Field(default_factory=WalkForwardPlanSettings)
 
     @model_validator(mode="after")
     def validate_chronological_splits(self) -> RankerSettings:
@@ -307,6 +365,8 @@ class RankerSettings(BaseModel):
             raise ValueError("ranker train, validation, and test periods must not overlap")
         if any(value <= 0 or value > 1 for value in self.portfolio_fractions):
             raise ValueError("ranker portfolio fractions must be in (0, 1]")
+        if self.walk_forward.label_horizon != self.label_horizon:
+            raise ValueError("ranker.walk_forward.label_horizon must match ranker.label_horizon")
         return self
 
 
