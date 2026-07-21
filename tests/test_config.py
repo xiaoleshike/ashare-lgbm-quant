@@ -89,7 +89,7 @@ def test_label_settings_are_loaded_from_default_config() -> None:
 
     settings = load_settings("config/default.yaml")
 
-    assert settings.labels.horizons == (3, 5, 10)
+    assert settings.labels.horizons == (5, 10, 20, 60)
     assert settings.labels.benchmark_index_code == "000300.SH"
     assert settings.labels.benchmark_index_code in settings.data.index_codes
     assert settings.labels.quantile_buckets == 5

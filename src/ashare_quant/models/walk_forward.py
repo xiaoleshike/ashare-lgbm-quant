@@ -22,7 +22,7 @@ from ashare_quant.utils.manifest import (
     current_git_info,
 )
 
-PLAN_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 2
 type WalkForwardScheme = Literal["expanding", "rolling"]
 
 
@@ -42,8 +42,6 @@ class WalkForwardFold:
     feature_hash: str
     model_id: str
     scheme: WalkForwardScheme
-    label_horizon: int
-    label_exit_lag_sessions: int
     train_sessions: int
     validation_sessions: int
     evaluation_sessions: int
@@ -162,8 +160,6 @@ class PurgedWalkForwardPlanner:
             "model_artifact_path": model.artifact_path,
             "feature_hash": model.feature_hash,
             "policy": {
-                "label_horizon": policy.label_horizon,
-                "label_exit_lag_sessions": policy.label_horizon + 1,
                 "annual_sessions": policy.annual_sessions,
                 "minimum_training_years": policy.minimum_training_years,
                 "rolling_window_years": rolling_window_years,
@@ -182,8 +178,8 @@ class PurgedWalkForwardPlanner:
                 "calendar_source": "trade_cal open sessions",
                 "labels_loaded": False,
                 "model_fitted": False,
-                "training_labels_mature_before_validation": True,
-                "validation_labels_mature_before_evaluation": True,
+                "fold_boundaries_are_horizon_agnostic": True,
+                "label_maturity_must_be_validated_by_horizon_plan": True,
             },
             "outputs": {
                 "folds": str(output_dir / "folds.json"),
@@ -281,8 +277,6 @@ def _build_folds(
             feature_hash=model.feature_hash,
             model_id=model.model_id,
             scheme=scheme,
-            label_horizon=policy.label_horizon,
-            label_exit_lag_sessions=policy.label_horizon + 1,
             train_sessions=train_end_index - train_start_index + 1,
             validation_sessions=policy.validation_sessions,
             evaluation_sessions=len(month_dates),
@@ -312,12 +306,6 @@ def _validate_fold(fold: WalkForwardFold, session_index: dict[str, int]) -> None
         raise DataValidationError(f"walk-forward purge boundary is invalid: {fold.fold_id}")
     if evaluation_start - validation_end - 1 != fold.embargo_sessions:
         raise DataValidationError(f"walk-forward embargo boundary is invalid: {fold.fold_id}")
-    if train_end + fold.label_exit_lag_sessions >= validation_start:
-        raise DataValidationError(f"training label can overlap validation in fold: {fold.fold_id}")
-    if validation_end + fold.label_exit_lag_sessions >= evaluation_start:
-        raise DataValidationError(
-            f"validation label can overlap evaluation in fold: {fold.fold_id}"
-        )
 
 
 def _validate_runtime_policy(
@@ -326,15 +314,10 @@ def _validate_runtime_policy(
     embargo_days: int,
     rolling_years: int,
 ) -> None:
-    minimum_gap = policy.label_horizon + 1
-    if purge_days < minimum_gap:
-        raise DataValidationError(
-            f"purge_days must be at least {minimum_gap} for horizon {policy.label_horizon}"
-        )
-    if embargo_days < minimum_gap:
-        raise DataValidationError(
-            f"embargo_days must be at least {minimum_gap} for horizon {policy.label_horizon}"
-        )
+    if purge_days < 0:
+        raise DataValidationError("purge_days must not be negative")
+    if embargo_days < 0:
+        raise DataValidationError("embargo_days must not be negative")
     if rolling_years <= 0:
         raise DataValidationError("rolling_years must be positive")
 

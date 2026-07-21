@@ -185,7 +185,7 @@ class UniverseSettings(BaseModel):
 class LabelSettings(BaseModel):
     """Executable forward-return label construction rules."""
 
-    horizons: tuple[int, ...] = (3, 5, 10)
+    horizons: tuple[PositiveInt, ...] = (5, 10, 20, 60)
     benchmark_index_code: str = "000300.SH"
     quantile_buckets: int = Field(default=5, ge=2)
     skip_unbuyable_entry: bool = True
@@ -195,6 +195,14 @@ class LabelSettings(BaseModel):
     max_exit_delay_days: int = Field(default=5, ge=0)
     price_tolerance: float = Field(default=1e-6, ge=0)
     price_adjustment: Literal["open_times_adj_factor"] = "open_times_adj_factor"
+
+    @model_validator(mode="after")
+    def validate_horizons(self) -> LabelSettings:
+        """Require deterministic, unique label horizons."""
+
+        if tuple(sorted(set(self.horizons))) != self.horizons:
+            raise ValueError("labels.horizons must be unique and ascending")
+        return self
 
 
 class FeatureSettings(BaseModel):
@@ -259,7 +267,6 @@ class ModelDriftDiagnosticSettings(BaseModel):
 class WalkForwardPlanSettings(BaseModel):
     """Trading-session boundaries for purged walk-forward experiment plans."""
 
-    label_horizon: PositiveInt = 5
     annual_sessions: PositiveInt = 252
     minimum_training_years: PositiveInt = 5
     rolling_window_years: PositiveInt = 5
@@ -268,21 +275,61 @@ class WalkForwardPlanSettings(BaseModel):
     embargo_days: int = Field(default=6, ge=0)
     evaluation_frequency: Literal["monthly"] = "monthly"
 
-    @model_validator(mode="after")
-    def validate_leakage_boundaries(self) -> WalkForwardPlanSettings:
-        """Require labels to mature before the following window begins."""
 
-        # A signal on T enters on T+1 and exits H sessions after entry.
-        minimum_gap = self.label_horizon + 1
-        if self.purge_days < minimum_gap:
+class HorizonExperimentSettings(BaseModel):
+    """One independently trained future multi-horizon challenger specification."""
+
+    name: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    horizon: Literal[5, 10, 20, 60]
+    holding_days: PositiveInt
+    execution_rule: Literal["next_open"] = "next_open"
+
+    @model_validator(mode="after")
+    def validate_holding_period(self) -> HorizonExperimentSettings:
+        """Prevent label and simulated holding horizons from diverging."""
+
+        if self.holding_days != self.horizon:
             raise ValueError(
-                f"ranker.walk_forward.purge_days must be at least label_horizon + 1 ({minimum_gap})"
+                "models.horizon_experiments holding_days must equal horizon: "
+                f"{self.name} has horizon={self.horizon}, holding_days={self.holding_days}"
             )
-        if self.embargo_days < minimum_gap:
-            raise ValueError(
-                "ranker.walk_forward.embargo_days must be at least "
-                f"label_horizon + 1 ({minimum_gap})"
-            )
+        return self
+
+
+class ModelExperimentSettings(BaseModel):
+    """Read-only experiment planning configuration."""
+
+    horizon_experiments: tuple[HorizonExperimentSettings, ...] = (
+        HorizonExperimentSettings(name="h5", horizon=5, holding_days=5),
+        HorizonExperimentSettings(name="h10", horizon=10, holding_days=10),
+        HorizonExperimentSettings(name="h20", horizon=20, holding_days=20),
+        HorizonExperimentSettings(name="h60", horizon=60, holding_days=60),
+    )
+    selection_period: HistoricalBacktestPeriodSettings = HistoricalBacktestPeriodSettings(
+        start_date="20150101", end_date="20221231"
+    )
+    final_test_period: HistoricalBacktestPeriodSettings = HistoricalBacktestPeriodSettings(
+        start_date="20230101", end_date="20260710"
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_experiments(self) -> ModelExperimentSettings:
+        """Require unique names and horizons so each target owns one experiment."""
+
+        if not self.horizon_experiments:
+            raise ValueError("models.horizon_experiments must not be empty")
+        names = [experiment.name for experiment in self.horizon_experiments]
+        horizons = [experiment.horizon for experiment in self.horizon_experiments]
+        if len(names) != len(set(names)):
+            raise ValueError("models.horizon_experiments names must be unique")
+        if len(horizons) != len(set(horizons)):
+            raise ValueError("models.horizon_experiments horizons must be unique")
+        if self.selection_period.start_date > self.selection_period.end_date:
+            raise ValueError("models.selection_period is reversed")
+        if self.final_test_period.start_date > self.final_test_period.end_date:
+            raise ValueError("models.final_test_period is reversed")
+        if self.selection_period.end_date >= self.final_test_period.start_date:
+            raise ValueError("models selection_period must end before final_test_period starts")
         return self
 
 
@@ -365,8 +412,6 @@ class RankerSettings(BaseModel):
             raise ValueError("ranker train, validation, and test periods must not overlap")
         if any(value <= 0 or value > 1 for value in self.portfolio_fractions):
             raise ValueError("ranker portfolio fractions must be in (0, 1]")
-        if self.walk_forward.label_horizon != self.label_horizon:
-            raise ValueError("ranker.walk_forward.label_horizon must match ranker.label_horizon")
         return self
 
 
@@ -612,6 +657,7 @@ class AppSettings(BaseModel):
     features: FeatureSettings = Field(default_factory=FeatureSettings)
     diagnostics: DiagnosticSettings = Field(default_factory=DiagnosticSettings)
     ranker: RankerSettings = Field(default_factory=RankerSettings)
+    models: ModelExperimentSettings = Field(default_factory=ModelExperimentSettings)
     production_model: ProductionModelSettings = Field(default_factory=ProductionModelSettings)
     production: ProductionSettings = Field(default_factory=ProductionSettings)
     strategy: StrategySettings = Field(default_factory=StrategySettings)
@@ -639,6 +685,14 @@ class AppSettings(BaseModel):
             raise ValueError(
                 "configured benchmark_index_code must be included in data.index_codes "
                 f"for index_daily ingestion: {label_benchmark}"
+            )
+        configured_labels = set(self.labels.horizons)
+        planned_horizons = {experiment.horizon for experiment in self.models.horizon_experiments}
+        missing_horizons = sorted(planned_horizons - configured_labels)
+        if missing_horizons:
+            raise ValueError(
+                "models.horizon_experiments require horizons missing from labels.horizons: "
+                f"{missing_horizons}"
             )
         return self
 

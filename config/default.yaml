@@ -56,9 +56,10 @@ universe:
   price_tolerance: 0.000001
 labels:
   horizons:
-    - 3
     - 5
     - 10
+    - 20
+    - 60
   benchmark_index_code: 000300.SH
   quantile_buckets: 5
   skip_unbuyable_entry: true
@@ -163,7 +164,6 @@ ranker:
     - 0.05
     - 0.10
   walk_forward:
-    label_horizon: 5
     annual_sessions: 252
     minimum_training_years: 5
     rolling_window_years: 5
@@ -171,6 +171,30 @@ ranker:
     purge_days: 6
     embargo_days: 6
     evaluation_frequency: monthly
+models:
+  horizon_experiments:
+    - name: h5
+      horizon: 5
+      holding_days: 5
+      execution_rule: next_open
+    - name: h10
+      horizon: 10
+      holding_days: 10
+      execution_rule: next_open
+    - name: h20
+      horizon: 20
+      holding_days: 20
+      execution_rule: next_open
+    - name: h60
+      horizon: 60
+      holding_days: 60
+      execution_rule: next_open
+  selection_period:
+    start_date: "20150101"
+    end_date: "20221231"
+  final_test_period:
+    start_date: "20230101"
+    end_date: "20260710"
 production_model:
   train_start: "20100101"
   train_end: "20260710"

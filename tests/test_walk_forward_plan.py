@@ -81,23 +81,22 @@ def test_non_trading_request_boundaries_map_only_to_open_sessions(tmp_path: Path
             assert "20200104" <= fold[field] <= "20200628"
 
 
-def test_runtime_gap_smaller_than_label_exit_lag_is_rejected(tmp_path: Path) -> None:
+def test_walk_forward_gaps_are_horizon_agnostic_boundaries(tmp_path: Path) -> None:
     planner, _ = _planner_fixture(tmp_path)
 
-    with pytest.raises(DataValidationError, match="purge_days must be at least 3"):
-        planner.build(
-            start_date="20200104",
-            end_date="20200630",
-            scheme="expanding",
-            purge_days=2,
-        )
-    with pytest.raises(DataValidationError, match="embargo_days must be at least 3"):
-        planner.build(
-            start_date="20200104",
-            end_date="20200630",
-            scheme="expanding",
-            embargo_days=2,
-        )
+    result = planner.build(
+        start_date="20200104",
+        end_date="20200630",
+        scheme="expanding",
+        purge_days=2,
+        embargo_days=2,
+    )
+
+    folds = _read_folds(result.output_dir)
+    assert all(fold["purge_sessions"] == 2 for fold in folds)
+    assert all(fold["embargo_sessions"] == 2 for fold in folds)
+    assert all("label_horizon" not in fold for fold in folds)
+    assert all("label_exit_lag_sessions" not in fold for fold in folds)
 
 
 def test_plan_manifest_records_fold_model_and_calendar_provenance(tmp_path: Path) -> None:
@@ -119,6 +118,7 @@ def test_plan_manifest_records_fold_model_and_calendar_provenance(tmp_path: Path
     assert manifest["trade_calendar"]["session_count"] == len(sessions)
     assert manifest["leakage_contract"]["labels_loaded"] is False
     assert manifest["leakage_contract"]["model_fitted"] is False
+    assert manifest["leakage_contract"]["fold_boundaries_are_horizon_agnostic"] is True
     required = {
         "fold_id",
         "train_start",
@@ -210,7 +210,6 @@ def _planner_fixture(tmp_path: Path) -> tuple[PurgedWalkForwardPlanner, tuple[st
             "ranker": {
                 "label_horizon": 2,
                 "walk_forward": {
-                    "label_horizon": 2,
                     "annual_sessions": 10,
                     "minimum_training_years": 2,
                     "rolling_window_years": 2,

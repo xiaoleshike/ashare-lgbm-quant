@@ -526,7 +526,7 @@ def test_labels_validate_cli_returns_nonzero_for_missing_configured_horizon(
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "configured label horizons are missing: [10]" in captured.out
+    assert "configured label horizons are missing: [10, 20, 60]" in captured.out
 
 
 def test_failed_labels_build_does_not_replace_existing_manifest(

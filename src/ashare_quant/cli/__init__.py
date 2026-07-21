@@ -36,7 +36,9 @@ from ashare_quant.labels.validation import LabelValidationResult
 from ashare_quant.models import (
     ModelDriftDiagnosticEngine,
     ModelRegistry,
+    MultiHorizonExperimentPlanner,
     ProductionInferenceEngine,
+    ProductionObservationRecorder,
     ProductionRankerTrainer,
     PurgedWalkForwardPlanner,
     RankerBaselineRunner,
@@ -213,7 +215,7 @@ def add_labels_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     build_parser.add_argument(
         "--horizons",
         default=None,
-        help="Comma-separated trading-day horizons, for example 3,5,10.",
+        help="Comma-separated trading-day horizons, for example 5,10,20,60.",
     )
 
     validate_parser = labels_subparsers.add_parser(
@@ -369,6 +371,20 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     walk_forward.add_argument(
         "--rolling-years", type=int, default=None, help="Override rolling window years."
     )
+    horizon_plan = commands.add_parser(
+        "horizon-plan",
+        help="Bind configured label horizons to an existing purged fold plan.",
+    )
+    horizon_plan.add_argument(
+        "--folds-manifest",
+        default=None,
+        help="Existing walk-forward manifest.json; defaults to latest compatible plan.",
+    )
+    observation = commands.add_parser(
+        "observation-log",
+        help="Record existing prediction and candidate rankings without trading actions.",
+    )
+    observation.add_argument("--as-of", required=True, help="Prediction date in YYYYMMDD.")
 
 
 def add_strategy_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -930,11 +946,52 @@ def run_models_command(args: argparse.Namespace) -> int:
     )
     output_root = settings.paths.models if args.output_root is None else Path(args.output_root)
     reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    if args.models_command == "observation-log":
+        recorder = ProductionObservationRecorder(reports_root)
+        try:
+            observation = recorder.record(args.as_of)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"production observation failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"production_observation: date={observation.prediction_date} "
+            f"model_id={observation.model_id} candidates={observation.candidate_count} "
+            f"output={observation.output_path}"
+        )
+        return 0
+    if args.models_command == "horizon-plan":
+        horizon_planner = MultiHorizonExperimentPlanner(
+            raw_root=(
+                settings.paths.parquet_store
+                if args.storage_root is None
+                else Path(args.storage_root)
+            ),
+            models_root=output_root,
+            processed_root=processed_root,
+            reports_root=reports_root,
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            horizon_result = horizon_planner.build(
+                folds_manifest=(None if args.folds_manifest is None else Path(args.folds_manifest))
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"horizon experiment planning failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"horizon_experiment_plan: run_id={horizon_result.run_id} "
+            f"source_model_id={horizon_result.source_model_id} "
+            f"experiments={horizon_result.experiment_count} "
+            f"folds_manifest={horizon_result.folds_manifest} "
+            f"output={horizon_result.output_dir}"
+        )
+        return 0
     if args.models_command == "walk-forward-plan":
         raw_root = (
             settings.paths.parquet_store if args.storage_root is None else Path(args.storage_root)
         )
-        planner = PurgedWalkForwardPlanner(
+        walk_forward_planner = PurgedWalkForwardPlanner(
             raw_root=raw_root,
             models_root=output_root,
             reports_root=reports_root,
@@ -942,7 +999,7 @@ def run_models_command(args: argparse.Namespace) -> int:
             config_path=Path(effective_config_path(args.config)),
         )
         try:
-            plan = planner.build(
+            walk_forward_result = walk_forward_planner.build(
                 start_date=args.start_date,
                 end_date=args.end_date,
                 scheme=args.scheme,
@@ -955,8 +1012,9 @@ def run_models_command(args: argparse.Namespace) -> int:
             print(f"walk-forward planning failed: {error}", file=sys.stderr)
             return 2
         print(
-            f"walk_forward_plan: run_id={plan.run_id} scheme={plan.scheme} "
-            f"model_id={plan.model_id} folds={plan.fold_count} output={plan.output_dir}"
+            f"walk_forward_plan: run_id={walk_forward_result.run_id} "
+            f"scheme={walk_forward_result.scheme} model_id={walk_forward_result.model_id} "
+            f"folds={walk_forward_result.fold_count} output={walk_forward_result.output_dir}"
         )
         return 0
     if args.models_command == "diagnostics":
