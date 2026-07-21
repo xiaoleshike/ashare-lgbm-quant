@@ -50,3 +50,7 @@ ashare-quant --config config/default.yaml models observation-log --as-of 2026071
 ```
 
 This writes `reports/production_observation/20260717.json` with the model ID, candidate count, Top-10/20/50 ranked candidates, source fingerprints, and empty future-return placeholders. It does not calculate returns, generate orders, or create new signals.
+
+The downstream selection-fold-only training contract is documented in
+[`challenger_training.md`](challenger_training.md). It consumes this plan
+without rebuilding folds and leaves final-test periods unread.

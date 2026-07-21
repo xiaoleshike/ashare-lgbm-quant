@@ -1,5 +1,6 @@
 """LightGBM baseline model experiments."""
 
+from ashare_quant.models.challenger import ChallengerTrainer, ChallengerTrainingResult
 from ashare_quant.models.drift_diagnostics import (
     ModelDriftDiagnosticEngine,
     ModelDriftDiagnosticResult,
@@ -23,6 +24,8 @@ from ashare_quant.models.walk_forward import (
 )
 
 __all__ = [
+    "ChallengerTrainer",
+    "ChallengerTrainingResult",
     "InferenceResult",
     "HorizonExperimentPlanResult",
     "ModelDriftDiagnosticEngine",

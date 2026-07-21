@@ -34,6 +34,7 @@ from ashare_quant.features import (
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
 from ashare_quant.models import (
+    ChallengerTrainer,
     ModelDriftDiagnosticEngine,
     ModelRegistry,
     MultiHorizonExperimentPlanner,
@@ -379,6 +380,25 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "--folds-manifest",
         default=None,
         help="Existing walk-forward manifest.json; defaults to latest compatible plan.",
+    )
+    challenger = commands.add_parser(
+        "train-challenger",
+        help="Train immutable candidate Rankers from a multi-horizon experiment plan.",
+    )
+    challenger_selection = challenger.add_mutually_exclusive_group(required=True)
+    challenger_selection.add_argument(
+        "--experiment-id",
+        help="Horizon experiment ID, name, or alias such as experiment_c_h20.",
+    )
+    challenger_selection.add_argument(
+        "--all-horizons",
+        action="store_true",
+        help="Train one independent challenger for every horizon in the plan.",
+    )
+    challenger.add_argument(
+        "--experiment-manifest",
+        default=None,
+        help="Specific horizon experiment_manifest.json; defaults to the latest plan.",
     )
     observation = commands.add_parser(
         "observation-log",
@@ -986,6 +1006,35 @@ def run_models_command(args: argparse.Namespace) -> int:
             f"folds_manifest={horizon_result.folds_manifest} "
             f"output={horizon_result.output_dir}"
         )
+        return 0
+    if args.models_command == "train-challenger":
+        challenger_trainer = ChallengerTrainer(
+            processed_root=processed_root,
+            models_root=output_root,
+            reports_root=reports_root,
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            challenger_results = challenger_trainer.train(
+                experiment_id=args.experiment_id,
+                all_horizons=args.all_horizons,
+                experiment_manifest=(
+                    None if args.experiment_manifest is None else Path(args.experiment_manifest)
+                ),
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"challenger training failed: {error}", file=sys.stderr)
+            return 2
+        for challenger_result in challenger_results:
+            print(
+                f"challenger_trained: model_id={challenger_result.model_id} "
+                f"horizon={challenger_result.horizon} "
+                f"train_rows={challenger_result.training_rows} "
+                f"validation_rows={challenger_result.validation_rows} "
+                f"validation_rank_ic={challenger_result.validation_rank_ic:.6f} "
+                f"status=candidate output={challenger_result.output_dir}"
+            )
         return 0
     if args.models_command == "walk-forward-plan":
         raw_root = (
