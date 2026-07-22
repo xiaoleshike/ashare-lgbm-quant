@@ -195,6 +195,20 @@ models:
   final_test_period:
     start_date: "20230101"
     end_date: "20260710"
+  challenger_evaluation:
+    score_layers:
+      - 0.01
+      - 0.05
+      - 0.10
+      - 0.20
+      - 0.50
+    minimum_cross_section: 20
+    minimum_labelled_days: 60
+    regime_return_threshold: 0.005
+    minimum_rank_ic: 0.0
+    minimum_rank_ic_delta: 0.0
+    minimum_positive_ic_ratio: 0.50
+    minimum_top10_return_delta: 0.0
 production_model:
   train_start: "20100101"
   train_end: "20260710"

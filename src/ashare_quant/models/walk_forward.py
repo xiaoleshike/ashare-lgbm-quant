@@ -182,8 +182,8 @@ class PurgedWalkForwardPlanner:
                 "label_maturity_must_be_validated_by_horizon_plan": True,
             },
             "outputs": {
-                "folds": str(output_dir / "folds.json"),
-                "manifest": str(output_dir / "manifest.json"),
+                "folds": "folds.json",
+                "manifest": "manifest.json",
             },
         }
         atomic_write_json(output_dir / "folds.json", fold_payload)

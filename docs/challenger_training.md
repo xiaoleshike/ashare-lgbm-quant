@@ -53,3 +53,6 @@ After publication, the registry records the model as `candidate`. Validation
 metrics are stored, while test metrics remain empty. Promotion remains a
 separate explicit operation and cannot pass the existing promotion gate until
 a later phase performs the authorized final evaluation.
+
+Fair final-test scoring and comparison are documented in
+[`challenger_evaluation.md`](challenger_evaluation.md).

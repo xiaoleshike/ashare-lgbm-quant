@@ -88,6 +88,31 @@ def test_challenger_reads_horizon_manifest_and_registers_candidate(
     assert metrics["test"] == {}
 
 
+def test_challenger_reads_legacy_repository_relative_folds_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trainer, sources = _trainer_fixture(tmp_path)
+    fold_manifest = _read_json(sources["fold_manifest"])
+    fold_manifest["outputs"]["folds"] = str(sources["folds"].relative_to(tmp_path))
+    atomic_write_json(sources["fold_manifest"], fold_manifest)
+    _refresh_fold_hashes(sources)
+    monkeypatch.setattr(
+        "ashare_quant.models.challenger.RankerDataLoader.load",
+        lambda self, start_date, end_date, feature_names, relevance_grades: _ranker_dataset(
+            feature_names, start_date
+        ),
+    )
+    monkeypatch.setattr("ashare_quant.models.challenger.fit_ranker", lambda *_args: _FakeRanker())
+
+    result = trainer.train(
+        experiment_id="experiment_c_h5",
+        experiment_manifest=sources["horizon_manifest"],
+    )[0]
+
+    assert result.horizon == 5
+    assert result.experiment_id.startswith("experiment_c_h5_")
+
+
 def test_challenger_rejects_label_horizon_mismatch(tmp_path: Path) -> None:
     trainer, sources = _trainer_fixture(tmp_path)
     payload = _read_json(sources["horizon_manifest"])

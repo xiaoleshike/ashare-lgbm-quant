@@ -119,6 +119,10 @@ def test_plan_manifest_records_fold_model_and_calendar_provenance(tmp_path: Path
     assert manifest["leakage_contract"]["labels_loaded"] is False
     assert manifest["leakage_contract"]["model_fitted"] is False
     assert manifest["leakage_contract"]["fold_boundaries_are_horizon_agnostic"] is True
+    assert manifest["outputs"] == {
+        "folds": "folds.json",
+        "manifest": "manifest.json",
+    }
     required = {
         "fold_id",
         "train_start",

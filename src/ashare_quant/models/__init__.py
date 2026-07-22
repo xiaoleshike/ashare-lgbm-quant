@@ -1,9 +1,21 @@
 """LightGBM baseline model experiments."""
 
 from ashare_quant.models.challenger import ChallengerTrainer, ChallengerTrainingResult
+from ashare_quant.models.challenger_evaluation import (
+    ChallengerEvaluationEngine,
+    ChallengerEvaluationResult,
+)
+from ashare_quant.models.challenger_prediction import (
+    ChallengerPredictionEngine,
+    ChallengerPredictionResult,
+)
 from ashare_quant.models.drift_diagnostics import (
     ModelDriftDiagnosticEngine,
     ModelDriftDiagnosticResult,
+)
+from ashare_quant.models.ensemble_evaluation import (
+    EnsembleEvaluationResult,
+    MultiHorizonEnsembleEngine,
 )
 from ashare_quant.models.horizon_experiments import (
     HorizonExperimentPlanResult,
@@ -26,11 +38,17 @@ from ashare_quant.models.walk_forward import (
 __all__ = [
     "ChallengerTrainer",
     "ChallengerTrainingResult",
+    "ChallengerEvaluationEngine",
+    "ChallengerEvaluationResult",
+    "ChallengerPredictionEngine",
+    "ChallengerPredictionResult",
+    "EnsembleEvaluationResult",
     "InferenceResult",
     "HorizonExperimentPlanResult",
     "ModelDriftDiagnosticEngine",
     "ModelDriftDiagnosticResult",
     "ModelRegistry",
+    "MultiHorizonEnsembleEngine",
     "MultiHorizonExperimentPlanner",
     "ProductionInferenceEngine",
     "ProductionObservationRecorder",

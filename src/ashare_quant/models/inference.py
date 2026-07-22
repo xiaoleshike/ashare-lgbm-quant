@@ -6,7 +6,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,6 +62,17 @@ class InferenceResult:
     predictions: DataFrame
 
 
+@dataclass(frozen=True, slots=True)
+class RegisteredPredictionBatch:
+    """Scores and validated input identity for one registered model and date range."""
+
+    model_id: str
+    feature_names: tuple[str, ...]
+    feature_hash: str
+    universe_rows: int
+    predictions: DataFrame
+
+
 class ProductionInferenceEngine:
     """Validate, score, and publish one completed A-share session."""
 
@@ -91,49 +102,29 @@ class ProductionInferenceEngine:
         champion = self.registry.get_champion("lightgbm_ranker")
         if champion is None:
             raise DataValidationError("no champion is registered for model_type=lightgbm_ranker")
-        artifact = Path(champion.artifact_path)
-        feature_names, digest = _load_and_validate_feature_list(artifact, champion)
-        model_path = artifact / "model.txt"
-        if not model_path.is_file():
-            raise DataValidationError(f"champion model.txt does not exist: {model_path}")
-
-        features, universe = _load_as_of_frames(self.processed_root, as_of, feature_names)
-        eligible = _validate_and_filter_inputs(features, universe, as_of)
-        matrix = eligible.loc[:, list(feature_names)].apply(pd.to_numeric, errors="coerce")
-        matrix = matrix.replace([np.inf, -np.inf], np.nan).astype("float32")
-        model = self._model_loader(model_path)
-        scores = np.asarray(model.predict(matrix), dtype=float)
-        if scores.ndim != 1 or len(scores) != len(eligible):
-            raise DataValidationError(
-                "model returned an invalid prediction shape: "
-                f"expected={len(eligible)} actual={scores.shape}"
-            )
-        if not np.isfinite(scores).all():
-            raise DataValidationError("model returned non-finite prediction scores")
-
-        predictions = eligible.loc[:, ["trade_date", "ts_code"]].copy()
-        predictions["prediction_score"] = scores
-        predictions["model_id"] = champion.model_id
-        predictions = predictions.sort_values(
-            ["prediction_score", "ts_code"],
-            ascending=[False, True],
-            kind="mergesort",
-        ).reset_index(drop=True)
+        batch = score_registered_model_range(
+            champion,
+            processed_root=self.processed_root,
+            start_date=as_of,
+            end_date=as_of,
+            model_loader=self._model_loader,
+        )
+        predictions = batch.predictions.drop(columns="rank")
         output_dir = self._publish(
             as_of,
             champion,
-            feature_names,
-            digest,
+            batch.feature_names,
+            batch.feature_hash,
             predictions,
-            universe_size=len(universe),
+            universe_size=batch.universe_rows,
             readiness=readiness,
             elapsed_seconds=monotonic() - started,
         )
         return InferenceResult(
             as_of=as_of,
             model_id=champion.model_id,
-            feature_count=len(feature_names),
-            universe_size=len(universe),
+            feature_count=len(batch.feature_names),
+            universe_size=batch.universe_rows,
             prediction_count=len(predictions),
             output_dir=output_dir,
             predictions=predictions,
@@ -211,6 +202,85 @@ def _load_lightgbm_model(path: Path) -> PredictionModel:
     return cast(PredictionModel, lgb.Booster(model_file=str(path)))
 
 
+def score_registered_model_range(
+    model_record: RegisteredModel,
+    *,
+    processed_root: Path,
+    start_date: str,
+    end_date: str,
+    allowed_ranges: Sequence[tuple[str, str]] | None = None,
+    model_loader: Callable[[Path], PredictionModel] | None = None,
+) -> RegisteredPredictionBatch:
+    """Score validated model-universe rows without reading labels or future prices."""
+
+    if start_date > end_date:
+        raise DataValidationError("inference date range is reversed")
+    artifact = Path(model_record.artifact_path)
+    feature_names, digest = load_registered_feature_list(artifact, model_record)
+    model_path = artifact / "model.txt"
+    if not model_path.is_file():
+        raise DataValidationError(f"registered model.txt does not exist: {model_path}")
+    features, universe = _load_range_frames(
+        processed_root,
+        start_date,
+        end_date,
+        feature_names,
+    )
+    if allowed_ranges is not None:
+        _validate_allowed_ranges(allowed_ranges, start_date, end_date)
+        feature_mask = _date_range_mask(features["trade_date"], allowed_ranges)
+        universe_mask = _date_range_mask(universe["trade_date"], allowed_ranges)
+        features = features.loc[feature_mask].reset_index(drop=True)
+        universe = universe.loc[universe_mask].reset_index(drop=True)
+    feature_dates = set(features["trade_date"].astype(str))
+    universe_dates = set(universe["trade_date"].astype(str))
+    if feature_dates != universe_dates:
+        raise DataValidationError(
+            "feature and universe artifacts contain different inference dates: "
+            f"features_only={sorted(feature_dates - universe_dates)} "
+            f"universe_only={sorted(universe_dates - feature_dates)}"
+        )
+    if not feature_dates:
+        raise DataValidationError(f"inference inputs are empty for {start_date}..{end_date}")
+    eligible_parts = [
+        _validate_and_filter_inputs(
+            features.loc[features["trade_date"].astype(str) == trade_date].copy(),
+            universe.loc[universe["trade_date"].astype(str) == trade_date].copy(),
+            trade_date,
+        )
+        for trade_date in sorted(feature_dates)
+    ]
+    eligible = pd.concat(eligible_parts, ignore_index=True)
+    matrix = eligible.loc[:, list(feature_names)].apply(pd.to_numeric, errors="coerce")
+    matrix = matrix.replace([np.inf, -np.inf], np.nan).astype("float32")
+    loader = model_loader or _load_lightgbm_model
+    model = loader(model_path)
+    scores = np.asarray(model.predict(matrix), dtype=float)
+    if scores.ndim != 1 or len(scores) != len(eligible):
+        raise DataValidationError(
+            "model returned an invalid prediction shape: "
+            f"expected={len(eligible)} actual={scores.shape}"
+        )
+    if not np.isfinite(scores).all():
+        raise DataValidationError("model returned non-finite prediction scores")
+    predictions = eligible.loc[:, ["trade_date", "ts_code"]].copy()
+    predictions["prediction_score"] = scores
+    predictions["model_id"] = model_record.model_id
+    predictions = predictions.sort_values(
+        ["trade_date", "prediction_score", "ts_code"],
+        ascending=[True, False, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    predictions["rank"] = (predictions.groupby("trade_date", sort=False).cumcount() + 1).astype(int)
+    return RegisteredPredictionBatch(
+        model_id=model_record.model_id,
+        feature_names=feature_names,
+        feature_hash=digest,
+        universe_rows=len(universe),
+        predictions=predictions,
+    )
+
+
 def _require_readiness(results: tuple[GateResult, ...]) -> None:
     failures = [
         f"{result.gate}: {failure}" for result in results for failure in result.hard_failures
@@ -219,9 +289,11 @@ def _require_readiness(results: tuple[GateResult, ...]) -> None:
         raise DataValidationError("production readiness failed: " + "; ".join(failures))
 
 
-def _load_and_validate_feature_list(
-    artifact: Path, champion: RegisteredModel
+def load_registered_feature_list(
+    artifact: Path, model_record: RegisteredModel
 ) -> tuple[tuple[str, ...], str]:
+    """Validate one registered model's ordered feature identity."""
+
     payload = _load_json(artifact / "feature_list.json", "feature list")
     raw_features = payload.get("features")
     if (
@@ -229,35 +301,41 @@ def _load_and_validate_feature_list(
         or not raw_features
         or not all(isinstance(item, str) for item in raw_features)
     ):
-        raise DataValidationError("champion feature_list.json lacks a non-empty `features` array")
+        raise DataValidationError("registered feature_list.json lacks a non-empty `features` array")
     features = tuple(str(item) for item in raw_features)
     if len(features) != len(set(features)):
-        raise DataValidationError("champion feature_list.json contains duplicate feature names")
+        raise DataValidationError("registered feature_list.json contains duplicate feature names")
     unsafe = [name for name in features if _SAFE_FEATURE_NAME.fullmatch(name) is None]
     if unsafe:
-        raise DataValidationError(f"champion contains invalid feature identifiers: {unsafe}")
+        raise DataValidationError(
+            f"registered model contains invalid feature identifiers: {unsafe}"
+        )
     digest = feature_list_hash(features)
     declared = payload.get("feature_hash")
     model_manifest = _load_json(artifact / "manifest.json", "model manifest")
     manifest_hash = model_manifest.get("feature_list_hash")
     mismatches: list[str] = []
-    if digest != champion.feature_hash:
+    if digest != model_record.feature_hash:
         mismatches.append("registered feature hash")
     if declared != digest:
         mismatches.append("feature_list.json feature_hash")
     if manifest_hash != digest:
         mismatches.append("model manifest feature_list_hash")
-    if champion.feature_count != len(features):
+    if model_record.feature_count != len(features):
         mismatches.append("registered feature_count")
     if mismatches:
         raise DataValidationError(
-            f"champion feature identity mismatch ({', '.join(mismatches)}); computed={digest}"
+            f"registered model feature identity mismatch ({', '.join(mismatches)}); "
+            f"computed={digest}"
         )
     return features, digest
 
 
-def _load_as_of_frames(
-    processed_root: Path, as_of: str, feature_names: tuple[str, ...]
+def _load_range_frames(
+    processed_root: Path,
+    start_date: str,
+    end_date: str,
+    feature_names: tuple[str, ...],
 ) -> tuple[DataFrame, DataFrame]:
     feature_glob = processed_root / "features_daily" / "**" / "*.parquet"
     universe_glob = processed_root / "universe_daily" / "**" / "*.parquet"
@@ -271,16 +349,16 @@ def _load_as_of_frames(
                CAST(ts_code AS VARCHAR) AS ts_code,
                {selected}
         FROM read_parquet('{feature_glob.as_posix()}', hive_partitioning=false)
-        WHERE CAST(trade_date AS VARCHAR) = ?
-        ORDER BY ts_code
+        WHERE CAST(trade_date AS VARCHAR) BETWEEN ? AND ?
+        ORDER BY trade_date, ts_code
     """  # noqa: S608 -- validated identifiers and configured local Parquet path
     universe_query = f"""
         SELECT CAST(trade_date AS VARCHAR) AS trade_date,
                CAST(ts_code AS VARCHAR) AS ts_code,
                CAST(in_model_universe AS BOOLEAN) AS in_model_universe
         FROM read_parquet('{universe_glob.as_posix()}', hive_partitioning=false)
-        WHERE CAST(trade_date AS VARCHAR) = ?
-        ORDER BY ts_code
+        WHERE CAST(trade_date AS VARCHAR) BETWEEN ? AND ?
+        ORDER BY trade_date, ts_code
     """  # noqa: S608 -- configured local Parquet path
     try:
         with duckdb.connect() as connection:
@@ -294,10 +372,12 @@ def _load_as_of_frames(
             missing = sorted(set(feature_names) - available)
             if missing:
                 raise DataValidationError(f"features_daily lacks model features: {missing}")
-            features = connection.execute(feature_query, [as_of]).fetch_df()
-            universe = connection.execute(universe_query, [as_of]).fetch_df()
+            features = connection.execute(feature_query, [start_date, end_date]).fetch_df()
+            universe = connection.execute(universe_query, [start_date, end_date]).fetch_df()
     except duckdb.Error as error:
-        raise DataValidationError(f"cannot load inference inputs for {as_of}: {error}") from error
+        raise DataValidationError(
+            f"cannot load inference inputs for {start_date}..{end_date}: {error}"
+        ) from error
     return features, universe
 
 
@@ -323,6 +403,26 @@ def _validate_and_filter_inputs(features: DataFrame, universe: DataFrame, as_of:
     if eligible.empty:
         raise DataValidationError(f"in_model_universe has no prediction rows for {as_of}")
     return eligible.sort_values("ts_code", kind="mergesort").reset_index(drop=True)
+
+
+def _validate_allowed_ranges(
+    ranges: Sequence[tuple[str, str]], start_date: str, end_date: str
+) -> None:
+    if not ranges:
+        raise DataValidationError("inference allowed date ranges are empty")
+    for range_start, range_end in ranges:
+        if range_start > range_end:
+            raise DataValidationError("inference allowed date range is reversed")
+        if range_start < start_date or range_end > end_date:
+            raise DataValidationError("inference allowed date range exceeds query boundaries")
+
+
+def _date_range_mask(dates: pd.Series[Any], ranges: Sequence[tuple[str, str]]) -> pd.Series[Any]:
+    values = dates.astype(str)
+    mask = pd.Series(False, index=dates.index)
+    for range_start, range_end in ranges:
+        mask |= values.between(range_start, range_end)
+    return mask
 
 
 def _load_json(path: Path, description: str) -> dict[str, Any]:

@@ -237,6 +237,9 @@ def calculate_metrics(
     filled = trades[trades["status"] == "filled"] if not trades.empty else trades
     buys = filled[filled["side"] == "buy"] if not filled.empty else filled
     sells = filled[filled["side"] == "sell"] if not filled.empty else filled
+    closed_pnl = _closed_trade_pnl(filled)
+    profitable = [value for value in closed_pnl if value > 0]
+    losing = [value for value in closed_pnl if value < 0]
     return {
         "days": int(days),
         "total_return": float(total_return),
@@ -245,12 +248,41 @@ def calculate_metrics(
         "sharpe": None if sharpe is None else float(sharpe),
         "maximum_drawdown": float(drawdown.min()),
         "win_rate": float((returns > 0).mean()),
+        "trade_win_rate": (
+            None
+            if not closed_pnl
+            else float(sum(value > 0 for value in closed_pnl) / len(closed_pnl))
+        ),
+        "profit_loss_ratio": (
+            None
+            if not profitable or not losing
+            else float(np.mean(profitable) / abs(np.mean(losing)))
+        ),
         "average_turnover": float(daily["turnover"].astype(float).mean()),
         "average_holding_period": _average_holding_period(buys, sells),
         "excess_return_vs_benchmark": float(returns.sum() - benchmark.sum()),
         "filled_trades": int(len(filled)),
         "rejected_trades": int((trades["status"] == "rejected").sum()) if not trades.empty else 0,
     }
+
+
+def _closed_trade_pnl(filled: DataFrame) -> list[float]:
+    """Pair the engine's non-overlapping per-symbol positions into net trade P/L."""
+
+    if filled.empty:
+        return []
+    cost_basis: dict[str, float] = {}
+    closed: list[float] = []
+    for row in filled.itertuples(index=False):
+        typed = cast(Any, row)
+        code = str(typed.ts_code)
+        if str(typed.side) == "buy":
+            cost_basis[code] = float(typed.gross_value) + float(typed.cost)
+            continue
+        basis = cost_basis.pop(code, None)
+        if basis is not None:
+            closed.append(float(typed.gross_value) - float(typed.cost) - basis)
+    return closed
 
 
 def _average_holding_period(buys: DataFrame, sells: DataFrame) -> float | None:

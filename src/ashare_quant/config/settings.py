@@ -296,6 +296,30 @@ class HorizonExperimentSettings(BaseModel):
         return self
 
 
+class ChallengerEvaluationSettings(BaseModel):
+    """Frozen post-training comparison and manual promotion-gate thresholds."""
+
+    score_layers: tuple[float, ...] = (0.01, 0.05, 0.10, 0.20, 0.50)
+    minimum_cross_section: PositiveInt = 20
+    minimum_labelled_days: PositiveInt = 60
+    regime_return_threshold: float = Field(default=0.005, ge=0.0)
+    minimum_rank_ic: float = 0.0
+    minimum_rank_ic_delta: float = 0.0
+    minimum_positive_ic_ratio: float = Field(default=0.50, ge=0.0, le=1.0)
+    minimum_top10_return_delta: float = 0.0
+
+    @model_validator(mode="after")
+    def validate_score_layers(self) -> ChallengerEvaluationSettings:
+        """Require the fixed Top-1/5/10/20/50 comparison layers."""
+
+        required = (0.01, 0.05, 0.10, 0.20, 0.50)
+        if self.score_layers != required:
+            raise ValueError(
+                "models.challenger_evaluation.score_layers must be [0.01, 0.05, 0.10, 0.20, 0.50]"
+            )
+        return self
+
+
 class ModelExperimentSettings(BaseModel):
     """Read-only experiment planning configuration."""
 
@@ -310,6 +334,9 @@ class ModelExperimentSettings(BaseModel):
     )
     final_test_period: HistoricalBacktestPeriodSettings = HistoricalBacktestPeriodSettings(
         start_date="20230101", end_date="20260710"
+    )
+    challenger_evaluation: ChallengerEvaluationSettings = Field(
+        default_factory=ChallengerEvaluationSettings
     )
 
     @model_validator(mode="after")

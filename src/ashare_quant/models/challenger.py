@@ -501,9 +501,7 @@ def _load_and_validate_folds(
     if manifest.get("feature_hash") != expected_feature_hash:
         raise DataValidationError("walk-forward feature_hash differs from horizon plan")
     outputs = _required_mapping(manifest, "outputs")
-    folds_path = Path(str(outputs.get("folds", "")))
-    if not folds_path.is_absolute():
-        folds_path = manifest_path.parent / folds_path
+    folds_path = _resolve_manifest_output(manifest_path, str(outputs.get("folds", "")))
     if _file_hash(folds_path) != expected_folds_hash:
         raise DataValidationError("walk-forward folds hash differs from horizon plan")
     payload = _load_json(folds_path, "walk-forward folds")
@@ -519,6 +517,21 @@ def _load_and_validate_folds(
     if any(not fold_id for fold_id in fold_ids) or len(fold_ids) != len(set(fold_ids)):
         raise DataValidationError("walk-forward fold IDs must be non-empty and unique")
     return manifest, folds
+
+
+def _resolve_manifest_output(manifest_path: Path, configured: str) -> Path:
+    path = Path(configured)
+    if path.is_absolute():
+        return path
+    local_path = manifest_path.parent / path
+    if local_path.exists():
+        return local_path
+    # Schema-v2 walk-forward plans previously stored repository-root-relative paths.
+    for parent in manifest_path.parents:
+        legacy_path = parent / path
+        if legacy_path.exists():
+            return legacy_path
+    return local_path
 
 
 def _source_identity(

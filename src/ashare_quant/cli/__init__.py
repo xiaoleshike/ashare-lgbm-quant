@@ -16,6 +16,7 @@ from ashare_quant.backtest import (
     BacktestRunner,
     HistoricalBacktestEngine,
 )
+from ashare_quant.backtest.executable_validation import ExecutableOOSValidationEngine
 from ashare_quant.config import load_settings
 from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS
 from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
@@ -34,9 +35,12 @@ from ashare_quant.features import (
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
 from ashare_quant.models import (
+    ChallengerEvaluationEngine,
+    ChallengerPredictionEngine,
     ChallengerTrainer,
     ModelDriftDiagnosticEngine,
     ModelRegistry,
+    MultiHorizonEnsembleEngine,
     MultiHorizonExperimentPlanner,
     ProductionInferenceEngine,
     ProductionObservationRecorder,
@@ -400,6 +404,26 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         default=None,
         help="Specific horizon experiment_manifest.json; defaults to the latest plan.",
     )
+    challenger_prediction = commands.add_parser(
+        "predict-challenger",
+        help="Publish immutable mature final-test predictions for one challenger.",
+    )
+    challenger_prediction.add_argument("--model-id", required=True)
+    challenger_evaluation = commands.add_parser(
+        "evaluate-challenger",
+        help="Compare one challenger with the current champion on identical rows.",
+    )
+    challenger_evaluation.add_argument("--model-id", required=True)
+    ensemble_evaluation = commands.add_parser(
+        "evaluate-ensemble",
+        help="Evaluate a fixed equal-weight multi-horizon rank ensemble.",
+    )
+    ensemble_evaluation.add_argument(
+        "--model-id",
+        action="append",
+        required=True,
+        help="One challenger model ID; repeat for horizons 5, 10, 20, and 60.",
+    )
     observation = commands.add_parser(
         "observation-log",
         help="Record existing prediction and candidate rankings without trading actions.",
@@ -498,6 +522,21 @@ def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     historical.add_argument("--end-date", default=None, help="Inclusive YYYYMMDD end date.")
     historical.add_argument(
         "--top-n", default=None, help="Comma-separated Top-N variants; defaults to 10,20,50."
+    )
+    executable = commands.add_parser(
+        "executable-validation",
+        help="Compare Champion and Challenger using executable OOS portfolio rules.",
+    )
+    executable.add_argument(
+        "--model-id",
+        action="append",
+        required=True,
+        help="Repeat twice: current champion (or 'champion') and one Challenger model ID.",
+    )
+    executable.add_argument(
+        "--top-n",
+        default="10,20,50",
+        help="Must contain the fixed fair-comparison variants 10,20,50.",
     )
     diagnostics = commands.add_parser(
         "diagnostics", help="Diagnose alpha in one immutable historical backtest run."
@@ -1036,6 +1075,68 @@ def run_models_command(args: argparse.Namespace) -> int:
                 f"status=candidate output={challenger_result.output_dir}"
             )
         return 0
+    if args.models_command == "predict-challenger":
+        prediction_engine = ChallengerPredictionEngine(
+            registry=ModelRegistry(output_root),
+            processed_root=processed_root,
+            reports_root=reports_root,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            prediction_result = prediction_engine.predict(args.model_id)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"challenger prediction failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"challenger_predictions: model_id={prediction_result.model_id} "
+            f"horizon={prediction_result.horizon} rows={prediction_result.prediction_rows} "
+            f"dates={prediction_result.prediction_dates} "
+            f"output={prediction_result.output_dir}"
+        )
+        return 0
+    if args.models_command == "evaluate-challenger":
+        evaluation_engine = ChallengerEvaluationEngine(
+            registry=ModelRegistry(output_root),
+            processed_root=processed_root,
+            reports_root=reports_root,
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            evaluation_result = evaluation_engine.evaluate(args.model_id)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"challenger evaluation failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"challenger_evaluation: run_id={evaluation_result.run_id} "
+            f"champion={evaluation_result.champion_model_id} "
+            f"challenger={evaluation_result.challenger_model_id} "
+            f"horizon={evaluation_result.horizon} "
+            f"manual_review={evaluation_result.eligible_for_manual_review} "
+            f"output={evaluation_result.output_dir}"
+        )
+        return 0
+    if args.models_command == "evaluate-ensemble":
+        ensemble_engine = MultiHorizonEnsembleEngine(
+            registry=ModelRegistry(output_root),
+            processed_root=processed_root,
+            reports_root=reports_root,
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            ensemble_result = ensemble_engine.evaluate(args.model_id)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"ensemble evaluation failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"ensemble_evaluation: run_id={ensemble_result.run_id} "
+            f"models={','.join(ensemble_result.model_ids)} "
+            f"rows={ensemble_result.prediction_rows} "
+            f"dates={ensemble_result.prediction_dates} "
+            f"output={ensemble_result.output_dir}"
+        )
+        return 0
     if args.models_command == "walk-forward-plan":
         raw_root = (
             settings.paths.parquet_store if args.storage_root is None else Path(args.storage_root)
@@ -1386,6 +1487,32 @@ def run_backtest_command(args: argparse.Namespace) -> int:
             f"historical_backtest: run_id={historical_result.run_id} "
             f"model_id={historical_result.model_id} period={historical_result.start_date}.."
             f"{historical_result.end_date} output={historical_result.output_dir}"
+        )
+        return 0
+    if args.backtest_command == "executable-validation":
+        validation_engine = ExecutableOOSValidationEngine(
+            raw_root=raw_root,
+            processed_root=processed_root,
+            models_root=models_root,
+            reports_root=(
+                settings.paths.reports if args.output_root is None else Path(args.output_root)
+            ),
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            validation_result = validation_engine.run(
+                args.model_id,
+                top_n=parse_top_n(args.top_n),
+            )
+        except (DataValidationError, ValueError) as error:
+            print(f"executable validation failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"executable_validation: run_id={validation_result.run_id} "
+            f"champion={validation_result.champion_model_id} "
+            f"challenger={validation_result.challenger_model_id} "
+            f"horizon={validation_result.horizon} output={validation_result.output_dir}"
         )
         return 0
     if args.backtest_command == "run":

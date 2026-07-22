@@ -100,6 +100,17 @@ def test_horizon_plan_is_idempotent_and_byte_deterministic(tmp_path: Path) -> No
     assert (second.output_dir / "experiment_manifest.json").read_bytes() == first_bytes
 
 
+def test_horizon_plan_reads_legacy_repository_relative_folds_path(tmp_path: Path) -> None:
+    planner, sources = _planner_fixture(tmp_path)
+    manifest = json.loads(sources["fold_manifest"].read_text(encoding="utf-8"))
+    manifest["outputs"]["folds"] = str(sources["folds"].relative_to(tmp_path))
+    atomic_write_json(sources["fold_manifest"], manifest)
+
+    result = planner.build(folds_manifest=sources["fold_manifest"])
+
+    assert result.experiment_count == 4
+
+
 def test_horizon_plan_rejects_fold_boundaries_unsafe_for_longest_horizon(
     tmp_path: Path,
 ) -> None:

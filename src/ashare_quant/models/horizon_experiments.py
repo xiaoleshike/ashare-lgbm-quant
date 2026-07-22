@@ -307,9 +307,17 @@ def _folds_file(manifest_path: Path, manifest: dict[str, Any]) -> Path:
     configured = outputs.get("folds") if isinstance(outputs, dict) else None
     if isinstance(configured, str) and configured:
         path = Path(configured)
-        if not path.is_absolute():
-            path = manifest_path.parent / path
-        return path
+        if path.is_absolute():
+            return path
+        local_path = manifest_path.parent / path
+        if local_path.exists():
+            return local_path
+        # Schema-v2 plans previously stored a repository-root-relative path.
+        for parent in manifest_path.parents:
+            legacy_path = parent / path
+            if legacy_path.exists():
+                return legacy_path
+        return local_path
     return manifest_path.parent / "folds.json"
 
 
