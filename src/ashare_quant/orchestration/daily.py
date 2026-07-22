@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from ashare_quant.data.datasets import get_dataset_spec
@@ -24,6 +24,7 @@ from ashare_quant.orchestration.run_manifest import (
     record_failure,
     record_stage_end,
     record_stage_start,
+    update_run_context,
     update_run_status,
     update_source_provenance,
 )
@@ -32,7 +33,7 @@ from ashare_quant.utils.manifest import read_manifest
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 MARKET_CLOSE_TIME = time(15, 0)
 
-type StageExecutor = Callable[[tuple[str, ...]], int]
+type StageExecutor = Callable[[tuple[str, ...]], int | StageResult]
 type AsOfResolver = Callable[[str | None], str]
 type ReadinessExecutor = Callable[[str, str], GateResult]
 
@@ -59,6 +60,130 @@ class DailyPipelineResult:
     error_message: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StageResult:
+    """Normalized result returned by every orchestration stage."""
+
+    status: Literal["success", "failed"]
+    artifact_paths: tuple[str, ...] = ()
+    metrics: dict[str, Any] | None = None
+    warnings: tuple[str, ...] = ()
+    error_message: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stable run-manifest representation."""
+
+        payload = {
+            "status": self.status,
+            "artifact_paths": list(self.artifact_paths),
+            "metrics": self.metrics or {},
+            "warnings": list(self.warnings),
+        }
+        # Keep existing structured gate/build fields readable by older run tooling.
+        for key, value in (self.metrics or {}).items():
+            payload.setdefault(key, value)
+        return payload
+
+
+@dataclass(slots=True)
+class DailyPipelineContext:
+    """Execution dependencies for reusable daily stages."""
+
+    run: ProductionRun
+    as_of: str | None
+    processed_root: Path
+    executor: StageExecutor
+    readiness_executor: ReadinessExecutor
+    as_of_resolver: AsOfResolver
+
+
+@dataclass(frozen=True, slots=True)
+class DailyStagesResult:
+    """Outcome of the lock-free, manifest-reusing daily stage sequence."""
+
+    status: Literal["success", "failed"]
+    as_of: str | None
+    exit_code: int
+    failed_stage: str | None = None
+    error_message: str | None = None
+
+
+class DailyPipelineStages:
+    """Execute daily stages using a caller-owned lock and run manifest."""
+
+    def execute(self, context: DailyPipelineContext) -> DailyStagesResult:
+        """Run the daily hard stages without acquiring a lock or creating a run."""
+
+        as_of = context.as_of
+        stages = daily_pipeline_stages(as_of)
+        for stage_index in range(len(stages)):
+            if stage_index == 1 and as_of is None:
+                try:
+                    as_of = context.as_of_resolver(None)
+                except Exception as error:  # noqa: BLE001 - stage boundary records all failures.
+                    message = _exception_message(error)
+                    record_failure(context.run, error)
+                    return DailyStagesResult("failed", None, 2, error_message=message)
+                stages = daily_pipeline_stages(as_of)
+            stage = stages[stage_index]
+            record_stage_start(context.run, stage.name)
+            try:
+                result, exit_code = _execute_daily_stage(stage, as_of, context)
+            except Exception as error:  # noqa: BLE001 - stage boundary records all failures.
+                message = _exception_message(error)
+                record_failure(context.run, error, stage_name=stage.name)
+                return DailyStagesResult(
+                    "failed",
+                    as_of,
+                    2,
+                    failed_stage=stage.name,
+                    error_message=message,
+                )
+            result_payload = result.to_dict()
+            if exit_code != 0 or result.status == "failed":
+                message = result.error_message or (
+                    f"stage {stage.name} returned exit code {exit_code}"
+                )
+                record_stage_end(
+                    context.run,
+                    stage.name,
+                    status="failed",
+                    error_message=message,
+                    result=result_payload,
+                )
+                return DailyStagesResult(
+                    "failed",
+                    as_of,
+                    exit_code or 1,
+                    failed_stage=stage.name,
+                    error_message=message,
+                )
+            try:
+                if stage.artifact_name is not None:
+                    artifact_manifest = (result.metrics or {}).get("artifact_manifest")
+                    if isinstance(artifact_manifest, dict):
+                        update_source_provenance(
+                            context.run, stage.artifact_name, artifact_manifest
+                        )
+                update_run_context(
+                    context.run,
+                    artifact_paths=result.artifact_paths,
+                    warnings=result.warnings,
+                )
+                record_stage_end(context.run, stage.name, result=result_payload)
+            except Exception as error:  # noqa: BLE001 - provenance is a hard stage boundary.
+                message = _exception_message(error)
+                record_failure(context.run, error, stage_name=stage.name)
+                return DailyStagesResult(
+                    "failed",
+                    as_of,
+                    2,
+                    failed_stage=stage.name,
+                    error_message=message,
+                )
+        return DailyStagesResult("success", as_of, 0)
+
+
 class DailyPipelineOrchestrator:
     """Run existing data, universe, and feature commands under one production lock."""
 
@@ -80,6 +205,7 @@ class DailyPipelineOrchestrator:
         self._readiness_executor = readiness_executor
         self._runs_root = runs_root
         self._lock_path = lock_path
+        self._stages = DailyPipelineStages()
 
     def run(self, requested_as_of: str | None = None) -> DailyPipelineResult:
         """Execute all hard stages in order and stop at the first failure."""
@@ -104,81 +230,64 @@ class DailyPipelineOrchestrator:
                     record_failure(run, error)
                     return DailyPipelineResult(run, "failed", 2, None, error_message=message)
 
-            for stage_index in range(len(daily_pipeline_stages(as_of))):
-                if stage_index == 1 and as_of is None:
-                    try:
-                        as_of = self._as_of_resolver(None)
-                    except Exception as error:  # noqa: BLE001 - record resolver failure.
-                        message = _exception_message(error)
-                        record_failure(run, error)
-                        return DailyPipelineResult(run, "failed", 2, None, error_message=message)
-                stage = daily_pipeline_stages(as_of)[stage_index]
-                record_stage_start(run, stage.name)
-                try:
-                    if stage.readiness_gate is not None:
-                        gate_result = self._readiness_executor(stage.readiness_gate, as_of or "")
-                        exit_code = 0 if gate_result.ready else 1
-                        result = gate_result.to_dict()
-                    else:
-                        exit_code = self._executor(stage.arguments)
-                        result = stage_result(
-                            stage,
-                            exit_code,
-                            as_of or "auto",
-                            self._processed_root,
-                        )
-                except Exception as error:  # noqa: BLE001 - stage boundary records all failures.
-                    message = _exception_message(error)
-                    record_failure(run, error, stage_name=stage.name)
-                    return DailyPipelineResult(
-                        run,
-                        "failed",
-                        2,
-                        as_of,
-                        failed_stage=stage.name,
-                        error_message=message,
-                    )
-                if exit_code != 0:
-                    failures = result.get("hard_failures")
-                    detail = failures[0] if isinstance(failures, list) and failures else None
-                    message = detail or f"stage {stage.name} returned exit code {exit_code}"
-                    record_stage_end(
-                        run,
-                        stage.name,
-                        status="failed",
-                        error_message=message,
-                        result=result,
-                    )
-                    return DailyPipelineResult(
-                        run,
-                        "failed",
-                        exit_code,
-                        as_of,
-                        failed_stage=stage.name,
-                        error_message=message,
-                    )
-                if stage.artifact_name is not None:
-                    try:
-                        artifact_manifest = result.get("artifact_manifest")
-                        if isinstance(artifact_manifest, dict):
-                            update_source_provenance(run, stage.artifact_name, artifact_manifest)
-                        record_stage_end(run, stage.name, result=result)
-                    except Exception as error:  # noqa: BLE001 - provenance is a hard gate.
-                        message = _exception_message(error)
-                        record_failure(run, error, stage_name=stage.name)
-                        return DailyPipelineResult(
-                            run,
-                            "failed",
-                            2,
-                            as_of,
-                            failed_stage=stage.name,
-                            error_message=message,
-                        )
-                else:
-                    record_stage_end(run, stage.name, result=result)
+            stages_result = self._stages.execute(
+                DailyPipelineContext(
+                    run=run,
+                    as_of=as_of,
+                    processed_root=self._processed_root,
+                    executor=self._executor,
+                    readiness_executor=self._readiness_executor,
+                    as_of_resolver=self._as_of_resolver,
+                )
+            )
+            if stages_result.status == "failed":
+                return DailyPipelineResult(
+                    run,
+                    "failed",
+                    stages_result.exit_code,
+                    stages_result.as_of,
+                    failed_stage=stages_result.failed_stage,
+                    error_message=stages_result.error_message,
+                )
 
             update_run_status(run, "success")
-            return DailyPipelineResult(run, "success", 0, as_of)
+            return DailyPipelineResult(run, "success", 0, stages_result.as_of)
+
+
+def _execute_daily_stage(
+    stage: DailyPipelineStage,
+    as_of: str | None,
+    context: DailyPipelineContext,
+) -> tuple[StageResult, int]:
+    if stage.readiness_gate is not None:
+        gate = context.readiness_executor(stage.readiness_gate, as_of or "")
+        metrics = gate.to_dict()
+        error_message = gate.hard_failures[0] if gate.hard_failures else None
+        result = StageResult(
+            status="success" if gate.ready else "failed",
+            metrics=metrics,
+            warnings=gate.warnings,
+            error_message=error_message,
+        )
+        return result, 0 if gate.ready else 1
+
+    raw_result = context.executor(stage.arguments)
+    if isinstance(raw_result, StageResult):
+        return raw_result, 0 if raw_result.status == "success" else 1
+    metrics = stage_result(stage, raw_result, as_of or "auto", context.processed_root)
+    artifacts = (
+        (str(context.processed_root / stage.artifact_name),)
+        if stage.artifact_name is not None
+        else ()
+    )
+    return (
+        StageResult(
+            status="success" if raw_result == 0 else "failed",
+            artifact_paths=artifacts,
+            metrics=metrics,
+        ),
+        raw_result,
+    )
 
 
 def daily_pipeline_stages(as_of: str | None) -> tuple[DailyPipelineStage, ...]:

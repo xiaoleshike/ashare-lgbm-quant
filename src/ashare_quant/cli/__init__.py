@@ -51,11 +51,16 @@ from ashare_quant.models import (
 from ashare_quant.orchestration import (
     DEFAULT_PRODUCTION_LOCK_PATH,
     DailyPipelineOrchestrator,
+    DailyPipelineStages,
     FreshnessService,
     GateResult,
     ProductionLockError,
     resolve_completed_trading_date,
     run_with_production_lock,
+)
+from ashare_quant.orchestration.production import (
+    ProductionDailyStageExecutor,
+    ProductionPipeline,
 )
 from ashare_quant.research import (
     DailyResearchReportGenerator,
@@ -554,6 +559,15 @@ def add_pipeline_parser(subparsers: argparse._SubParsersAction[argparse.Argument
         "--as-of",
         default=None,
         help="Completed open trading date in YYYYMMDD; defaults to latest completed date.",
+    )
+    production = commands.add_parser(
+        "production", help="Run the complete daily prediction and research workflow."
+    )
+    production.add_argument("--as-of", required=True, help="Completed session in YYYYMMDD.")
+    production.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Acquire the lock and validate/plan without publishing predictions or reports.",
     )
     readiness = commands.add_parser(
         "readiness", help="Run read-only raw, universe, and feature readiness gates."
@@ -1575,6 +1589,82 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
         print_readiness_results(results)
         return 0 if all(result.ready for result in results) else 1
 
+    if args.pipeline_command == "production":
+        models_root = settings.paths.models
+        reports_root = settings.paths.reports
+        pipeline = ProductionPipeline(
+            config_path=config_path,
+            processed_root=settings.paths.processed_data,
+            reports_root=reports_root,
+            daily_executor=ProductionDailyStageExecutor(
+                settings=settings,
+                config_path=config_path,
+                raw_store=raw_store,
+                universe_store=universe_store,
+                feature_store=feature_store,
+            ),
+            daily_stages=DailyPipelineStages(),
+            readiness=freshness,
+            readiness_executor=lambda gate, as_of: execute_readiness_gate(freshness, gate, as_of),
+            as_of_resolver=lambda requested: resolve_completed_trading_date(raw_store, requested),
+            inference=ProductionInferenceEngine(
+                registry=ModelRegistry(models_root),
+                processed_root=settings.paths.processed_data,
+                reports_root=reports_root,
+                config_path=config_path,
+                freshness=freshness,
+            ),
+            candidates=CandidateSelector(
+                raw_root=settings.paths.parquet_store,
+                processed_root=settings.paths.processed_data,
+                reports_root=reports_root,
+                config_path=config_path,
+                settings=settings.strategy.candidate_selection,
+            ),
+            research_report=DailyResearchReportGenerator(
+                raw_root=settings.paths.parquet_store,
+                processed_root=settings.paths.processed_data,
+                reports_root=reports_root,
+                settings=settings.research.daily_report,
+            ),
+            explainability=ExplainabilityEngine(
+                registry=ModelRegistry(models_root),
+                processed_root=settings.paths.processed_data,
+                reports_root=reports_root,
+                settings=settings.research.explainability,
+            ),
+            decision_support=InvestmentDecisionSupport(
+                raw_root=settings.paths.parquet_store,
+                processed_root=settings.paths.processed_data,
+                reports_root=reports_root,
+                settings=settings.research.decision_support,
+            ),
+            observation=ProductionObservationRecorder(reports_root),
+        )
+        try:
+            production_result = pipeline.run(args.as_of, dry_run=args.dry_run)
+        except ProductionLockError as error:
+            print(f"production run blocked: {error}", file=sys.stderr)
+            return 3
+        if production_result.status == "success":
+            print(
+                "pipeline_production: status=success "
+                f"run_id={production_result.run.run_id} "
+                f"as_of={production_result.as_of} dry_run={args.dry_run} "
+                f"manifest={production_result.run.manifest_path} "
+                f"summary={production_result.summary_path}"
+            )
+            return 0
+        print(
+            f"pipeline_production: status=failed run_id={production_result.run.run_id} "
+            f"as_of={production_result.as_of} "
+            f"failed_stage={production_result.failed_stage} "
+            f"message={production_result.error_message} "
+            f"manifest={production_result.run.manifest_path}",
+            file=sys.stderr,
+        )
+        return production_result.exit_code or 2
+
     if args.pipeline_command != "daily":
         raise ValueError(f"Unsupported pipeline command: {args.pipeline_command}")
 
@@ -1589,23 +1679,23 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
         readiness_executor=lambda gate, as_of: execute_readiness_gate(freshness, gate, as_of),
     )
     try:
-        result = orchestrator.run(args.as_of)
+        daily_result = orchestrator.run(args.as_of)
     except ProductionLockError as error:
         print(f"production run blocked: {error}", file=sys.stderr)
         return 3
-    if result.status == "success":
+    if daily_result.status == "success":
         print(
-            f"pipeline_daily: status=success run_id={result.run.run_id} "
-            f"as_of={result.as_of} manifest={result.run.manifest_path}"
+            f"pipeline_daily: status=success run_id={daily_result.run.run_id} "
+            f"as_of={daily_result.as_of} manifest={daily_result.run.manifest_path}"
         )
         return 0
     print(
-        f"pipeline_daily: status=failed run_id={result.run.run_id} "
-        f"as_of={result.as_of} failed_stage={result.failed_stage} "
-        f"message={result.error_message} manifest={result.run.manifest_path}",
+        f"pipeline_daily: status=failed run_id={daily_result.run.run_id} "
+        f"as_of={daily_result.as_of} failed_stage={daily_result.failed_stage} "
+        f"message={daily_result.error_message} manifest={daily_result.run.manifest_path}",
         file=sys.stderr,
     )
-    return result.exit_code or 2
+    return daily_result.exit_code or 2
 
 
 def execute_readiness_gate(

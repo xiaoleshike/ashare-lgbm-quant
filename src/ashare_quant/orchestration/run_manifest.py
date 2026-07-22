@@ -44,6 +44,8 @@ def create_run(
     model_id: str | None = None,
     feature_hash: str | None = None,
     data_fingerprint: dict[str, Any] | None = None,
+    pipeline_type: str | None = None,
+    as_of: str | None = None,
     run_id: str | None = None,
 ) -> ProductionRun:
     """Create an atomic manifest in the running state and return its handle."""
@@ -70,6 +72,11 @@ def create_run(
         "end_time": None,
         "elapsed_seconds": None,
         "status": "running",
+        "pipeline_type": pipeline_type,
+        "as_of": as_of,
+        "model_id": model_id,
+        "artifact_paths": [],
+        "warnings": [],
         "current_stage": None,
         "error_message": None,
         "git_commit": git_info["commit"],
@@ -92,6 +99,31 @@ def create_run(
         run_dir.rmdir()
         raise
     return run
+
+
+def update_run_context(
+    run: ProductionRun,
+    *,
+    model_id: str | None = None,
+    artifact_paths: tuple[str, ...] = (),
+    warnings: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Atomically add production outputs and warnings to a running manifest."""
+
+    manifest = _read_running_manifest(run)
+    if model_id is not None:
+        manifest["model_id"] = model_id
+        provenance = manifest.get("source_provenance")
+        if isinstance(provenance, dict):
+            provenance["model_id"] = model_id
+    current_paths = manifest.get("artifact_paths", [])
+    current_warnings = manifest.get("warnings", [])
+    if not isinstance(current_paths, list) or not isinstance(current_warnings, list):
+        raise ValueError("run manifest has invalid output context")
+    manifest["artifact_paths"] = list(dict.fromkeys([*current_paths, *artifact_paths]))
+    manifest["warnings"] = list(dict.fromkeys([*current_warnings, *warnings]))
+    atomic_write_json(run.manifest_path, manifest)
+    return manifest
 
 
 def update_source_provenance(

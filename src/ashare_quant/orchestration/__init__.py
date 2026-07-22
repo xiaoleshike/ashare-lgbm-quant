@@ -1,9 +1,12 @@
 """Production workflow orchestration primitives."""
 
 from ashare_quant.orchestration.daily import (
+    DailyPipelineContext,
     DailyPipelineOrchestrator,
     DailyPipelineResult,
     DailyPipelineStage,
+    DailyPipelineStages,
+    StageResult,
     daily_pipeline_stages,
     resolve_completed_trading_date,
 )
@@ -27,6 +30,7 @@ from ashare_quant.orchestration.run_manifest import (
     record_failure,
     record_stage_end,
     record_stage_start,
+    update_run_context,
     update_run_status,
     update_source_provenance,
 )
@@ -35,8 +39,10 @@ __all__ = [
     "DEFAULT_PRODUCTION_LOCK_PATH",
     "DEFAULT_RUNS_ROOT",
     "DailyPipelineOrchestrator",
+    "DailyPipelineContext",
     "DailyPipelineResult",
     "DailyPipelineStage",
+    "DailyPipelineStages",
     "FreshnessService",
     "GateResult",
     "ProductionLock",
@@ -44,6 +50,7 @@ __all__ = [
     "ProductionLockOwner",
     "ProductionRun",
     "RUN_MANIFEST_SCHEMA_VERSION",
+    "StageResult",
     "acquire_production_lock",
     "create_run",
     "daily_pipeline_stages",
@@ -56,5 +63,6 @@ __all__ = [
     "resolve_completed_trading_date",
     "run_with_production_lock",
     "update_run_status",
+    "update_run_context",
     "update_source_provenance",
 ]
