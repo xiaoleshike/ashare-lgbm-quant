@@ -50,6 +50,23 @@ def test_limit_down_sell_rejection_delays_exit_until_sellable() -> None:
     assert sells.iloc[1]["trade_date"] == "20240108"
 
 
+def test_persistently_untradeable_position_is_written_off_after_max_delay() -> None:
+    inputs = make_inputs(exit_can_sell=False, delayed_exit_can_sell=False)
+    settings = make_settings().model_copy(update={"sell_delay_max_days": 1})
+
+    result = simulate_portfolio(inputs, top_n=1, settings=settings)
+    closures = result.trades[result.trades["status"] == "written_off"]
+
+    assert len(closures) == 1
+    assert closures.iloc[0]["trade_date"] == "20240108"
+    assert closures.iloc[0]["gross_value"] == 0.0
+    assert closures.iloc[0]["reason"] == "untradeable_after_max_sell_delay"
+    assert result.metrics["written_off_positions"] == 1
+    assert result.metrics["trade_win_rate"] == 0.0
+    final_date = result.daily_returns["trade_date"].astype(str).max()
+    assert not result.holdings["trade_date"].astype(str).eq(final_date).any()
+
+
 def test_costs_are_deducted_from_cash_and_reported() -> None:
     settings = make_settings(commission=0.001, stamp_duty=0.002, slippage=0.003)
     inputs = make_inputs(entry_open=10.0, exit_open=11.0)

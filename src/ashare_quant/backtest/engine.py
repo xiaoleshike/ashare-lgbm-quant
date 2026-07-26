@@ -88,7 +88,8 @@ def simulate_portfolio(
                 trade_rows.append(_rejected_trade(current_date, code, "sell", "not_sellable"))
                 if position.delayed_exit_days <= settings.sell_delay_max_days:
                     continue
-            if price is None or not np.isfinite(price.open):
+                trade_rows.append(_written_off_position(current_date, position, top_n))
+                del positions[code]
                 continue
             gross_value = position.shares * price.open
             costs = gross_value * (settings.commission + settings.stamp_duty + settings.slippage)
@@ -235,9 +236,12 @@ def calculate_metrics(
     sharpe = annual_return / annual_vol if annual_vol > 0 else None
     drawdown = equity / equity.cummax() - 1.0
     filled = trades[trades["status"] == "filled"] if not trades.empty else trades
-    buys = filled[filled["side"] == "buy"] if not filled.empty else filled
-    sells = filled[filled["side"] == "sell"] if not filled.empty else filled
-    closed_pnl = _closed_trade_pnl(filled)
+    closures = (
+        trades[trades["status"].isin(["filled", "written_off"])] if not trades.empty else trades
+    )
+    buys = closures[closures["side"] == "buy"] if not closures.empty else closures
+    sells = closures[closures["side"] == "sell"] if not closures.empty else closures
+    closed_pnl = _closed_trade_pnl(closures)
     profitable = [value for value in closed_pnl if value > 0]
     losing = [value for value in closed_pnl if value < 0]
     return {
@@ -262,6 +266,9 @@ def calculate_metrics(
         "average_holding_period": _average_holding_period(buys, sells),
         "excess_return_vs_benchmark": float(returns.sum() - benchmark.sum()),
         "filled_trades": int(len(filled)),
+        "written_off_positions": (
+            int((trades["status"] == "written_off").sum()) if not trades.empty else 0
+        ),
         "rejected_trades": int((trades["status"] == "rejected").sum()) if not trades.empty else 0,
     }
 
@@ -385,5 +392,25 @@ def _rejected_trade(
         "slippage": 0.0,
         "cost": 0.0,
         "reason": reason,
+        "top_n": top_n,
+    }
+
+
+def _written_off_position(date: str, position: Position, top_n: int) -> dict[str, object]:
+    """Close a persistently untradeable position at zero after the configured delay."""
+
+    return {
+        "trade_date": date,
+        "ts_code": position.ts_code,
+        "side": "sell",
+        "status": "written_off",
+        "shares": position.shares,
+        "price": 0.0,
+        "gross_value": 0.0,
+        "commission": 0.0,
+        "stamp_duty": 0.0,
+        "slippage": 0.0,
+        "cost": 0.0,
+        "reason": "untradeable_after_max_sell_delay",
         "top_n": top_n,
     }

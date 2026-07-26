@@ -298,6 +298,7 @@ class ExecutableOOSValidationEngine:
             "horizon": prediction_manifest["horizon"],
             "holding_period": prediction_manifest["holding_period"],
             "execution_rule": "signal_close_t_next_open_entry_and_horizon_open_exit",
+            "terminal_untradable_policy": "write_off_at_zero_after_max_sell_delay",
             "top_n": list(top_n),
             "minimum_signal_date": dates[0],
             "maximum_signal_date": dates[-1],
@@ -394,6 +395,7 @@ def _summary(
         "signal_dates": len(dates),
         "top_n": list(top_n),
         "execution_config": execution,
+        "terminal_untradable_policy": "write_off_at_zero_after_max_sell_delay",
         "metrics": metrics,
         "challenger_minus_champion": comparison,
         "interpretation": (
@@ -458,6 +460,7 @@ def _render_report(summary: dict[str, Any]) -> str:
         f"- Signal dates: {summary['minimum_signal_date']} to {summary['maximum_signal_date']}",
         f"- Holding period: {summary['holding_period']} trading days",
         "- Execution: signal close, next-open entry, horizon next-open exit",
+        "- Terminal untradeable positions: written off at zero after max sell delay",
         "",
     ]
     for value in summary["top_n"]:
