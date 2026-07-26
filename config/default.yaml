@@ -14,6 +14,8 @@ logging:
   json_logs: true
 data:
   provider: tushare
+  # Temporarily disabled because the BaoStock service is currently unreliable.
+  run_baostock_post_ingestion_check: false
   retry_attempts: 3
   rate_limit_per_minute: 500
   endpoint_rate_limits_per_minute:

@@ -142,11 +142,13 @@ and issues found by non-blocking cross-source checks. Raw Parquet data is not
 rewritten by these checks. Any downstream cleaning must be explicit and
 reproducible.
 
-After each successful `data init` or `data update`, the CLI runs local validation
-and launches `scripts/data_checks/run_baostock_previous_day_check.py` in the
-background. The background task checks the latest local trading day against
-baostock and logs only failures or mismatches. It does not block the ingestion
-command. Review the date-partitioned quality log at least weekly.
+After each successful `data init` or `data update`, the CLI always runs local
+validation. The optional background BaoStock comparison is controlled by
+`data.run_baostock_post_ingestion_check` and is disabled by default while the
+BaoStock service is unreliable. When enabled, the CLI launches
+`scripts/data_checks/run_baostock_previous_day_check.py` without blocking
+ingestion and logs only failures or mismatches. The comparison can still be run
+manually while automatic execution is disabled.
 
 ## Raw OHLC Reliability Rule
 

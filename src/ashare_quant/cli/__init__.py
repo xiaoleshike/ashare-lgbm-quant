@@ -683,7 +683,11 @@ def run_data_command(args: argparse.Namespace) -> int:
 
     validation_results = DataValidator(store).validate_all(dataset_names)
     append_validation_results(settings.paths.data_quality_logs, validation_results)
-    launch_baostock_previous_day_check(args.config, settings.paths.data_quality_logs)
+    maybe_launch_baostock_previous_day_check(
+        settings.data.run_baostock_post_ingestion_check,
+        args.config,
+        settings.paths.data_quality_logs,
+    )
 
     for result in download_results:
         print(
@@ -1789,6 +1793,19 @@ def launch_baostock_previous_day_check(config_path: str | None, log_root: object
                 "command": command,
             },
         )
+
+
+def maybe_launch_baostock_previous_day_check(
+    enabled: bool,
+    config_path: str | None,
+    log_root: object,
+) -> None:
+    """Launch the optional cross-provider check only when explicitly enabled."""
+
+    if not enabled:
+        LOGGER.info("post-ingestion baostock validation disabled")
+        return
+    launch_baostock_previous_day_check(config_path, log_root)
 
 
 def print_validation_results(results: Sequence[ValidationResult]) -> None:

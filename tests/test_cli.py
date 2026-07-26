@@ -1,6 +1,23 @@
 from ashare_quant.cli import main
 
 
+def test_post_ingestion_baostock_check_requires_explicit_enablement(tmp_path, monkeypatch) -> None:
+    import ashare_quant.cli as cli
+
+    launches: list[tuple[str | None, object]] = []
+    monkeypatch.setattr(
+        cli,
+        "launch_baostock_previous_day_check",
+        lambda config_path, log_root: launches.append((config_path, log_root)),
+    )
+
+    cli.maybe_launch_baostock_previous_day_check(False, "config/default.yaml", tmp_path)
+    assert launches == []
+
+    cli.maybe_launch_baostock_previous_day_check(True, "config/default.yaml", tmp_path)
+    assert launches == [("config/default.yaml", tmp_path)]
+
+
 def test_config_check_cli_reports_non_secret_status(capsys, monkeypatch) -> None:
     monkeypatch.setenv("TUSHARE_TOKEN", "hidden-token")
 

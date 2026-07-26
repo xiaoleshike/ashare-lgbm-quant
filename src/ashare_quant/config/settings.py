@@ -35,6 +35,7 @@ class DataSettings(BaseModel):
     """Data provider and ingestion control settings."""
 
     provider: Literal["tushare"] = "tushare"
+    run_baostock_post_ingestion_check: bool = False
     retry_attempts: int = Field(default=3, ge=1)
     rate_limit_per_minute: int = Field(default=180, ge=1)
     endpoint_rate_limits_per_minute: dict[str, PositiveInt] = Field(default_factory=dict)

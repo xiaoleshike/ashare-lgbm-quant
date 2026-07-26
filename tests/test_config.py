@@ -14,6 +14,7 @@ def test_load_settings_reads_yaml_and_env_token(monkeypatch: pytest.MonkeyPatch)
     assert settings.project_name == "ashare-lgbm-quant"
     assert settings.has_tushare_token is True
     assert settings.data.provider == "tushare"
+    assert settings.data.run_baostock_post_ingestion_check is False
     assert settings.data.endpoint_rate_limits_per_minute["cyq_chips"] == 200
     assert settings.data.snapshot_refresh_policy == "manual"
     assert settings.data.snapshot_refresh_ttl_days == 7
