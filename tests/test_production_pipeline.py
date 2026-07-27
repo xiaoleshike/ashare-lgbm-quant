@@ -16,9 +16,9 @@ from ashare_quant.orchestration.lock import ProductionLockError, production_lock
 from ashare_quant.orchestration.production import (
     PRODUCTION_STAGE_NAMES,
     ProductionPipeline,
-    ProductionPipelineResult,
 )
 from ashare_quant.orchestration.run_manifest import ProductionRun
+from ashare_quant.orchestration.scheduler import SchedulerResult
 from ashare_quant.research.daily_report import DailyReportResult
 from ashare_quant.research.decision_support import DecisionSupportResult
 from ashare_quant.research.explainability.schemas import ExplainabilityResult
@@ -192,7 +192,10 @@ def test_existing_lock_blocks_production_before_stages(tmp_path: Path) -> None:
     assert calls == []
 
 
-@pytest.mark.parametrize(("status", "expected"), [("success", 0), ("failed", 2)])
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [("success", 0), ("failed", 2), ("skipped", 0)],
+)
 def test_production_cli_exit_code(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -205,16 +208,24 @@ def test_production_cli_exit_code(
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run(self, as_of: str, *, dry_run: bool = False) -> ProductionPipelineResult:
-            return ProductionPipelineResult(
-                run,
+    class FakeScheduler:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run(self, as_of: str, *, dry_run: bool = False) -> SchedulerResult:
+            return SchedulerResult(
                 status,
-                0 if status == "success" else 2,
+                2 if status == "failed" else 0,
+                "invocation-id",
+                tmp_path / "invocation.json",
                 as_of,
-                failed_stage=None if status == "success" else "model_predict",
+                run.run_id,
+                skipped_reason="already_successful" if status == "skipped" else None,
+                error_message="model_predict failed" if status == "failed" else None,
             )
 
     monkeypatch.setattr("ashare_quant.cli.ProductionPipeline", FakePipeline)
+    monkeypatch.setattr("ashare_quant.cli.ProductionScheduler", FakeScheduler)
 
     exit_code = main(
         [

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, SecretStr, model_validator
@@ -533,10 +534,41 @@ class ProductionFreshnessSettings(BaseModel):
         return self
 
 
+class ProductionSchedulerSettings(BaseModel):
+    """Single-host production timer behavior."""
+
+    enabled: bool = True
+    skip_if_already_successful: bool = True
+    max_pipeline_attempts: int = Field(default=1, ge=1, le=3)
+    retry_backoff_seconds: float = Field(default=30.0, ge=0)
+
+
 class ProductionSettings(BaseModel):
     """Single-host production orchestration settings."""
 
+    timezone: str = "Asia/Shanghai"
+    market_data_ready_time: str = "18:30"
+    scheduler: ProductionSchedulerSettings = Field(default_factory=ProductionSchedulerSettings)
     freshness: ProductionFreshnessSettings = Field(default_factory=ProductionFreshnessSettings)
+
+    @model_validator(mode="after")
+    def validate_scheduler_clock(self) -> ProductionSettings:
+        """Require an available timezone and an HH:MM readiness time."""
+
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"production.timezone is unknown: {self.timezone}") from error
+        try:
+            parsed = time.fromisoformat(self.market_data_ready_time)
+        except ValueError as error:
+            raise ValueError("production.market_data_ready_time must use HH:MM") from error
+        if (
+            len(self.market_data_ready_time) != 5
+            or parsed.strftime("%H:%M") != self.market_data_ready_time
+        ):
+            raise ValueError("production.market_data_ready_time must use HH:MM")
+        return self
 
 
 class CandidateSelectionSettings(BaseModel):

@@ -22,6 +22,10 @@ def test_load_settings_reads_yaml_and_env_token(monkeypatch: pytest.MonkeyPatch)
     assert settings.production.freshness.baseline_sessions == 20
     assert settings.production.freshness.git_dirty_policy == "warning"
     assert settings.production.freshness.hard_required_features == ()
+    assert settings.production.timezone == "Asia/Shanghai"
+    assert settings.production.market_data_ready_time == "18:30"
+    assert settings.production.scheduler.enabled is True
+    assert settings.production.scheduler.skip_if_already_successful is True
 
 
 def test_load_settings_does_not_require_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,6 +55,24 @@ def test_invalid_freshness_threshold_order_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="count-ratio thresholds"):
         load_settings(config_file)
+
+
+def test_invalid_production_scheduler_clock_is_rejected(tmp_path: Path) -> None:
+    invalid_timezone = tmp_path / "invalid_timezone.yaml"
+    invalid_timezone.write_text(
+        "production:\n  timezone: Invalid/Timezone\n",
+        encoding="utf-8",
+    )
+    invalid_time = tmp_path / "invalid_time.yaml"
+    invalid_time.write_text(
+        "production:\n  market_data_ready_time: '18:30:00'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="timezone is unknown"):
+        load_settings(invalid_timezone)
+    with pytest.raises(ValidationError, match="must use HH:MM"):
+        load_settings(invalid_time)
 
 
 def test_index_inception_boundary_requires_configured_code_and_valid_date(

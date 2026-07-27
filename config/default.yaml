@@ -217,6 +217,14 @@ production_model:
   feature_list_path: config/feature_sets/robust_features.json
   output_dir_name: production
 production:
+  timezone: Asia/Shanghai
+  market_data_ready_time: "18:30"
+  scheduler:
+    enabled: true
+    skip_if_already_successful: true
+    # Tushare requests already retry internally; keep pipeline-level retries disabled by default.
+    max_pipeline_attempts: 1
+    retry_backoff_seconds: 30.0
   freshness:
     hard_datasets:
       - daily

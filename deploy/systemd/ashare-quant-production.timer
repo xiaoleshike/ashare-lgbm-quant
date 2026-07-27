@@ -1,0 +1,12 @@
+[Unit]
+Description=Run A-share Quant after daily market data is ready
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 19:30:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=2min
+Unit=ashare-quant-production.service
+
+[Install]
+WantedBy=timers.target

@@ -62,6 +62,10 @@ from ashare_quant.orchestration.production import (
     ProductionDailyStageExecutor,
     ProductionPipeline,
 )
+from ashare_quant.orchestration.scheduler import (
+    FullDataUpdateScheduler,
+    ProductionScheduler,
+)
 from ashare_quant.research import (
     DailyResearchReportGenerator,
     ExplainabilityEngine,
@@ -563,7 +567,11 @@ def add_pipeline_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     production = commands.add_parser(
         "production", help="Run the complete daily prediction and research workflow."
     )
-    production.add_argument("--as-of", required=True, help="Completed session in YYYYMMDD.")
+    production.add_argument(
+        "--as-of",
+        default=None,
+        help="Completed session in YYYYMMDD; scheduler mode resolves today's ready session.",
+    )
     production.add_argument(
         "--dry-run",
         action="store_true",
@@ -573,6 +581,10 @@ def add_pipeline_parser(subparsers: argparse._SubParsersAction[argparse.Argument
         "readiness", help="Run read-only raw, universe, and feature readiness gates."
     )
     readiness.add_argument("--as-of", required=True, help="Completed session in YYYYMMDD.")
+    commands.add_parser(
+        "full-update",
+        help="Run a locked all-dataset refresh and gap repair through the latest session.",
+    )
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -1645,29 +1657,62 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
             ),
             observation=ProductionObservationRecorder(reports_root),
         )
+        scheduler = ProductionScheduler(
+            settings=settings,
+            raw_store=raw_store,
+            pipeline=pipeline,
+            reports_root=reports_root,
+        )
         try:
-            production_result = pipeline.run(args.as_of, dry_run=args.dry_run)
+            scheduler_result = scheduler.run(args.as_of, dry_run=args.dry_run)
         except ProductionLockError as error:
             print(f"production run blocked: {error}", file=sys.stderr)
             return 3
-        if production_result.status == "success":
+        if scheduler_result.status == "skipped":
+            print(
+                "pipeline_production: status=skipped "
+                f"as_of={scheduler_result.resolved_as_of} "
+                f"reason={scheduler_result.skipped_reason} "
+                f"invocation={scheduler_result.invocation_manifest}"
+            )
+            return 0
+        if scheduler_result.status == "success":
             print(
                 "pipeline_production: status=success "
-                f"run_id={production_result.run.run_id} "
-                f"as_of={production_result.as_of} dry_run={args.dry_run} "
-                f"manifest={production_result.run.manifest_path} "
-                f"summary={production_result.summary_path}"
+                f"run_id={scheduler_result.pipeline_run_id} "
+                f"as_of={scheduler_result.resolved_as_of} dry_run={args.dry_run} "
+                f"invocation={scheduler_result.invocation_manifest}"
             )
             return 0
         print(
-            f"pipeline_production: status=failed run_id={production_result.run.run_id} "
-            f"as_of={production_result.as_of} "
-            f"failed_stage={production_result.failed_stage} "
-            f"message={production_result.error_message} "
-            f"manifest={production_result.run.manifest_path}",
+            f"pipeline_production: status=failed run_id={scheduler_result.pipeline_run_id} "
+            f"as_of={scheduler_result.resolved_as_of} "
+            f"message={scheduler_result.error_message} "
+            f"invocation={scheduler_result.invocation_manifest}",
             file=sys.stderr,
         )
-        return production_result.exit_code or 2
+        return scheduler_result.exit_code or 2
+
+    if args.pipeline_command == "full-update":
+        updater = FullDataUpdateScheduler(
+            settings=settings,
+            config_path=config_path,
+            raw_store=raw_store,
+        )
+        try:
+            update_result = updater.run()
+        except ProductionLockError as error:
+            print(f"full update blocked: {error}", file=sys.stderr)
+            return 3
+        stream = sys.stdout if update_result.status == "success" else sys.stderr
+        print(
+            f"pipeline_full_update: status={update_result.status} "
+            f"as_of={update_result.resolved_as_of} run_id={update_result.pipeline_run_id} "
+            f"message={update_result.error_message} "
+            f"invocation={update_result.invocation_manifest}",
+            file=stream,
+        )
+        return update_result.exit_code
 
     if args.pipeline_command != "daily":
         raise ValueError(f"Unsupported pipeline command: {args.pipeline_command}")

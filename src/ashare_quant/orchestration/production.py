@@ -35,6 +35,7 @@ from ashare_quant.orchestration.lock import (
     DEFAULT_PRODUCTION_LOCK_PATH,
     production_lock,
 )
+from ashare_quant.orchestration.publication import validate_production_publication
 from ashare_quant.orchestration.run_manifest import (
     DEFAULT_RUNS_ROOT,
     ProductionRun,
@@ -334,7 +335,17 @@ class ProductionPipeline:
         self.runs_root = runs_root
         self.lock_path = lock_path
 
-    def run(self, as_of: str, *, dry_run: bool = False) -> ProductionPipelineResult:
+    def run(
+        self,
+        as_of: str,
+        *,
+        dry_run: bool = False,
+        invocation_source: str = "manual_cli",
+        scheduler_trigger_time: str | None = None,
+        scheduler_invocation_id: str | None = None,
+        service_execution_id: str | None = None,
+        timezone: str | None = None,
+    ) -> ProductionPipelineResult:
         """Execute one production date under a single lock and manifest."""
 
         command = f"ashare-quant pipeline production --as-of {as_of}"
@@ -349,6 +360,12 @@ class ProductionPipeline:
                 upstream_manifests=load_upstream_manifests(self.processed_root),
                 pipeline_type="production_daily",
                 as_of=as_of,
+                invocation_source=invocation_source,
+                resolved_as_of=as_of,
+                timezone=timezone,
+                scheduler_trigger_time=scheduler_trigger_time,
+                scheduler_invocation_id=scheduler_invocation_id,
+                service_execution_id=service_execution_id,
             )
             try:
                 resolved_as_of = self.as_of_resolver(as_of)
@@ -404,6 +421,25 @@ class ProductionPipeline:
                         stage_name,
                         failure,
                     )
+            try:
+                validate_production_publication(
+                    reports_root=self.reports_root,
+                    runs_root=self.runs_root,
+                    as_of=resolved_as_of,
+                    expected_run_id=run.run_id,
+                    run_manifest_path=run.manifest_path,
+                    require_successful_run=False,
+                )
+            except DataValidationError as error:
+                record_failure(run, error, stage_name="publish_production_summary")
+                return ProductionPipelineResult(
+                    run,
+                    "failed",
+                    2,
+                    resolved_as_of,
+                    "publish_production_summary",
+                    _exception_message(error),
+                )
             update_run_status(run, "success")
             return ProductionPipelineResult(
                 run,
@@ -553,6 +589,7 @@ class ProductionPipeline:
             ["rank", "ts_code"], kind="mergesort"
         ).head(20)
         summary_path = self.reports_root / as_of / "production_summary.json"
+        artifact_paths = list(dict.fromkeys(state["artifacts"]))
         payload = {
             "schema_version": 1,
             "artifact_name": "production_daily_summary",
@@ -563,10 +600,11 @@ class ProductionPipeline:
             "top_candidates": candidates.loc[:, ["rank", "ts_code", "prediction_score"]].to_dict(
                 "records"
             ),
-            "artifacts": list(dict.fromkeys(state["artifacts"])),
+            "artifacts": artifact_paths,
             "observation_log_path": state.get("observation_path"),
             "completed_time": datetime.now(UTC).isoformat(),
         }
+        _require_artifacts(tuple(artifact_paths))
         atomic_write_json(summary_path, payload)
         return StageResult("success", (str(summary_path),), {"candidate_count": len(candidates)})
 

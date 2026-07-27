@@ -1,0 +1,12 @@
+[Unit]
+Description=Run A-share Quant full data maintenance twice weekly
+
+[Timer]
+OnCalendar=Wed,Sun *-*-* 12:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=2min
+Unit=ashare-quant-full-update.service
+
+[Install]
+WantedBy=timers.target

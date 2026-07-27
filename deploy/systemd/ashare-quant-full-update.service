@@ -1,0 +1,18 @@
+[Unit]
+Description=A-share Quant Full Dataset Maintenance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@RUN_USER@
+WorkingDirectory=@PROJECT_DIR@
+EnvironmentFile=@ENV_FILE@
+Environment=ASHARE_QUANT_INVOCATION_SOURCE=systemd_timer
+ExecStart=@VENV_BIN@/ashare-quant --config @PROJECT_DIR@/config/default.yaml pipeline full-update
+TimeoutStartSec=12h
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
