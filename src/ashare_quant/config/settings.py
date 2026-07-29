@@ -374,6 +374,46 @@ class ChallengerEvaluationSettings(BaseModel):
         return self
 
 
+class ShadowChallengerModelSettings(BaseModel):
+    """One fixed candidate model used for prospective shadow scoring."""
+
+    model_id: str = Field(min_length=1)
+
+
+class ShadowEnsembleSettings(BaseModel):
+    """Deterministic multi-horizon shadow ensemble configuration."""
+
+    enabled: bool = True
+    fusion_method: Literal["percentile_mean"] = "percentile_mean"
+
+
+class ShadowPredictionSettings(BaseModel):
+    """Prospective-only shadow scoring configuration."""
+
+    enabled: bool = True
+    access_policy: Literal["prospective_production", "frozen_oos_evaluation"] = (
+        "prospective_production"
+    )
+    challenger_models: dict[str, ShadowChallengerModelSettings] = Field(default_factory=dict)
+    ensemble: ShadowEnsembleSettings = Field(default_factory=ShadowEnsembleSettings)
+
+    @model_validator(mode="after")
+    def validate_shadow_models(self) -> ShadowPredictionSettings:
+        """Require exactly one unique model for each supported horizon."""
+
+        required = {"h5", "h10", "h20", "h60"}
+        configured = set(self.challenger_models)
+        if configured != required:
+            raise ValueError(
+                "models.shadow_predictions.challenger_models must contain exactly "
+                f"{sorted(required)}; configured={sorted(configured)}"
+            )
+        model_ids = [item.model_id for item in self.challenger_models.values()]
+        if len(model_ids) != len(set(model_ids)):
+            raise ValueError("shadow challenger model_id values must be unique")
+        return self
+
+
 class ModelExperimentSettings(BaseModel):
     """Read-only experiment planning configuration."""
 
@@ -391,6 +431,16 @@ class ModelExperimentSettings(BaseModel):
     )
     challenger_evaluation: ChallengerEvaluationSettings = Field(
         default_factory=ChallengerEvaluationSettings
+    )
+    shadow_predictions: ShadowPredictionSettings = Field(
+        default_factory=lambda: ShadowPredictionSettings(
+            challenger_models={
+                "h5": ShadowChallengerModelSettings(model_id="configure_h5_candidate"),
+                "h10": ShadowChallengerModelSettings(model_id="configure_h10_candidate"),
+                "h20": ShadowChallengerModelSettings(model_id="configure_h20_candidate"),
+                "h60": ShadowChallengerModelSettings(model_id="configure_h60_candidate"),
+            }
+        )
     )
 
     @model_validator(mode="after")

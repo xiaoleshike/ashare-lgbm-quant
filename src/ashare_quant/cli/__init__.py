@@ -48,6 +48,7 @@ from ashare_quant.models import (
     PurgedWalkForwardPlanner,
     RankerBaselineRunner,
 )
+from ashare_quant.models.shadow import ShadowPredictionService
 from ashare_quant.monitoring import MonitoringService
 from ashare_quant.orchestration import (
     DEFAULT_PRODUCTION_LOCK_PATH,
@@ -442,6 +443,19 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         help="Record existing prediction and candidate rankings without trading actions.",
     )
     observation.add_argument("--as-of", required=True, help="Prediction date in YYYYMMDD.")
+    shadow_predict = commands.add_parser(
+        "shadow-predict",
+        help="Publish prospective Champion/challenger/ensemble shadow scores.",
+    )
+    shadow_predict.add_argument("--as-of", required=True, help="Production session in YYYYMMDD.")
+    shadow_status = commands.add_parser(
+        "shadow-status", help="Inspect one immutable shadow prediction bundle."
+    )
+    shadow_status.add_argument("--as-of", required=True, help="Production session in YYYYMMDD.")
+    shadow_validate = commands.add_parser(
+        "shadow-validate", help="Run read-only shadow readiness validation."
+    )
+    shadow_validate.add_argument("--as-of", required=True, help="Production session in YYYYMMDD.")
 
 
 def add_strategy_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1078,6 +1092,44 @@ def run_models_command(args: argparse.Namespace) -> int:
     )
     output_root = settings.paths.models if args.output_root is None else Path(args.output_root)
     reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    if args.models_command in {"shadow-predict", "shadow-status", "shadow-validate"}:
+        shadow = ShadowPredictionService(
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+            registry=ModelRegistry(output_root),
+            processed_root=processed_root,
+            reports_root=reports_root,
+        )
+        try:
+            if args.models_command == "shadow-predict":
+                result = shadow.predict(args.as_of)
+                print(
+                    f"shadow_predictions: as_of={result.as_of} "
+                    f"production_run_id={result.production_run_id} "
+                    f"shadow_run_id={result.shadow_run_id} rows={result.prediction_rows} "
+                    f"models={result.model_count} idempotent={result.idempotent} "
+                    f"output={result.output_dir}"
+                )
+                return 0
+            if args.models_command == "shadow-status":
+                status = shadow.status(args.as_of)
+                print(
+                    f"shadow_status: as_of={status['as_of']} status={status['status']} "
+                    f"shadow_run_id={status['shadow_run_id']} "
+                    f"rows={status['prediction_rows']} output={status['output']}"
+                )
+                return 0 if status["status"] == "complete" else 1
+            ready, failures, checks = shadow.validate(args.as_of)
+            print(
+                f"shadow_readiness: as_of={args.as_of} "
+                f"status={'READY' if ready else 'NOT_READY'} checks={checks}"
+            )
+            for failure in failures:
+                print(f"  failure: {failure}")
+            return 0 if ready else 1
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"shadow prediction failed: {error}", file=sys.stderr)
+            return 2
     if args.models_command == "observation-log":
         recorder = ProductionObservationRecorder(reports_root)
         try:

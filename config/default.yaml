@@ -211,6 +211,21 @@ models:
     minimum_rank_ic_delta: 0.0
     minimum_positive_ic_ratio: 0.50
     minimum_top10_return_delta: 0.0
+  shadow_predictions:
+    enabled: true
+    access_policy: prospective_production
+    challenger_models:
+      h5:
+        model_id: experiment_c_h5_22dcd006e5ef9e96
+      h10:
+        model_id: experiment_c_h10_fabee8b642c17e55
+      h20:
+        model_id: experiment_c_h20_26c38e9bd7b03f65
+      h60:
+        model_id: experiment_c_h60_37f19e4e8ffafe59
+    ensemble:
+      enabled: true
+      fusion_method: percentile_mean
 production_model:
   train_start: "20100101"
   train_end: "20260710"
