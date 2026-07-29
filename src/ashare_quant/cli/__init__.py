@@ -48,6 +48,7 @@ from ashare_quant.models import (
     PurgedWalkForwardPlanner,
     RankerBaselineRunner,
 )
+from ashare_quant.monitoring import MonitoringService
 from ashare_quant.orchestration import (
     DEFAULT_PRODUCTION_LOCK_PATH,
     DailyPipelineOrchestrator,
@@ -122,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_research_parser(subparsers)
     add_backtest_parser(subparsers)
     add_paper_trading_parser(subparsers)
+    add_monitor_parser(subparsers)
     add_pipeline_parser(subparsers)
     return parser
 
@@ -613,6 +615,19 @@ def add_paper_trading_parser(
     execute.add_argument("--as-of", required=True, help="Execution date in YYYYMMDD.")
     report = commands.add_parser("report", help="Publish the daily virtual portfolio report.")
     report.add_argument("--as-of", required=True, help="Report date in YYYYMMDD.")
+
+
+def add_monitor_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Add read-only production monitoring commands."""
+
+    parser = subparsers.add_parser(
+        "monitor", help="Inspect immutable production and paper-trading artifacts."
+    )
+    commands = parser.add_subparsers(dest="monitor_command", required=True)
+    run = commands.add_parser("run", help="Publish one read-only monitoring snapshot.")
+    run.add_argument("--as-of", required=True, help="Production session in YYYYMMDD.")
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -1851,6 +1866,30 @@ def run_paper_trading_command(args: argparse.Namespace) -> int:
     )
 
 
+def run_monitor_command(args: argparse.Namespace) -> int:
+    """Run read-only monitoring without acquiring or modifying trading state."""
+
+    if args.monitor_command != "run":
+        raise ValueError(f"Unsupported monitor command: {args.monitor_command}")
+    settings = load_settings(args.config)
+    configure_logging(settings.logging.level, settings.logging.json_logs)
+    service = MonitoringService(
+        settings=settings,
+        config_path=Path(effective_config_path(args.config)),
+    )
+    try:
+        result = service.run(args.as_of)
+    except (DataValidationError, OSError, ValueError) as error:
+        print(f"monitoring failed: {error}", file=sys.stderr)
+        return 2
+    print(
+        f"monitor_run: as_of={result.as_of} run_id={result.run_id} "
+        f"predictions={result.prediction_count} portfolios={result.portfolio_count} "
+        f"output={result.output_dir}"
+    )
+    return 0
+
+
 def execute_readiness_gate(
     service: FreshnessService,
     gate_name: str,
@@ -2068,6 +2107,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_backtest_command(args)
     if args.command == "paper-trading":
         return run_paper_trading_command(args)
+    if args.command == "monitor":
+        return run_monitor_command(args)
     if args.command == "pipeline":
         return run_pipeline_command(args)
     raise ValueError(f"Unsupported command: {args.command}")

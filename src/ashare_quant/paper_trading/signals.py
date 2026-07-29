@@ -145,29 +145,18 @@ class PaperSignalProvider:
         if len({model.feature_hash for model in components}) != 1:
             raise DataValidationError("paper ensemble component feature hashes differ")
         scored = [
-            score_registered_model_range(
-                model,
-                processed_root=self.processed_root,
-                start_date=as_of,
-                end_date=as_of,
-            ).predictions
+            (
+                model.model_id,
+                score_registered_model_range(
+                    model,
+                    processed_root=self.processed_root,
+                    start_date=as_of,
+                    end_date=as_of,
+                ).predictions,
+            )
             for model in components
         ]
-        base_keys = scored[0].loc[:, ["trade_date", "ts_code"]].reset_index(drop=True)
-        percentile_columns: list[pd.Series[float]] = []
-        for model, frame in zip(components, scored, strict=True):
-            keys = frame.loc[:, ["trade_date", "ts_code"]].reset_index(drop=True)
-            if not keys.equals(base_keys):
-                raise DataValidationError(
-                    f"paper ensemble model universe differs: {model.model_id}"
-                )
-            percentile_columns.append(
-                frame.groupby("trade_date", sort=False)["prediction_score"].rank(
-                    method="average", pct=True
-                )
-            )
-        ranking = base_keys.copy()
-        ranking["prediction_score"] = pd.concat(percentile_columns, axis=1).mean(axis=1)
+        ranking = _combine_percentile_rankings(scored)
         ensemble_id = "ensemble:" + payload_sha256([model.model_id for model in components])[:16]
         digest = payload_sha256(
             {
@@ -206,6 +195,48 @@ class PaperSignalProvider:
         if model.status == "retired":
             raise DataValidationError(f"paper portfolio model is retired: {model_id}")
         return model
+
+
+def _combine_percentile_rankings(
+    scored: list[tuple[str, DataFrame]],
+) -> DataFrame:
+    """Align model scores by stock identity before averaging daily percentile ranks."""
+
+    combined: DataFrame | None = None
+    expected_keys: DataFrame | None = None
+    percentile_columns: list[str] = []
+    for index, (model_id, frame) in enumerate(scored):
+        required = {"trade_date", "ts_code", "prediction_score"}
+        if not required <= set(frame.columns):
+            raise DataValidationError(f"paper ensemble prediction schema differs: {model_id}")
+        keyed = frame.loc[:, ["trade_date", "ts_code", "prediction_score"]].copy()
+        if keyed.duplicated(["trade_date", "ts_code"]).any():
+            raise DataValidationError(f"paper ensemble has duplicate stock keys: {model_id}")
+        keyed = keyed.sort_values(["trade_date", "ts_code"], kind="mergesort").reset_index(
+            drop=True
+        )
+        keys = keyed.loc[:, ["trade_date", "ts_code"]]
+        if expected_keys is None:
+            expected_keys = keys
+            combined = keys.copy()
+        elif not keys.equals(expected_keys):
+            raise DataValidationError(f"paper ensemble model universe differs: {model_id}")
+        column = f"rank_percentile_{index}"
+        keyed[column] = keyed.groupby("trade_date", sort=False)["prediction_score"].rank(
+            method="average", pct=True
+        )
+        assert combined is not None
+        combined = combined.merge(
+            keyed.loc[:, ["trade_date", "ts_code", column]],
+            on=["trade_date", "ts_code"],
+            how="left",
+            validate="one_to_one",
+        )
+        percentile_columns.append(column)
+    if combined is None or not percentile_columns:
+        raise DataValidationError("paper ensemble has no scored component predictions")
+    combined["prediction_score"] = combined.loc[:, percentile_columns].mean(axis=1)
+    return combined.loc[:, ["trade_date", "ts_code", "prediction_score"]]
 
 
 def _read_candidates(path: Path, as_of: str, model_id: str) -> DataFrame:

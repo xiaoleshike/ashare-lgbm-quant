@@ -262,7 +262,7 @@ class PaperTradingService:
         self.init()
         summary = production_summary_path or (self.reports_root / as_of / "production_summary.json")
         execution_rule = "next_open"
-        total_written = 0
+        prepared: list[tuple[PaperPortfolioSettings, DataFrame]] = []
         for portfolio in self.settings.paper_trading.portfolios:
             signal = self.signal_provider.load(portfolio, as_of, summary)
             selected = signal.ranking.head(portfolio.top_n)
@@ -315,8 +315,26 @@ class PaperTradingService:
                     }
                 )
             frame = pd.DataFrame(rows, columns=ORDER_COLUMNS)
+            prepared.append((portfolio, frame))
+
+        total_written = 0
+        for portfolio, frame in prepared:
+            order_path = self._portfolio_root(portfolio.portfolio_id) / "orders.parquet"
+            existing = read_ledger(order_path)
+            same_date = (
+                existing.loc[existing["as_of"].astype(str).eq(as_of)]
+                if not existing.empty
+                else existing
+            )
+            if not same_date.empty:
+                if _same_order_semantics(same_date, frame):
+                    continue
+                raise DataValidationError(
+                    f"paper orders are already frozen with different targets: "
+                    f"portfolio={portfolio.portfolio_id} as_of={as_of}"
+                )
             total_written += append_ledger(
-                self._portfolio_root(portfolio.portfolio_id) / "orders.parquet",
+                order_path,
                 frame,
                 unique_columns=("order_id",),
                 sort_columns=("as_of", "rank", "ts_code"),
@@ -935,6 +953,33 @@ def _desired_shares(
     if target_weight <= 0:
         return 0
     return current_shares + lot_size
+
+
+def _same_order_semantics(existing: DataFrame, proposed: DataFrame) -> bool:
+    columns = [
+        "as_of",
+        "execution_rule",
+        "portfolio_id",
+        "ts_code",
+        "rank",
+        "prediction_score",
+        "target_weight",
+        "model_id",
+        "environment",
+    ]
+    if not set(columns) <= set(existing.columns):
+        return False
+    left = (
+        existing.loc[:, columns]
+        .sort_values(["as_of", "ts_code"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    right = (
+        proposed.loc[:, columns]
+        .sort_values(["as_of", "ts_code"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    return left.equals(right)
 
 
 def _account_contract(payload: dict[str, Any]) -> dict[str, Any]:

@@ -14,10 +14,11 @@ from ashare_quant.config.settings import (
     PaperTradingSettings,
     PathSettings,
 )
+from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.registry import ModelRegistry
 from ashare_quant.paper_trading import service as paper_service_module
 from ashare_quant.paper_trading.service import PaperTradingService
-from ashare_quant.paper_trading.signals import PaperSignal
+from ashare_quant.paper_trading.signals import PaperSignal, _combine_percentile_rankings
 
 SIGNAL_DATE = "20240102"
 ENTRY_DATE = "20240103"
@@ -148,6 +149,70 @@ def test_rebalance_does_not_require_future_trade_calendar(tmp_path: Path) -> Non
 
     assert result.execution_rule == "next_open"
     assert result.orders_written == 1
+
+
+def test_rebalance_validates_every_portfolio_before_writing_orders(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path,
+        portfolios=(
+            PaperPortfolioSettings(
+                portfolio_id="alpha",
+                signal_type="model",
+                model_id="alpha-model",
+            ),
+            PaperPortfolioSettings(
+                portfolio_id="beta",
+                signal_type="model",
+                model_id="beta-model",
+            ),
+        ),
+    )
+    _write_market_fixture(tmp_path)
+    service = _service(tmp_path, settings)
+    service.signal_provider = FixedSignals({("alpha", SIGNAL_DATE): [("000001.SZ", 0.9)]})  # type: ignore[assignment]
+
+    with pytest.raises(KeyError):
+        service.rebalance(SIGNAL_DATE)
+
+    assert not list((tmp_path / "paper").glob("*/orders.parquet"))
+
+
+def test_ensemble_percentile_ranks_align_by_stock_key_not_score_order() -> None:
+    first = pd.DataFrame(
+        {
+            "trade_date": [SIGNAL_DATE] * 3,
+            "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "prediction_score": [3.0, 2.0, 1.0],
+        }
+    )
+    second = pd.DataFrame(
+        {
+            "trade_date": [SIGNAL_DATE] * 3,
+            "ts_code": ["000003.SZ", "000001.SZ", "000002.SZ"],
+            "prediction_score": [4.0, 3.0, 1.0],
+        }
+    )
+
+    result = _combine_percentile_rankings([("h5", first), ("h10", second)])
+    scores = result.set_index("ts_code")["prediction_score"]
+
+    assert scores["000001.SZ"] == pytest.approx((1.0 + 2.0 / 3.0) / 2.0)
+    assert scores["000002.SZ"] == pytest.approx((2.0 / 3.0 + 1.0 / 3.0) / 2.0)
+    assert scores["000003.SZ"] == pytest.approx((1.0 / 3.0 + 1.0) / 2.0)
+
+
+def test_ensemble_rejects_actual_stock_key_mismatch() -> None:
+    first = pd.DataFrame(
+        {
+            "trade_date": [SIGNAL_DATE],
+            "ts_code": ["000001.SZ"],
+            "prediction_score": [1.0],
+        }
+    )
+    second = first.assign(ts_code="000002.SZ")
+
+    with pytest.raises(DataValidationError, match="universe differs"):
+        _combine_percentile_rankings([("h5", first), ("h10", second)])
 
 
 def test_failed_trade_commit_can_be_replayed_without_duplicate_state(
