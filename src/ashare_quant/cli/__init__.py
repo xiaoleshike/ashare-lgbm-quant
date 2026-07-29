@@ -49,7 +49,10 @@ from ashare_quant.models import (
     RankerBaselineRunner,
 )
 from ashare_quant.models.shadow import ShadowPredictionService
-from ashare_quant.monitoring import MonitoringService
+from ashare_quant.monitoring import MonitoringService, PerformanceMonitoringService
+from ashare_quant.monitoring.performance_observation import (
+    PerformanceObservationService,
+)
 from ashare_quant.orchestration import (
     DEFAULT_PRODUCTION_LOCK_PATH,
     DailyPipelineOrchestrator,
@@ -642,6 +645,30 @@ def add_monitor_parser(
     commands = parser.add_subparsers(dest="monitor_command", required=True)
     run = commands.add_parser("run", help="Publish one read-only monitoring snapshot.")
     run.add_argument("--as-of", required=True, help="Production session in YYYYMMDD.")
+    observe = commands.add_parser(
+        "observe",
+        help="Join mature prospective shadow predictions to realized labels.",
+    )
+    observe.add_argument("--as-of", required=True, help="Maturity cutoff in YYYYMMDD.")
+    performance = commands.add_parser(
+        "performance",
+        help="Aggregate mature prospective observations into monitoring metrics.",
+    )
+    performance.add_argument("--as-of", required=True, help="Observation cutoff in YYYYMMDD.")
+    performance_status = commands.add_parser(
+        "performance-status",
+        help="Inspect one published performance-monitor artifact.",
+    )
+    performance_status.add_argument(
+        "--as-of", required=True, help="Observation cutoff in YYYYMMDD."
+    )
+    performance_validate = commands.add_parser(
+        "performance-validate",
+        help="Validate performance observations without publishing.",
+    )
+    performance_validate.add_argument(
+        "--as-of", required=True, help="Observation cutoff in YYYYMMDD."
+    )
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -1921,22 +1948,80 @@ def run_paper_trading_command(args: argparse.Namespace) -> int:
 def run_monitor_command(args: argparse.Namespace) -> int:
     """Run read-only monitoring without acquiring or modifying trading state."""
 
-    if args.monitor_command != "run":
-        raise ValueError(f"Unsupported monitor command: {args.monitor_command}")
     settings = load_settings(args.config)
     configure_logging(settings.logging.level, settings.logging.json_logs)
-    service = MonitoringService(
+    if args.monitor_command == "observe":
+        observation_service = PerformanceObservationService(
+            raw_root=settings.paths.parquet_store,
+            processed_root=settings.paths.processed_data,
+            reports_root=settings.paths.reports,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            observation_result = observation_service.run(args.as_of)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"performance observation failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"performance_observation: as_of={observation_result.observation_as_of} "
+            f"rows={observation_result.observation_rows} "
+            f"available={observation_result.available_rows} "
+            f"idempotent={observation_result.idempotent} "
+            f"output={observation_result.output_dir}"
+        )
+        return 0
+    if args.monitor_command in {
+        "performance",
+        "performance-status",
+        "performance-validate",
+    }:
+        performance_service = PerformanceMonitoringService(
+            reports_root=settings.paths.reports,
+            config_path=Path(effective_config_path(args.config)),
+        )
+        try:
+            if args.monitor_command == "performance":
+                performance_result = performance_service.run(args.as_of)
+                print(
+                    f"performance_monitor: as_of={performance_result.as_of} "
+                    f"models={performance_result.model_count} "
+                    f"observations={performance_result.observation_rows} "
+                    f"idempotent={performance_result.idempotent} "
+                    f"output={performance_result.output_dir}"
+                )
+                return 0
+            validation = (
+                performance_service.status(args.as_of)
+                if args.monitor_command == "performance-status"
+                else performance_service.validate(args.as_of)
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"performance monitor failed: {error}", file=sys.stderr)
+            return 2
+        stream = sys.stdout if validation.valid else sys.stderr
+        print(
+            f"performance_monitor_{args.monitor_command.rsplit('-', 1)[-1]}: "
+            f"as_of={validation.as_of} valid={validation.valid} "
+            f"exists={validation.exists} models={validation.model_count} "
+            f"observations={validation.observation_rows} error={validation.error}",
+            file=stream,
+        )
+        return 0 if validation.valid else 2
+    if args.monitor_command != "run":
+        raise ValueError(f"Unsupported monitor command: {args.monitor_command}")
+    monitoring_service = MonitoringService(
         settings=settings,
         config_path=Path(effective_config_path(args.config)),
     )
     try:
-        result = service.run(args.as_of)
+        result = monitoring_service.run(args.as_of)
     except (DataValidationError, OSError, ValueError) as error:
         print(f"monitoring failed: {error}", file=sys.stderr)
         return 2
     print(
         f"monitor_run: as_of={result.as_of} run_id={result.run_id} "
         f"predictions={result.prediction_count} portfolios={result.portfolio_count} "
+        f"performance_models={result.performance_model_count} "
         f"output={result.output_dir}"
     )
     return 0

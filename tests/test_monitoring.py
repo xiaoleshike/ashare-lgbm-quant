@@ -14,6 +14,11 @@ from ashare_quant.config.settings import (
     PathSettings,
 )
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.monitoring.performance_observation.schemas import OBSERVATION_COLUMNS
+from ashare_quant.monitoring.performance_observation.storage import (
+    logical_observation_hash,
+    publish_observation_artifact,
+)
 from ashare_quant.monitoring.schemas import MonitoringResult
 from ashare_quant.monitoring.service import MonitoringService
 from ashare_quant.utils.manifest import config_hash
@@ -42,6 +47,7 @@ def test_monitoring_is_read_only_deterministic_and_keeps_portfolios_isolated(
     assert all(path.read_bytes() == source_bytes[path] for path in input_paths)
     assert {path.name for path in first.output_dir.iterdir()} == {
         "health.json",
+        "performance",
         "portfolio_metrics.parquet",
         "monitor_summary.json",
         "monitor_report.md",
@@ -66,6 +72,7 @@ def test_monitoring_is_read_only_deterministic_and_keeps_portfolios_isolated(
     summary = _json(first.output_dir / "monitor_summary.json")
     assert summary["scope"]["labels_read"] is False
     assert summary["scope"]["trading_state_modified"] is False
+    assert len(summary["performance"]["models"]) == 1
 
 
 def test_monitoring_ignores_ledger_rows_after_as_of(tmp_path: Path) -> None:
@@ -137,6 +144,32 @@ def test_failed_monitoring_publication_keeps_previous_manifest(
         service.run(AS_OF)
 
     assert manifest_path.read_bytes() == before
+
+
+def test_performance_failure_keeps_previous_complete_monitor_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _ = monitoring_fixture(tmp_path)
+    result = service.run(AS_OF)
+    before = {
+        path.relative_to(result.output_dir): path.read_bytes()
+        for path in result.output_dir.glob("**/*")
+        if path.is_file()
+    }
+
+    def fail_performance(as_of: str) -> None:
+        raise DataValidationError(f"performance failure: {as_of}")
+
+    monkeypatch.setattr(service.performance_service, "build", fail_performance)
+    with pytest.raises(DataValidationError, match="performance failure"):
+        service.run(AS_OF)
+
+    assert before == {
+        path.relative_to(result.output_dir): path.read_bytes()
+        for path in result.output_dir.glob("**/*")
+        if path.is_file()
+    }
 
 
 def test_monitoring_does_not_read_labels_or_call_trading_execution(
@@ -287,6 +320,73 @@ def monitoring_fixture(tmp_path: Path) -> tuple[MonitoringService, tuple[Path, .
         encoding="utf-8",
     )
     artifact_paths.append(report_dir / "production_summary.json")
+
+    observation_dir = reports / "performance_observation" / AS_OF
+    observation = pd.DataFrame(
+        {
+            "observation_id": ["observation-1", "observation-2"],
+            "signal_date": ["20231220", "20231220"],
+            "observation_as_of": [AS_OF, AS_OF],
+            "model_id": [MODEL_ID, MODEL_ID],
+            "model_role": ["champion", "champion"],
+            "horizon": [5, 5],
+            "ts_code": ["000001.SZ", "000002.SZ"],
+            "prediction_score": [0.8, 0.2],
+            "rank": [1, 2],
+            "score_percentile": [1.0, 0.5],
+            "future_excess_ret": [0.02, -0.01],
+            "entry_date": ["20231221", "20231221"],
+            "exit_date": ["20231228", "20231228"],
+            "label_status": ["available", "available"],
+            "feature_hash": [FEATURE_HASH, FEATURE_HASH],
+            "universe_hash": ["universe-hash", "universe-hash"],
+            "prediction_hash": ["prediction-hash", "prediction-hash"],
+            "production_run_id": ["production-run", "production-run"],
+            "shadow_run_id": ["shadow-run", "shadow-run"],
+        },
+        columns=list(OBSERVATION_COLUMNS),
+    )
+    observation_manifest = {
+        "schema_version": 1,
+        "artifact_name": "performance_observation",
+        "observation_as_of": AS_OF,
+        "observation_hash": logical_observation_hash(observation),
+        "source_identity_hash": "observation-source",
+        "row_count": 2,
+        "available_rows": 2,
+        "access_policy": "prospective_production",
+        "model_lineage": [
+            {
+                "model_id": MODEL_ID,
+                "model_role": "champion",
+                "feature_hash": FEATURE_HASH,
+                "universe_hash": "universe-hash",
+                "source_models": [],
+                "fusion_method": None,
+            }
+        ],
+        "contracts": {
+            "labels_used_only_after_maturity": True,
+            "historical_predictions_used": False,
+            "inference_called": False,
+            "backtest_called": False,
+            "paper_trading_called": False,
+            "registry_modified": False,
+        },
+    }
+    publish_observation_artifact(
+        output_dir=observation_dir,
+        observations=observation,
+        metrics={"available_rows": 2},
+        manifest=observation_manifest,
+    )
+    artifact_paths.extend(
+        [
+            observation_dir / "observation.parquet",
+            observation_dir / "metrics.json",
+            observation_dir / "manifest.json",
+        ]
+    )
 
     for portfolio_id, equity_values in (("alpha", (100.0, 90.0)), ("beta", (100.0, 110.0))):
         root = paper / portfolio_id

@@ -13,6 +13,7 @@ type DataFrame = pd.DataFrame
 
 def build_monitor_summary(
     health: HealthMetrics,
+    performance: dict[str, Any],
     portfolios: DataFrame,
 ) -> dict[str, Any]:
     """Build the compact machine-readable monitoring summary."""
@@ -23,6 +24,7 @@ def build_monitor_summary(
         "as_of": health.as_of,
         "model_id": health.model_id,
         "health": health.to_dict(),
+        "performance": performance,
         "portfolio_count": len(portfolios),
         "portfolios": portfolios.to_dict("records"),
         "scope": {
@@ -68,6 +70,11 @@ def render_monitor_report(summary: dict[str, Any]) -> str:
         )
     lines.extend(
         [
+            "",
+            "## Prospective Performance",
+            "",
+            f"- Model-horizon groups: {len(summary['performance']['models'])}",
+            f"- Warnings: {len(summary['performance']['warnings'])}",
             "",
             "## Scope",
             "",

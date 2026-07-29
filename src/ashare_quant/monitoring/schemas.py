@@ -80,3 +80,4 @@ class MonitoringResult:
     output_dir: Path
     portfolio_count: int
     prediction_count: int
+    performance_model_count: int = 0
