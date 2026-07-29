@@ -291,7 +291,7 @@ strategy:
     price_limit_tolerance: 0.000001
 research:
   daily_report:
-    top_candidates: 20
+    top_candidates: 50
     abnormal_return_abs_pct: 9.0
     volatility_window: 20
     volatility_min_observations: 10

@@ -154,6 +154,46 @@ def test_success_publishes_atomic_summary_with_top_candidates(tmp_path: Path) ->
     assert summary["observation_log_path"].endswith("20240105.json")
 
 
+def test_production_summary_keeps_all_fifty_selected_candidates(tmp_path: Path) -> None:
+    pipeline, _ = make_pipeline(tmp_path)
+    report_dir = tmp_path / "reports" / "20240105"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    artifact = report_dir / "candidates.csv"
+    artifact.write_text("fixture\n", encoding="utf-8")
+    observation = tmp_path / "reports" / "production_observation" / "20240105.json"
+    observation.parent.mkdir(parents=True, exist_ok=True)
+    observation.write_text("{}\n", encoding="utf-8")
+    candidates = pd.DataFrame(
+        {
+            "rank": range(1, 51),
+            "ts_code": [f"{code:06d}.SZ" for code in range(1, 51)],
+            "prediction_score": [1.0 - code / 100 for code in range(50)],
+        }
+    )
+    candidate_result = CandidateSelectionResult(
+        "20240105",
+        "champion-1",
+        100,
+        50,
+        {},
+        artifact,
+        candidates,
+    )
+    state = {
+        "candidate_result": candidate_result,
+        "artifacts": [str(artifact), str(observation)],
+        "observation_path": str(observation),
+    }
+    run = ProductionRun("summary-run", tmp_path / "runs" / "20240105" / "summary-run")
+
+    pipeline._publish_summary(run, "20240105", state)
+    summary = load_json(report_dir / "production_summary.json")
+
+    assert summary["candidate_count"] == 50
+    assert len(summary["top_candidates"]) == 50
+    assert summary["top_candidates"][-1]["rank"] == 50
+
+
 def test_repeated_date_creates_distinct_run_ids(tmp_path: Path) -> None:
     first, _ = make_pipeline(tmp_path)
     second, _ = make_pipeline(tmp_path)

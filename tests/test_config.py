@@ -26,6 +26,7 @@ def test_load_settings_reads_yaml_and_env_token(monkeypatch: pytest.MonkeyPatch)
     assert settings.production.market_data_ready_time == "18:30"
     assert settings.production.scheduler.enabled is True
     assert settings.production.scheduler.skip_if_already_successful is True
+    assert settings.research.daily_report.top_candidates == 50
 
 
 def test_load_settings_does_not_require_token(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -618,7 +618,7 @@ class StrategySettings(BaseModel):
 class DailyResearchReportSettings(BaseModel):
     """Thresholds for descriptive same-date candidate risk reporting."""
 
-    top_candidates: PositiveInt = 20
+    top_candidates: PositiveInt = 50
     abnormal_return_abs_pct: float = Field(default=9.0, ge=0)
     volatility_window: PositiveInt = 20
     volatility_min_observations: PositiveInt = 10

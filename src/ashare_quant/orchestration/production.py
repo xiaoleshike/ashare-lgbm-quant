@@ -585,9 +585,7 @@ class ProductionPipeline:
         candidate_result = state.get("candidate_result")
         if not isinstance(candidate_result, CandidateSelectionResult):
             raise DataValidationError("candidate result is unavailable for production summary")
-        candidates = candidate_result.candidates.sort_values(
-            ["rank", "ts_code"], kind="mergesort"
-        ).head(20)
+        candidates = candidate_result.candidates.sort_values(["rank", "ts_code"], kind="mergesort")
         summary_path = self.reports_root / as_of / "production_summary.json"
         artifact_paths = list(dict.fromkeys(state["artifacts"]))
         payload = {
