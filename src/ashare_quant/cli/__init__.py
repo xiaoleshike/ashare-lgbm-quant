@@ -66,6 +66,7 @@ from ashare_quant.orchestration.scheduler import (
     FullDataUpdateScheduler,
     ProductionScheduler,
 )
+from ashare_quant.paper_trading import PaperTradingService
 from ashare_quant.research import (
     DailyResearchReportGenerator,
     ExplainabilityEngine,
@@ -120,6 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_strategy_parser(subparsers)
     add_research_parser(subparsers)
     add_backtest_parser(subparsers)
+    add_paper_trading_parser(subparsers)
     add_pipeline_parser(subparsers)
     return parser
 
@@ -585,6 +587,32 @@ def add_pipeline_parser(subparsers: argparse._SubParsersAction[argparse.Argument
         "full-update",
         help="Run a locked all-dataset refresh and gap repair through the latest session.",
     )
+
+
+def add_paper_trading_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Add broker-free virtual-account commands."""
+
+    parser = subparsers.add_parser(
+        "paper-trading", help="Manage isolated append-only virtual portfolios."
+    )
+    parser.add_argument("--root", default=None, help="Override the paper-trading ledger root.")
+    commands = parser.add_subparsers(dest="paper_trading_command", required=True)
+    commands.add_parser("init", help="Create configured virtual accounts idempotently.")
+    rebalance = commands.add_parser(
+        "rebalance", help="Create T+1 target orders from one production summary."
+    )
+    rebalance.add_argument("--as-of", required=True, help="Signal date in YYYYMMDD.")
+    rebalance.add_argument(
+        "--production-summary",
+        default=None,
+        help="Override reports/YYYYMMDD/production_summary.json.",
+    )
+    execute = commands.add_parser("execute", help="Execute due virtual orders at next open.")
+    execute.add_argument("--as-of", required=True, help="Execution date in YYYYMMDD.")
+    report = commands.add_parser("report", help="Publish the daily virtual portfolio report.")
+    report.add_argument("--as-of", required=True, help="Report date in YYYYMMDD.")
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -1656,6 +1684,16 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
                 settings=settings.research.decision_support,
             ),
             observation=ProductionObservationRecorder(reports_root),
+            paper_trading=PaperTradingService(
+                settings=settings,
+                config_path=config_path,
+                registry=ModelRegistry(models_root),
+                raw_root=settings.paths.parquet_store,
+                processed_root=settings.paths.processed_data,
+                reports_root=reports_root,
+            )
+            if settings.paper_trading.enabled
+            else None,
         )
         scheduler = ProductionScheduler(
             settings=settings,
@@ -1745,6 +1783,72 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     return daily_result.exit_code or 2
+
+
+def run_paper_trading_command(args: argparse.Namespace) -> int:
+    """Run one paper-trading operation under the repository production lock."""
+
+    settings = load_settings(args.config)
+    configure_logging(settings.logging.level, settings.logging.json_logs)
+    service = PaperTradingService(
+        settings=settings,
+        config_path=Path(effective_config_path(args.config)),
+        registry=ModelRegistry(settings.paths.models),
+        raw_root=settings.paths.parquet_store,
+        processed_root=settings.paths.processed_data,
+        reports_root=settings.paths.reports,
+        paper_root=None if args.root is None else Path(args.root),
+    )
+
+    def operation() -> int:
+        try:
+            if args.paper_trading_command == "init":
+                init_result = service.init()
+                print(
+                    f"paper_trading_init: accounts={init_result.account_count} "
+                    f"created={init_result.created_count} root={init_result.root}"
+                )
+                return 0
+            if args.paper_trading_command == "rebalance":
+                rebalance_result = service.rebalance(
+                    args.as_of,
+                    production_summary_path=(
+                        None if args.production_summary is None else Path(args.production_summary)
+                    ),
+                )
+                print(
+                    f"paper_trading_rebalance: as_of={rebalance_result.as_of} "
+                    f"execution_rule={rebalance_result.execution_rule} "
+                    f"orders_written={rebalance_result.orders_written} "
+                    f"root={rebalance_result.root}"
+                )
+                return 0
+            if args.paper_trading_command == "execute":
+                execution_result = service.execute(args.as_of)
+                print(
+                    f"paper_trading_execute: as_of={execution_result.as_of} "
+                    f"trades_written={execution_result.trades_written} "
+                    f"equity_rows_written={execution_result.equity_rows_written} "
+                    f"root={execution_result.root}"
+                )
+                return 0
+            if args.paper_trading_command == "report":
+                report_result = service.report(args.as_of)
+                print(
+                    f"paper_trading_report: as_of={report_result.as_of} "
+                    f"portfolios={report_result.portfolio_count} "
+                    f"output={report_result.report_path}"
+                )
+                return 0
+            raise ValueError(f"Unsupported paper-trading command: {args.paper_trading_command}")
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"paper trading failed: {error}", file=sys.stderr)
+            return 2
+
+    return run_production_cli_command(
+        operation,
+        command=f"ashare-quant paper-trading {args.paper_trading_command}",
+    )
 
 
 def execute_readiness_gate(
@@ -1962,6 +2066,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_research_command(args)
     if args.command == "backtest":
         return run_backtest_command(args)
+    if args.command == "paper-trading":
+        return run_paper_trading_command(args)
     if args.command == "pipeline":
         return run_pipeline_command(args)
     raise ValueError(f"Unsupported command: {args.command}")

@@ -368,3 +368,33 @@ backtest:
     factor_quantiles: 5
     shap_sample_rows: 10000
     prediction_tolerance: 0.0000001
+paper_trading:
+  enabled: true
+  initial_cash: 1000000.0
+  execution: next_open
+  lot_size: 100
+  commission: 0.00025
+  stamp_duty: 0.001
+  slippage: 0.0005
+  price_tolerance: 0.000001
+  portfolios:
+    - portfolio_id: champion_top20
+      signal_type: champion
+      model_id: champion
+      top_n: 20
+    - portfolio_id: h5_top20
+      signal_type: model
+      model_id: experiment_c_h5_22dcd006e5ef9e96
+      top_n: 20
+    - portfolio_id: h10_top20
+      signal_type: model
+      model_id: experiment_c_h10_fabee8b642c17e55
+      top_n: 20
+    - portfolio_id: ensemble_top20
+      signal_type: ensemble
+      component_model_ids:
+        - experiment_c_h5_22dcd006e5ef9e96
+        - experiment_c_h10_fabee8b642c17e55
+        - experiment_c_h20_26c38e9bd7b03f65
+        - experiment_c_h60_37f19e4e8ffafe59
+      top_n: 20

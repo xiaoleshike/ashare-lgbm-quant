@@ -12,6 +12,7 @@ htmlcov/
 /data/
 /models/
 /reports/
+/paper_trading/
 /logs/
 *.parquet
 *.duckdb

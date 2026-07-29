@@ -46,6 +46,7 @@ from ashare_quant.orchestration.run_manifest import (
     update_run_context,
     update_run_status,
 )
+from ashare_quant.paper_trading import PaperTradingDailyResult
 from ashare_quant.research.daily_report import DailyReportResult, DailyResearchReportGenerator
 from ashare_quant.research.decision_support import (
     DecisionSupportResult,
@@ -81,6 +82,17 @@ class ReadinessService(Protocol):
     """Read-only readiness API required by dry-run mode."""
 
     def check_all(self, as_of: str) -> tuple[GateResult, ...]: ...
+
+
+class PaperTradingDailyRunner(Protocol):
+    """Lock-free API invoked from inside the production pipeline lock."""
+
+    def run_daily(
+        self,
+        as_of: str,
+        *,
+        production_summary_path: Path | None = None,
+    ) -> PaperTradingDailyResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +327,7 @@ class ProductionPipeline:
         explainability: ExplainabilityEngine,
         decision_support: InvestmentDecisionSupport,
         observation: ProductionObservationRecorder,
+        paper_trading: PaperTradingDailyRunner | None = None,
         runs_root: Path = DEFAULT_RUNS_ROOT,
         lock_path: Path = DEFAULT_PRODUCTION_LOCK_PATH,
     ) -> None:
@@ -332,6 +345,7 @@ class ProductionPipeline:
         self.explainability = explainability
         self.decision_support = decision_support
         self.observation = observation
+        self.paper_trading = paper_trading
         self.runs_root = runs_root
         self.lock_path = lock_path
 
@@ -352,11 +366,21 @@ class ProductionPipeline:
         if dry_run:
             command += " --dry-run"
         with production_lock(self.lock_path, command=command):
+            production_stages = (
+                (
+                    *PRODUCTION_STAGE_NAMES[:-1],
+                    "paper_trading_daily",
+                    PRODUCTION_STAGE_NAMES[-1],
+                )
+                if self.paper_trading is not None
+                else PRODUCTION_STAGE_NAMES
+            )
+            declared_stages = DRY_RUN_STAGE_NAMES if dry_run else production_stages
             run = create_run(
                 command,
                 config_path=self.config_path,
                 runs_root=self.runs_root,
-                stages=DRY_RUN_STAGE_NAMES if dry_run else PRODUCTION_STAGE_NAMES,
+                stages=declared_stages,
                 upstream_manifests=load_upstream_manifests(self.processed_root),
                 pipeline_type="production_daily",
                 as_of=as_of,
@@ -405,6 +429,16 @@ class ProductionPipeline:
                 ("research_explain", lambda: self._explain(resolved_as_of)),
                 ("research_decision", lambda: self._decision(resolved_as_of)),
                 ("production_observation", lambda: self._observation(resolved_as_of, state)),
+                *(
+                    (
+                        (
+                            "paper_trading_daily",
+                            lambda: self._paper_trading(run, resolved_as_of, state),
+                        ),
+                    )
+                    if self.paper_trading is not None
+                    else ()
+                ),
                 (
                     "publish_production_summary",
                     lambda: self._publish_summary(run, resolved_as_of, state),
@@ -462,6 +496,15 @@ class ProductionPipeline:
             )
 
         expected = self._expected_artifacts(as_of)
+        planned_stages = (
+            [
+                *PRODUCTION_STAGE_NAMES[:-1],
+                "paper_trading_daily",
+                PRODUCTION_STAGE_NAMES[-1],
+            ]
+            if self.paper_trading is not None
+            else list(PRODUCTION_STAGE_NAMES)
+        )
         operations = (
             ("dry_run_validation", validate),
             (
@@ -469,7 +512,7 @@ class ProductionPipeline:
                 lambda: StageResult(
                     "success",
                     metrics={
-                        "planned_stages": list(PRODUCTION_STAGE_NAMES),
+                        "planned_stages": planned_stages,
                         "planned_artifact_paths": list(expected),
                     },
                 ),
@@ -582,13 +625,41 @@ class ProductionPipeline:
     def _publish_summary(
         self, run: ProductionRun, as_of: str, state: dict[str, Any]
     ) -> StageResult:
+        payload = state.get("production_summary_payload")
+        if not isinstance(payload, dict):
+            payload = self._production_summary_payload(run, as_of, state)
+        artifact_paths = tuple(str(path) for path in payload["artifacts"])
+        _require_artifacts(artifact_paths)
+        summary_path = self.reports_root / as_of / "production_summary.json"
+        pending_value = state.pop("pending_summary_path", None)
+        if isinstance(pending_value, str):
+            pending_path = Path(pending_value)
+            if not pending_path.is_file():
+                raise DataValidationError(f"pending production summary is missing: {pending_path}")
+            pending_path.replace(summary_path)
+        else:
+            atomic_write_json(summary_path, payload)
+        candidate_count = int(payload["candidate_count"])
+        return StageResult("success", (str(summary_path),), {"candidate_count": candidate_count})
+
+    def _production_summary_payload(
+        self,
+        run: ProductionRun,
+        as_of: str,
+        state: dict[str, Any],
+        *,
+        include_paper_artifacts: bool = False,
+    ) -> dict[str, Any]:
         candidate_result = state.get("candidate_result")
         if not isinstance(candidate_result, CandidateSelectionResult):
             raise DataValidationError("candidate result is unavailable for production summary")
         candidates = candidate_result.candidates.sort_values(["rank", "ts_code"], kind="mergesort")
-        summary_path = self.reports_root / as_of / "production_summary.json"
         artifact_paths = list(dict.fromkeys(state["artifacts"]))
-        payload = {
+        if include_paper_artifacts:
+            paper_root = self.reports_root / "paper_trading_daily" / as_of
+            artifact_paths.extend(str(paper_root / name) for name in ("report.md", "summary.json"))
+            artifact_paths = list(dict.fromkeys(artifact_paths))
+        return {
             "schema_version": 1,
             "artifact_name": "production_daily_summary",
             "run_id": run.run_id,
@@ -602,9 +673,49 @@ class ProductionPipeline:
             "observation_log_path": state.get("observation_path"),
             "completed_time": datetime.now(UTC).isoformat(),
         }
-        _require_artifacts(tuple(artifact_paths))
-        atomic_write_json(summary_path, payload)
-        return StageResult("success", (str(summary_path),), {"candidate_count": len(candidates)})
+
+    def _paper_trading(
+        self,
+        run: ProductionRun,
+        as_of: str,
+        state: dict[str, Any],
+    ) -> StageResult:
+        if self.paper_trading is None:
+            raise DataValidationError("paper-trading service is unavailable")
+        payload = self._production_summary_payload(
+            run,
+            as_of,
+            state,
+            include_paper_artifacts=True,
+        )
+        report_root = self.reports_root / as_of
+        pending_path = report_root / f".production_summary.{run.run_id}.pending.json"
+        atomic_write_json(pending_path, payload)
+        state["production_summary_payload"] = payload
+        state["pending_summary_path"] = str(pending_path)
+        try:
+            result = self.paper_trading.run_daily(
+                as_of,
+                production_summary_path=pending_path,
+            )
+        except Exception:
+            pending_path.unlink(missing_ok=True)
+            state.pop("pending_summary_path", None)
+            raise
+        return StageResult(
+            "success",
+            (
+                str(result.report.report_path),
+                str(result.report.summary_path),
+            ),
+            {
+                "orders_written": result.rebalance.orders_written,
+                "execution_rule": result.rebalance.execution_rule,
+                "trades_written": result.execution.trades_written,
+                "equity_rows_written": result.execution.equity_rows_written,
+                "portfolio_count": result.report.portfolio_count,
+            },
+        )
 
     def _expected_artifacts(self, as_of: str) -> tuple[str, ...]:
         report_dir = self.reports_root / as_of

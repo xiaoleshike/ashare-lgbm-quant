@@ -19,6 +19,12 @@ from ashare_quant.orchestration.production import (
 )
 from ashare_quant.orchestration.run_manifest import ProductionRun
 from ashare_quant.orchestration.scheduler import SchedulerResult
+from ashare_quant.paper_trading.service import (
+    PaperTradingDailyResult,
+    PaperTradingExecutionResult,
+    PaperTradingRebalanceResult,
+    PaperTradingReportResult,
+)
 from ashare_quant.research.daily_report import DailyReportResult
 from ashare_quant.research.decision_support import DecisionSupportResult
 from ashare_quant.research.explainability.schemas import ExplainabilityResult
@@ -152,6 +158,43 @@ def test_success_publishes_atomic_summary_with_top_candidates(tmp_path: Path) ->
         "600000.SH",
     ]
     assert summary["observation_log_path"].endswith("20240105.json")
+
+
+def test_production_pipeline_integrates_paper_trading_without_nested_cli(
+    tmp_path: Path,
+) -> None:
+    pipeline, calls = make_pipeline(tmp_path, include_paper_trading=True)
+
+    result = pipeline.run("20240105")
+    manifest = load_json(result.run.manifest_path)
+
+    assert result.status == "success"
+    assert calls[-1] == "paper_trading_daily"
+    assert [stage["name"] for stage in manifest["stages"]][-2:] == [
+        "paper_trading_daily",
+        "publish_production_summary",
+    ]
+    paper_stage = manifest["stages"][-2]
+    assert paper_stage["result"]["metrics"]["portfolio_count"] == 4
+    assert (tmp_path / "reports" / "paper_trading_daily" / "20240105" / "summary.json").is_file()
+    summary = load_json(tmp_path / "reports" / "20240105" / "production_summary.json")
+    assert any("paper_trading_daily/20240105/summary.json" in path for path in summary["artifacts"])
+    assert not list((tmp_path / "reports" / "20240105").glob(".*production_summary*.pending.json"))
+
+
+def test_paper_trading_failure_does_not_publish_formal_summary(tmp_path: Path) -> None:
+    pipeline, _ = make_pipeline(
+        tmp_path,
+        include_paper_trading=True,
+        fail_paper_trading=True,
+    )
+
+    result = pipeline.run("20240105")
+
+    assert result.status == "failed"
+    assert result.failed_stage == "paper_trading_daily"
+    assert not (tmp_path / "reports" / "20240105" / "production_summary.json").exists()
+    assert not list((tmp_path / "reports" / "20240105").glob(".*production_summary*.pending.json"))
 
 
 def test_production_summary_keeps_all_fifty_selected_candidates(tmp_path: Path) -> None:
@@ -298,6 +341,8 @@ def make_pipeline(
     *,
     fail_stage: str | None = None,
     omit_prediction_artifact: bool = False,
+    include_paper_trading: bool = False,
+    fail_paper_trading: bool = False,
 ) -> tuple[ProductionPipeline, list[str]]:
     config = tmp_path / "config.yaml"
     config.write_text("project_name: production-test\n", encoding="utf-8")
@@ -329,6 +374,13 @@ def make_pipeline(
         explainability=services,  # type: ignore[arg-type]
         decision_support=services,  # type: ignore[arg-type]
         observation=services,  # type: ignore[arg-type]
+        paper_trading=FakePaperTrading(
+            reports,
+            calls,
+            fail=fail_paper_trading,
+        )
+        if include_paper_trading
+        else None,
         runs_root=tmp_path / "runs",
         lock_path=tmp_path / "runs" / ".production.lock",
     )
@@ -426,6 +478,44 @@ class FakeServices:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("{}\n", encoding="utf-8")
         return ProductionObservationResult(as_of, "champion-1", 2, output)
+
+
+class FakePaperTrading:
+    def __init__(
+        self,
+        reports_root: Path,
+        calls: list[str],
+        *,
+        fail: bool = False,
+    ) -> None:
+        self.reports_root = reports_root
+        self.calls = calls
+        self.fail = fail
+
+    def run_daily(
+        self,
+        as_of: str,
+        *,
+        production_summary_path: Path | None = None,
+    ) -> PaperTradingDailyResult:
+        assert production_summary_path is not None and production_summary_path.is_file()
+        assert production_summary_path.name.startswith(".production_summary.")
+        assert not (self.reports_root / as_of / "production_summary.json").exists()
+        self.calls.append("paper_trading_daily")
+        if self.fail:
+            raise DataError("forced paper trading failure")
+        output = self.reports_root / "paper_trading_daily" / as_of
+        output.mkdir(parents=True, exist_ok=True)
+        report = output / "report.md"
+        summary = output / "summary.json"
+        report.write_text("# Paper\n", encoding="utf-8")
+        summary.write_text("{}\n", encoding="utf-8")
+        return PaperTradingDailyResult(
+            as_of,
+            PaperTradingRebalanceResult(as_of, "next_open", 4, 80, output),
+            PaperTradingExecutionResult(as_of, 4, 60, 4, output),
+            PaperTradingReportResult(as_of, report, summary, 4),
+        )
 
 
 class DataError(ValueError):

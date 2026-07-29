@@ -22,6 +22,7 @@ class PathSettings(BaseModel):
     reports: Path = Path("reports")
     models: Path = Path("models")
     backtests: Path = Path("backtests")
+    paper_trading: Path = Path("paper_trading")
     data_quality_logs: Path = Path("logs/data_quality")
 
 
@@ -167,6 +168,57 @@ class BacktestSettings(BaseModel):
 
         if len(set(self.top_n)) != len(self.top_n):
             raise ValueError("backtest.top_n must not contain duplicates")
+        return self
+
+
+class PaperPortfolioSettings(BaseModel):
+    """One isolated virtual portfolio and its immutable signal source."""
+
+    portfolio_id: str
+    signal_type: Literal["champion", "model", "ensemble"]
+    model_id: str | None = None
+    component_model_ids: tuple[str, ...] = ()
+    top_n: PositiveInt = 20
+
+    @model_validator(mode="after")
+    def validate_signal_source(self) -> PaperPortfolioSettings:
+        """Require exactly the model identity needed by each signal type."""
+
+        if self.signal_type == "champion":
+            if self.model_id not in {None, "champion"} or self.component_model_ids:
+                raise ValueError("champion paper portfolio must use model_id=champion only")
+        elif self.signal_type == "model":
+            if not self.model_id or self.model_id == "champion" or self.component_model_ids:
+                raise ValueError("model paper portfolio requires one non-champion model_id")
+        elif not self.component_model_ids or self.model_id is not None:
+            raise ValueError("ensemble paper portfolio requires component_model_ids only")
+        if len(set(self.component_model_ids)) != len(self.component_model_ids):
+            raise ValueError("paper portfolio component_model_ids must be unique")
+        return self
+
+
+class PaperTradingSettings(BaseModel):
+    """Append-only single-host virtual execution assumptions."""
+
+    enabled: bool = True
+    initial_cash: float = Field(default=1_000_000.0, gt=0)
+    execution: Literal["next_open"] = "next_open"
+    lot_size: PositiveInt = 100
+    commission: float = Field(default=0.00025, ge=0)
+    stamp_duty: float = Field(default=0.001, ge=0)
+    slippage: float = Field(default=0.0005, ge=0)
+    price_tolerance: float = Field(default=1e-6, ge=0)
+    portfolios: tuple[PaperPortfolioSettings, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_portfolios(self) -> PaperTradingSettings:
+        """Require stable, isolated portfolio identifiers."""
+
+        identifiers = [portfolio.portfolio_id for portfolio in self.portfolios]
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("paper_trading portfolio_id values must be unique")
+        if any(not value or "/" in value or "\\" in value for value in identifiers):
+            raise ValueError("paper_trading portfolio_id must be a simple non-empty name")
         return self
 
 
@@ -723,6 +775,7 @@ class AppSettings(BaseModel):
     strategy: StrategySettings = Field(default_factory=StrategySettings)
     research: ResearchSettings = Field(default_factory=ResearchSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
+    paper_trading: PaperTradingSettings = Field(default_factory=PaperTradingSettings)
     tushare_token: SecretStr | None = None
 
     @property
