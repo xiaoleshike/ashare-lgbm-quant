@@ -71,8 +71,12 @@ def _merge_model_lineage(
     manifest: dict[str, Any],
 ) -> None:
     records = manifest.get("model_lineage")
-    if not isinstance(records, list) or not records:
+    if not isinstance(records, list):
         raise DataValidationError("performance observation manifest lacks model_lineage")
+    if not records:
+        if int(manifest.get("row_count", -1)) == 0:
+            return
+        raise DataValidationError("non-empty performance observation lacks model_lineage")
     for raw in records:
         if not isinstance(raw, dict):
             raise DataValidationError("invalid model_lineage record")

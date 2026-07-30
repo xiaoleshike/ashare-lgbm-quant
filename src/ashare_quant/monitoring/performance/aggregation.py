@@ -28,6 +28,8 @@ def aggregate_performance(
     metric_rows: list[dict[str, Any]] = []
     model_details: list[dict[str, Any]] = []
     warnings: list[str] = []
+    if observations.empty:
+        warnings.append("insufficient observations: no mature performance observations")
     group_keys = ["model_id", "model_role", "horizon"]
     for key, all_group in observations.groupby(group_keys, sort=True):
         model_id, model_role, horizon = str(key[0]), str(key[1]), int(str(key[2]))

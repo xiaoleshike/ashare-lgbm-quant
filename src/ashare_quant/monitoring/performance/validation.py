@@ -28,7 +28,7 @@ def validate_observation_frame(frame: DataFrame, as_of: str) -> None:
     if missing:
         raise DataValidationError(f"performance observations lack required columns: {missing}")
     if frame.empty:
-        raise DataValidationError("performance observation history is empty")
+        return
     if frame.duplicated(list(OBSERVATION_KEY)).any():
         raise DataValidationError("performance observation identities are duplicated")
     if frame["observation_id"].duplicated().any():

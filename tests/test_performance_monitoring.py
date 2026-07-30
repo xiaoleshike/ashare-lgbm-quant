@@ -71,6 +71,89 @@ def test_performance_validation_rejects_schema_role_immaturity_and_duplicates() 
         validate_observation_frame(duplicated, AS_OF)
 
 
+def test_empty_observation_batch_is_valid_with_insufficient_history_warning(
+    tmp_path: Path,
+) -> None:
+    reports = tmp_path / "reports"
+    config = tmp_path / "config.yaml"
+    config.write_text("project_name: performance-monitor\n", encoding="utf-8")
+    rows = pd.DataFrame(columns=list(OBSERVATION_COLUMNS))
+    output_dir = reports / "performance_observation" / AS_OF
+    manifest = {
+        "schema_version": 1,
+        "artifact_name": "performance_observation",
+        "observation_as_of": AS_OF,
+        "observation_hash": logical_observation_hash(rows),
+        "source_identity_hash": f"source-{AS_OF}",
+        "row_count": 0,
+        "available_rows": 0,
+        "access_policy": "prospective_production",
+        "model_lineage": [],
+        "contracts": {
+            "labels_used_only_after_maturity": True,
+            "historical_predictions_used": False,
+            "inference_called": False,
+            "backtest_called": False,
+            "paper_trading_called": False,
+            "registry_modified": False,
+        },
+    }
+    publish_observation_artifact(
+        output_dir=output_dir,
+        observations=rows,
+        metrics={"available_rows": 0},
+        manifest=manifest,
+    )
+    service = PerformanceMonitoringService(reports_root=reports, config_path=config)
+
+    built = service.build(AS_OF)
+
+    assert built.metrics.empty
+    assert tuple(built.metrics.columns) == PERFORMANCE_METRIC_COLUMNS
+    assert built.manifest["models"] == []
+    assert built.manifest["row_counts"]["observations"] == 0
+    assert built.summary["warnings"] == [
+        "insufficient observations: no mature performance observations"
+    ]
+
+
+def test_nonempty_observation_batch_still_requires_model_lineage(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    config = tmp_path / "config.yaml"
+    config.write_text("project_name: performance-monitor\n", encoding="utf-8")
+    rows = observation_rows().head(2)
+    output_dir = reports / "performance_observation" / AS_OF
+    manifest = {
+        "schema_version": 1,
+        "artifact_name": "performance_observation",
+        "observation_as_of": AS_OF,
+        "observation_hash": logical_observation_hash(rows),
+        "source_identity_hash": f"source-{AS_OF}",
+        "row_count": len(rows),
+        "available_rows": len(rows),
+        "access_policy": "prospective_production",
+        "model_lineage": [],
+        "contracts": {
+            "labels_used_only_after_maturity": True,
+            "historical_predictions_used": False,
+            "inference_called": False,
+            "backtest_called": False,
+            "paper_trading_called": False,
+            "registry_modified": False,
+        },
+    }
+    publish_observation_artifact(
+        output_dir=output_dir,
+        observations=rows,
+        metrics={"available_rows": len(rows)},
+        manifest=manifest,
+    )
+    service = PerformanceMonitoringService(reports_root=reports, config_path=config)
+
+    with pytest.raises(DataValidationError, match="non-empty.*model_lineage"):
+        service.build(AS_OF)
+
+
 def test_performance_service_deterministic_manifest_last_and_status(tmp_path: Path) -> None:
     service = performance_fixture(tmp_path)
 

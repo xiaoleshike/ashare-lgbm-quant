@@ -11,7 +11,6 @@ import pandas as pd
 
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.monitoring.schemas import MonitoringSources
-from ashare_quant.utils.manifest import config_hash
 
 type DataFrame = pd.DataFrame
 
@@ -35,19 +34,24 @@ def validate_monitoring_sources(
     prediction_manifest = _load_json(prediction_manifest_path, "prediction manifest")
     candidate_manifest = _load_json(candidate_manifest_path, "candidate manifest")
 
-    expected_config_hash = config_hash(config_path)
     _require_identity(summary, "production_daily_summary", as_of)
     _require_identity(prediction_manifest, "production_predictions", as_of)
     _require_identity(candidate_manifest, "production_candidates", as_of)
-    for name, manifest in (
-        ("prediction", prediction_manifest),
-        ("candidate", candidate_manifest),
-    ):
-        if manifest.get("config_hash") != expected_config_hash:
-            raise DataValidationError(
-                f"{name} manifest config hash mismatch: "
-                f"expected={expected_config_hash} actual={manifest.get('config_hash')}"
-            )
+    prediction_config_hash = _required_string(
+        prediction_manifest,
+        "config_hash",
+        "prediction manifest",
+    )
+    candidate_config_hash = _required_string(
+        candidate_manifest,
+        "config_hash",
+        "candidate manifest",
+    )
+    if candidate_config_hash != prediction_config_hash:
+        raise DataValidationError(
+            "candidate and prediction manifest config hash mismatch: "
+            f"prediction={prediction_config_hash} candidate={candidate_config_hash}"
+        )
 
     model_id = _required_string(summary, "model_id", "production summary")
     feature_hash = _required_string(prediction_manifest, "feature_hash", "prediction manifest")

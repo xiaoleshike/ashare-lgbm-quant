@@ -129,6 +129,34 @@ def test_monitoring_rejects_feature_hash_mismatch(tmp_path: Path) -> None:
         service.run(AS_OF)
 
 
+def test_monitoring_accepts_current_monitor_config_change(tmp_path: Path) -> None:
+    service, _ = monitoring_fixture(tmp_path)
+    service.config_path.write_text(
+        "project_name: fixture\n"
+        "monitoring:\n"
+        "  alerts:\n"
+        "    alpha_decay:\n"
+        "      warning: 0.8\n"
+        "      critical: 0.6\n",
+        encoding="utf-8",
+    )
+
+    result = service.run(AS_OF)
+
+    assert result.as_of == AS_OF
+
+
+def test_monitoring_rejects_production_config_lineage_mismatch(tmp_path: Path) -> None:
+    service, _ = monitoring_fixture(tmp_path)
+    path = tmp_path / "reports" / AS_OF / "candidates_manifest.json"
+    payload = _json(path)
+    payload["config_hash"] = "different-production-config"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DataValidationError, match="config hash mismatch"):
+        service.run(AS_OF)
+
+
 def test_failed_monitoring_publication_keeps_previous_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

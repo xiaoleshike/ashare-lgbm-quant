@@ -19,6 +19,12 @@ The normal `monitor run` path evaluates the same rules from its in-memory
 health, performance, and portfolio results before publishing one atomic
 monitoring snapshot.
 
+Monitoring validates that the prediction and candidate artifacts share the
+same production configuration identity. It does not require that historical
+production artifacts match the current full application configuration because
+changes limited to monitoring thresholds must not invalidate immutable
+predictions.
+
 ## Rules And Lifecycle
 
 Thresholds live under `monitoring.alerts` in the application configuration.
