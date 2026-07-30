@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -13,6 +11,14 @@ from typing import Any
 import pandas as pd
 
 from ashare_quant.config.settings import AppSettings
+from ashare_quant.models.shadow.storage import file_sha256
+from ashare_quant.monitoring.alerts.schemas import AlertBuild
+from ashare_quant.monitoring.alerts.service import AlertService
+from ashare_quant.monitoring.alerts.storage import (
+    metric_source_hashes,
+    replace_targets_atomically,
+    write_alert_build,
+)
 from ashare_quant.monitoring.health import build_health_metrics
 from ashare_quant.monitoring.performance.schemas import PerformanceBuild
 from ashare_quant.monitoring.performance.service import (
@@ -37,6 +43,7 @@ class MonitoringService:
         reports_root: Path | None = None,
         paper_root: Path | None = None,
         performance_service: PerformanceMonitoringService | None = None,
+        alert_service: AlertService | None = None,
     ) -> None:
         self.settings = settings
         self.config_path = config_path
@@ -45,6 +52,11 @@ class MonitoringService:
         self.performance_service = performance_service or PerformanceMonitoringService(
             reports_root=self.reports_root,
             config_path=config_path,
+        )
+        self.alert_service = alert_service or AlertService(
+            settings=settings,
+            config_path=config_path,
+            reports_root=self.reports_root,
         )
 
     def run(self, as_of: str) -> MonitoringResult:
@@ -65,7 +77,23 @@ class MonitoringService:
             paper_root=self.paper_root,
             portfolio_ids=portfolio_ids,
         )
-        summary = build_monitor_summary(health, performance.summary, portfolios)
+        alerts = self.alert_service.build_from_metrics(
+            as_of=as_of,
+            health=health.to_dict(),
+            performance=performance.metrics,
+            portfolios=portfolios,
+            source_hashes=metric_source_hashes(
+                health.to_dict(),
+                performance.metrics,
+                portfolios,
+            ),
+        )
+        summary = build_monitor_summary(
+            health,
+            performance.summary,
+            portfolios,
+            alerts.alerts_payload,
+        )
         all_hashes = {
             **sources.source_hashes,
             **{
@@ -97,6 +125,7 @@ class MonitoringService:
                 "candidates": int(sources.production_summary.get("candidate_count", 0)),
                 "portfolio_metrics": len(portfolios),
                 "performance_metrics": len(performance.metrics),
+                "alerts": len(alerts.alerts),
             },
             "drift_reference": sources.drift_reference,
             "completed_at": completed_at,
@@ -108,6 +137,7 @@ class MonitoringService:
             health.to_dict(),
             performance,
             portfolios,
+            alerts,
             summary,
             manifest,
         )
@@ -118,6 +148,7 @@ class MonitoringService:
             portfolio_count=len(portfolios),
             prediction_count=len(predictions),
             performance_model_count=len(performance.metrics),
+            alert_count=len(alerts.alerts),
         )
 
 
@@ -126,45 +157,45 @@ def _publish(
     health: dict[str, Any],
     performance: PerformanceBuild,
     portfolios: pd.DataFrame,
+    alerts: AlertBuild,
     summary: dict[str, Any],
     manifest: dict[str, Any],
 ) -> None:
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output_dir.parent) as temporary:
-        staging = Path(temporary)
+        staging_root = Path(temporary)
+        staging = staging_root / "monitor"
+        staging.mkdir()
         atomic_write_json(staging / "health.json", health)
         write_performance_build(staging / "performance", performance)
         portfolios.to_parquet(staging / "portfolio_metrics.parquet", index=False)
+        write_alert_build(staging / "alerts", alerts)
         atomic_write_json(staging / "monitor_summary.json", summary)
         (staging / "monitor_report.md").write_text(
             render_monitor_report(summary),
             encoding="utf-8",
         )
-        atomic_write_json(staging / "manifest.json", manifest)
-        _replace_directory(staging, output_dir)
-
-
-def _replace_directory(staging: Path, output_dir: Path) -> None:
-    """Atomically switch a complete monitor tree and restore the prior tree on failure."""
-
-    backup_parent = Path(tempfile.mkdtemp(dir=output_dir.parent, prefix=".monitor-backup-"))
-    backup = backup_parent / output_dir.name
-    moved_previous = False
-    try:
-        if output_dir.exists():
-            os.replace(output_dir, backup)
-            moved_previous = True
-        try:
-            os.replace(staging, output_dir)
-        except BaseException:
-            if moved_previous and backup.exists() and not output_dir.exists():
-                os.replace(backup, output_dir)
-            raise
-        if backup.exists():
-            shutil.rmtree(backup)
-    finally:
-        if backup_parent.exists():
-            shutil.rmtree(backup_parent)
+        completed_manifest = {
+            **manifest,
+            "monitor_metric_file_hashes": {
+                "health": file_sha256(staging / "health.json"),
+                "performance_metrics": file_sha256(
+                    staging / "performance" / "performance_metrics.parquet"
+                ),
+                "performance_manifest": file_sha256(staging / "performance" / "manifest.json"),
+                "portfolio_metrics": file_sha256(staging / "portfolio_metrics.parquet"),
+            },
+        }
+        atomic_write_json(staging / "manifest.json", completed_manifest)
+        staged_history = staging_root / "alert_history.parquet"
+        alerts.history.to_parquet(staged_history, index=False)
+        replace_targets_atomically(
+            (
+                (staging, output_dir),
+                (staged_history, output_dir.parent / "history" / "alert_history.parquet"),
+            ),
+            backup_root=staging_root / "backups",
+        )
 
 
 def _payload_hash(payload: object) -> str:

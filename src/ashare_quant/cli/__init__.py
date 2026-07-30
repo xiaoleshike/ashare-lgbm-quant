@@ -49,7 +49,11 @@ from ashare_quant.models import (
     RankerBaselineRunner,
 )
 from ashare_quant.models.shadow import ShadowPredictionService
-from ashare_quant.monitoring import MonitoringService, PerformanceMonitoringService
+from ashare_quant.monitoring import (
+    AlertService,
+    MonitoringService,
+    PerformanceMonitoringService,
+)
 from ashare_quant.monitoring.performance_observation import (
     PerformanceObservationService,
 )
@@ -669,6 +673,21 @@ def add_monitor_parser(
     performance_validate.add_argument(
         "--as-of", required=True, help="Observation cutoff in YYYYMMDD."
     )
+    alerts = commands.add_parser(
+        "alerts",
+        help="Evaluate monitoring metrics and publish alert lifecycle events.",
+    )
+    alerts.add_argument("--as-of", required=True, help="Monitoring date in YYYYMMDD.")
+    alerts_status = commands.add_parser(
+        "alerts-status",
+        help="Inspect one published alert artifact.",
+    )
+    alerts_status.add_argument("--as-of", required=True, help="Monitoring date in YYYYMMDD.")
+    alerts_validate = commands.add_parser(
+        "alerts-validate",
+        help="Validate alert inputs without publishing.",
+    )
+    alerts_validate.add_argument("--as-of", required=True, help="Monitoring date in YYYYMMDD.")
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -2007,6 +2026,40 @@ def run_monitor_command(args: argparse.Namespace) -> int:
             file=stream,
         )
         return 0 if validation.valid else 2
+    if args.monitor_command in {"alerts", "alerts-status", "alerts-validate"}:
+        alert_service = AlertService(
+            settings=settings,
+            config_path=Path(effective_config_path(args.config)),
+            reports_root=settings.paths.reports,
+        )
+        try:
+            if args.monitor_command == "alerts":
+                alert_result = alert_service.run(args.as_of)
+                print(
+                    f"monitor_alerts: as_of={alert_result.as_of} "
+                    f"alerts={alert_result.alert_count} "
+                    f"critical={alert_result.critical_count} "
+                    f"idempotent={alert_result.idempotent} "
+                    f"output={alert_result.output_dir}"
+                )
+                return 0
+            alert_validation = (
+                alert_service.status(args.as_of)
+                if args.monitor_command == "alerts-status"
+                else alert_service.validate(args.as_of)
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"alert evaluation failed: {error}", file=sys.stderr)
+            return 2
+        stream = sys.stdout if alert_validation.valid else sys.stderr
+        print(
+            f"monitor_{args.monitor_command.replace('-', '_')}: "
+            f"as_of={alert_validation.as_of} valid={alert_validation.valid} "
+            f"exists={alert_validation.exists} alerts={alert_validation.alert_count} "
+            f"error={alert_validation.error}",
+            file=stream,
+        )
+        return 0 if alert_validation.valid else 2
     if args.monitor_command != "run":
         raise ValueError(f"Unsupported monitor command: {args.monitor_command}")
     monitoring_service = MonitoringService(
@@ -2022,6 +2075,7 @@ def run_monitor_command(args: argparse.Namespace) -> int:
         f"monitor_run: as_of={result.as_of} run_id={result.run_id} "
         f"predictions={result.prediction_count} portfolios={result.portfolio_count} "
         f"performance_models={result.performance_model_count} "
+        f"alerts={result.alert_count} "
         f"output={result.output_dir}"
     )
     return 0

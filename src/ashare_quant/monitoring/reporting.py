@@ -15,6 +15,7 @@ def build_monitor_summary(
     health: HealthMetrics,
     performance: dict[str, Any],
     portfolios: DataFrame,
+    alerts: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the compact machine-readable monitoring summary."""
 
@@ -27,6 +28,7 @@ def build_monitor_summary(
         "performance": performance,
         "portfolio_count": len(portfolios),
         "portfolios": portfolios.to_dict("records"),
+        "alerts": alerts,
         "scope": {
             "labels_read": False,
             "model_rescored": False,
@@ -75,6 +77,11 @@ def render_monitor_report(summary: dict[str, Any]) -> str:
             "",
             f"- Model-horizon groups: {len(summary['performance']['models'])}",
             f"- Warnings: {len(summary['performance']['warnings'])}",
+            "",
+            "## Alerts",
+            "",
+            f"- Lifecycle events: {len(summary['alerts']['alerts'])}",
+            f"- Warnings: {len(summary['alerts']['warnings'])}",
             "",
             "## Scope",
             "",

@@ -222,6 +222,162 @@ class PaperTradingSettings(BaseModel):
         return self
 
 
+class LowerAlertThresholdSettings(BaseModel):
+    """Alert thresholds where smaller metric values are worse."""
+
+    enabled: bool = True
+    warning: float
+    critical: float
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> LowerAlertThresholdSettings:
+        if self.critical > self.warning:
+            raise ValueError("lower alert critical threshold must not exceed warning")
+        return self
+
+
+class UpperAlertThresholdSettings(BaseModel):
+    """Alert thresholds where larger metric values are worse."""
+
+    enabled: bool = True
+    warning: float = Field(ge=0)
+    critical: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> UpperAlertThresholdSettings:
+        if self.warning > self.critical:
+            raise ValueError("upper alert warning threshold must not exceed critical")
+        return self
+
+
+class ScoreCollapseAlertSettings(BaseModel):
+    """Lower bounds for score dispersion and cross-sectional uniqueness."""
+
+    enabled: bool = True
+    score_std_warning: float = Field(default=0.01, ge=0)
+    score_std_critical: float = Field(default=0.001, ge=0)
+    unique_ratio_warning: float = Field(default=0.90, ge=0, le=1)
+    unique_ratio_critical: float = Field(default=0.50, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> ScoreCollapseAlertSettings:
+        if self.score_std_critical > self.score_std_warning:
+            raise ValueError("score collapse std critical threshold must not exceed warning")
+        if self.unique_ratio_critical > self.unique_ratio_warning:
+            raise ValueError("score collapse unique critical threshold must not exceed warning")
+        return self
+
+
+class FeatureDriftAlertSettings(BaseModel):
+    """Upper thresholds for existing PSI, KS, and missingness drift metrics."""
+
+    enabled: bool = True
+    psi_warning: float = Field(default=0.10, ge=0)
+    psi_critical: float = Field(default=0.25, ge=0)
+    ks_warning: float = Field(default=0.10, ge=0, le=1)
+    ks_critical: float = Field(default=0.20, ge=0, le=1)
+    missing_ratio_warning: float = Field(default=0.10, ge=0, le=1)
+    missing_ratio_critical: float = Field(default=0.20, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> FeatureDriftAlertSettings:
+        pairs = (
+            (self.psi_warning, self.psi_critical),
+            (self.ks_warning, self.ks_critical),
+            (self.missing_ratio_warning, self.missing_ratio_critical),
+        )
+        if any(warning > critical for warning, critical in pairs):
+            raise ValueError("feature drift warning thresholds must not exceed critical")
+        return self
+
+
+class CoverageAlertSettings(BaseModel):
+    """Lower prediction coverage and upper universe-deviation thresholds."""
+
+    enabled: bool = True
+    prediction_warning: float = Field(default=0.95, ge=0, le=1)
+    prediction_critical: float = Field(default=0.80, ge=0, le=1)
+    universe_deviation_warning: float = Field(default=0.15, ge=0)
+    universe_deviation_critical: float = Field(default=0.30, ge=0)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> CoverageAlertSettings:
+        if self.prediction_critical > self.prediction_warning:
+            raise ValueError("prediction coverage critical threshold must not exceed warning")
+        if self.universe_deviation_warning > self.universe_deviation_critical:
+            raise ValueError("universe deviation warning must not exceed critical")
+        return self
+
+
+class ConcentrationAlertSettings(BaseModel):
+    """Upper portfolio concentration thresholds."""
+
+    enabled: bool = True
+    max_weight_warning: float = Field(default=0.10, ge=0, le=1)
+    max_weight_critical: float = Field(default=0.20, ge=0, le=1)
+    top5_warning: float = Field(default=0.40, ge=0, le=1)
+    top5_critical: float = Field(default=0.60, ge=0, le=1)
+    industry_warning: float = Field(default=0.30, ge=0, le=1)
+    industry_critical: float = Field(default=0.50, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> ConcentrationAlertSettings:
+        pairs = (
+            (self.max_weight_warning, self.max_weight_critical),
+            (self.top5_warning, self.top5_critical),
+            (self.industry_warning, self.industry_critical),
+        )
+        if any(warning > critical for warning, critical in pairs):
+            raise ValueError("concentration warning thresholds must not exceed critical")
+        return self
+
+
+class ExecutionQualityAlertSettings(BaseModel):
+    """Upper rejected and failed execution-ratio thresholds."""
+
+    enabled: bool = True
+    rejected_warning: float = Field(default=0.10, ge=0, le=1)
+    rejected_critical: float = Field(default=0.25, ge=0, le=1)
+    failed_warning: float = Field(default=0.02, ge=0, le=1)
+    failed_critical: float = Field(default=0.10, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> ExecutionQualityAlertSettings:
+        if (
+            self.rejected_warning > self.rejected_critical
+            or self.failed_warning > self.failed_critical
+        ):
+            raise ValueError("execution warning thresholds must not exceed critical")
+        return self
+
+
+class MonitoringAlertSettings(BaseModel):
+    """Configuration-driven read-only alert rules."""
+
+    alpha_decay: LowerAlertThresholdSettings = Field(
+        default_factory=lambda: LowerAlertThresholdSettings(warning=0.70, critical=0.50)
+    )
+    rank_ic_decline: LowerAlertThresholdSettings = Field(
+        default_factory=lambda: LowerAlertThresholdSettings(warning=-0.02, critical=-0.05)
+    )
+    score_collapse: ScoreCollapseAlertSettings = Field(default_factory=ScoreCollapseAlertSettings)
+    feature_drift: FeatureDriftAlertSettings = Field(default_factory=FeatureDriftAlertSettings)
+    universe_coverage: CoverageAlertSettings = Field(default_factory=CoverageAlertSettings)
+    drawdown: UpperAlertThresholdSettings = Field(
+        default_factory=lambda: UpperAlertThresholdSettings(warning=0.10, critical=0.20)
+    )
+    concentration: ConcentrationAlertSettings = Field(default_factory=ConcentrationAlertSettings)
+    execution_quality: ExecutionQualityAlertSettings = Field(
+        default_factory=ExecutionQualityAlertSettings
+    )
+
+
+class MonitoringSettings(BaseModel):
+    """Read-only monitoring and alert configuration."""
+
+    alerts: MonitoringAlertSettings = Field(default_factory=MonitoringAlertSettings)
+
+
 class UniverseSettings(BaseModel):
     """Point-in-time universe and tradability construction rules."""
 
@@ -826,6 +982,7 @@ class AppSettings(BaseModel):
     research: ResearchSettings = Field(default_factory=ResearchSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     paper_trading: PaperTradingSettings = Field(default_factory=PaperTradingSettings)
+    monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     tushare_token: SecretStr | None = None
 
     @property

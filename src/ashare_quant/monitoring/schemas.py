@@ -40,6 +40,7 @@ class HealthMetrics:
     score_percentiles: dict[str, float]
     score_spread: float
     duplicate_score_ratio: float
+    unique_score_ratio: float
     drift_reference: dict[str, Any] | None
 
     def to_dict(self) -> dict[str, Any]:
@@ -58,12 +59,16 @@ class PortfolioMetrics:
     daily_return: float
     cumulative_return: float
     drawdown: float
+    max_drawdown: float
     turnover: float
     transaction_cost_ratio: float
     position_count: int
     max_position_weight: float
     top5_concentration: float
+    industry_concentration: float | None
     cash_ratio: float
+    rejected_order_ratio: float
+    failed_execution_ratio: float
 
     def to_dict(self) -> dict[str, Any]:
         """Return one deterministic tabular record."""
@@ -81,3 +86,4 @@ class MonitoringResult:
     portfolio_count: int
     prediction_count: int
     performance_model_count: int = 0
+    alert_count: int = 0

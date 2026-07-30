@@ -87,6 +87,13 @@ def validate_monitoring_sources(
         model_id=model_id,
         as_of=as_of,
     )
+    if drift_reference is not None:
+        source_hashes["drift_manifest"] = str(drift_reference["manifest_hash"])
+        metric_hashes = drift_reference.get("metric_artifact_hashes")
+        if isinstance(metric_hashes, dict):
+            source_hashes.update(
+                {f"drift:{name}": str(digest) for name, digest in metric_hashes.items()}
+            )
     return (
         MonitoringSources(
             as_of=as_of,
@@ -128,13 +135,45 @@ def find_existing_drift_reference(
     if not matches:
         return None
     end_date, path, manifest = max(matches, key=lambda item: (item[0], str(item[1])))
+    metrics, metric_hashes = _load_drift_metrics(path.parent)
     return {
         "manifest_path": str(path),
         "manifest_hash": _file_hash(path),
         "requested_end_date": end_date,
         "summary_path": str(path.parent / "summary.json"),
         "feature_hash": manifest.get("feature_hash"),
+        "metrics": metrics,
+        "metric_artifact_hashes": metric_hashes,
         "implementation": "reused_existing_model_drift_diagnostics",
+    }
+
+
+def _load_drift_metrics(directory: Path) -> tuple[dict[str, float], dict[str, str]]:
+    """Expose existing drift results through health metrics without recalculating them."""
+
+    feature_path = directory / "feature_drift.parquet"
+    summary_path = directory / "summary.json"
+    if not feature_path.is_file() or not summary_path.is_file():
+        return {}, {}
+    frame = _read_parquet(feature_path, "feature drift metrics")
+    summary = _load_json(summary_path, "drift summary")
+    metrics: dict[str, float] = {}
+    for output_name, column in (
+        ("maximum_feature_psi", "psi"),
+        ("maximum_feature_ks", "ks_statistic"),
+        ("maximum_missing_ratio_drift", "missing_ratio_drift"),
+    ):
+        if column not in frame or frame.empty:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if not values.empty:
+            metrics[output_name] = float(values.abs().max())
+    score = summary.get("score_drift")
+    if isinstance(score, dict) and isinstance(score.get("maximum_score_psi"), int | float):
+        metrics["maximum_score_psi"] = float(score["maximum_score_psi"])
+    return metrics, {
+        "feature_drift": _file_hash(feature_path),
+        "summary": _file_hash(summary_path),
     }
 
 

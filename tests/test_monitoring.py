@@ -47,6 +47,7 @@ def test_monitoring_is_read_only_deterministic_and_keeps_portfolios_isolated(
     assert all(path.read_bytes() == source_bytes[path] for path in input_paths)
     assert {path.name for path in first.output_dir.iterdir()} == {
         "health.json",
+        "alerts",
         "performance",
         "portfolio_metrics.parquet",
         "monitor_summary.json",
@@ -73,6 +74,7 @@ def test_monitoring_is_read_only_deterministic_and_keeps_portfolios_isolated(
     assert summary["scope"]["labels_read"] is False
     assert summary["scope"]["trading_state_modified"] is False
     assert len(summary["performance"]["models"]) == 1
+    assert "alerts" in summary
 
 
 def test_monitoring_ignores_ledger_rows_after_as_of(tmp_path: Path) -> None:
@@ -163,6 +165,32 @@ def test_performance_failure_keeps_previous_complete_monitor_snapshot(
 
     monkeypatch.setattr(service.performance_service, "build", fail_performance)
     with pytest.raises(DataValidationError, match="performance failure"):
+        service.run(AS_OF)
+
+    assert before == {
+        path.relative_to(result.output_dir): path.read_bytes()
+        for path in result.output_dir.glob("**/*")
+        if path.is_file()
+    }
+
+
+def test_alert_failure_keeps_previous_complete_monitor_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _ = monitoring_fixture(tmp_path)
+    result = service.run(AS_OF)
+    before = {
+        path.relative_to(result.output_dir): path.read_bytes()
+        for path in result.output_dir.glob("**/*")
+        if path.is_file()
+    }
+
+    def fail_alerts(**kwargs: object) -> None:
+        raise DataValidationError("alert failure")
+
+    monkeypatch.setattr(service.alert_service, "build_from_metrics", fail_alerts)
+    with pytest.raises(DataValidationError, match="alert failure"):
         service.run(AS_OF)
 
     assert before == {

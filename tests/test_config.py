@@ -27,6 +27,8 @@ def test_load_settings_reads_yaml_and_env_token(monkeypatch: pytest.MonkeyPatch)
     assert settings.production.scheduler.enabled is True
     assert settings.production.scheduler.skip_if_already_successful is True
     assert settings.research.daily_report.top_candidates == 50
+    assert settings.monitoring.alerts.alpha_decay.warning == 0.70
+    assert settings.monitoring.alerts.drawdown.critical == 0.20
 
 
 def test_load_settings_does_not_require_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,6 +76,17 @@ def test_invalid_production_scheduler_clock_is_rejected(tmp_path: Path) -> None:
         load_settings(invalid_timezone)
     with pytest.raises(ValidationError, match="must use HH:MM"):
         load_settings(invalid_time)
+
+
+def test_invalid_alert_threshold_order_is_rejected(tmp_path: Path) -> None:
+    config_file = tmp_path / "invalid_alerts.yaml"
+    config_file.write_text(
+        "monitoring:\n  alerts:\n    alpha_decay:\n      warning: 0.5\n      critical: 0.7\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="critical threshold"):
+        load_settings(config_file)
 
 
 def test_index_inception_boundary_requires_configured_code_and_valid_date(

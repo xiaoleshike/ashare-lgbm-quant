@@ -56,6 +56,7 @@ def build_health_metrics(sources: MonitoringSources, predictions: DataFrame) -> 
         score_percentiles=percentiles,
         score_spread=percentiles["p90"] - percentiles["p10"],
         duplicate_score_ratio=duplicated / len(finite),
+        unique_score_ratio=float(finite.nunique(dropna=True) / len(finite)),
         drift_reference=sources.drift_reference,
     )
 

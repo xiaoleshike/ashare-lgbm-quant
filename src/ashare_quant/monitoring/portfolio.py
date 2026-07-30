@@ -72,10 +72,13 @@ def _portfolio_metric(
     daily_return = 0.0 if latest is None else float(latest["daily_return"])
     if history.empty:
         drawdown = 0.0
+        max_drawdown = 0.0
         previous_equity = initial_cash
     else:
         equities = pd.to_numeric(history["equity"], errors="coerce")
-        drawdown = float((equities / equities.cummax() - 1.0).iloc[-1])
+        drawdowns = equities / equities.cummax() - 1.0
+        drawdown = float(drawdowns.iloc[-1])
+        max_drawdown = float(drawdowns.min())
         previous_equity = float(equities.iloc[-2]) if len(equities) > 1 else initial_cash
     current_positions = _latest_positions(positions)
     market_values = (
@@ -107,6 +110,17 @@ def _portfolio_metric(
         if previous_equity > 0 and not filled.empty
         else 0.0
     )
+    execution_count = len(today_trades)
+    rejected_ratio = (
+        float(today_trades["status"].astype(str).eq("rejected").mean())
+        if execution_count and "status" in today_trades
+        else 0.0
+    )
+    failed_ratio = (
+        float(today_trades["status"].astype(str).eq("failed").mean())
+        if execution_count and "status" in today_trades
+        else 0.0
+    )
     return PortfolioMetrics(
         as_of=as_of,
         portfolio_id=portfolio_id,
@@ -114,12 +128,16 @@ def _portfolio_metric(
         daily_return=daily_return,
         cumulative_return=nav - 1.0,
         drawdown=drawdown,
+        max_drawdown=max_drawdown,
         turnover=turnover,
         transaction_cost_ratio=costs / previous_equity if previous_equity > 0 else 0.0,
         position_count=len(current_positions),
         max_position_weight=float(weights.max()) if not weights.empty else 0.0,
         top5_concentration=float(weights.nlargest(5).sum()) if not weights.empty else 0.0,
+        industry_concentration=None,
         cash_ratio=cash / equity if equity > 0 else 0.0,
+        rejected_order_ratio=rejected_ratio,
+        failed_execution_ratio=failed_ratio,
     )
 
 

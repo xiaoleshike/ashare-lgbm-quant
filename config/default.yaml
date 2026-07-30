@@ -283,6 +283,54 @@ production:
     hard_feature_missing_ratio: 0.20
     warning_feature_missing_ratio: 0.50
     git_dirty_policy: warning
+monitoring:
+  alerts:
+    alpha_decay:
+      enabled: true
+      warning: 0.70
+      critical: 0.50
+    rank_ic_decline:
+      enabled: true
+      warning: -0.02
+      critical: -0.05
+    score_collapse:
+      enabled: true
+      score_std_warning: 0.01
+      score_std_critical: 0.001
+      unique_ratio_warning: 0.90
+      unique_ratio_critical: 0.50
+    feature_drift:
+      enabled: true
+      psi_warning: 0.10
+      psi_critical: 0.25
+      ks_warning: 0.10
+      ks_critical: 0.20
+      missing_ratio_warning: 0.10
+      missing_ratio_critical: 0.20
+    universe_coverage:
+      enabled: true
+      prediction_warning: 0.95
+      prediction_critical: 0.80
+      universe_deviation_warning: 0.15
+      universe_deviation_critical: 0.30
+    drawdown:
+      enabled: true
+      warning: 0.10
+      critical: 0.20
+    concentration:
+      enabled: true
+      max_weight_warning: 0.10
+      max_weight_critical: 0.20
+      top5_warning: 0.40
+      top5_critical: 0.60
+      industry_warning: 0.30
+      industry_critical: 0.50
+    execution_quality:
+      enabled: true
+      rejected_warning: 0.10
+      rejected_critical: 0.25
+      failed_warning: 0.02
+      failed_critical: 0.10
 strategy:
   candidate_selection:
     max_candidates: 50
