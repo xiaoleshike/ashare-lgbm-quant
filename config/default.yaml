@@ -386,6 +386,16 @@ research:
     elevated_volatility: 0.04
     liquidity_decline_amount_ratio: 0.6
     score_tolerance: 0.0000001
+  agent:
+    enabled: true
+    provider: openai
+    model: gpt-4.1-mini
+    temperature: 0.0
+    timeout_seconds: 60
+    max_retries: 2
+    max_output_tokens: 4000
+    top_candidates: 20
+    prompt_version: v1
 backtest:
   execution: next_open
   initial_cash: 1000000.0

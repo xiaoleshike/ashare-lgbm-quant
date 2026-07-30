@@ -948,12 +948,27 @@ class DecisionSupportSettings(BaseModel):
     score_tolerance: float = Field(default=1e-7, gt=0)
 
 
+class ResearchAgentSettings(BaseModel):
+    """Provider-neutral, read-only daily research-agent settings."""
+
+    enabled: bool = True
+    provider: Literal["openai", "claude", "gemini", "deepseek"] = "openai"
+    model: str = Field(default="gpt-4.1-mini", min_length=1)
+    temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+    timeout_seconds: PositiveInt = 60
+    max_retries: int = Field(default=2, ge=0, le=3)
+    max_output_tokens: PositiveInt = 4_000
+    top_candidates: PositiveInt = 20
+    prompt_version: str = Field(default="v1", min_length=1)
+
+
 class ResearchSettings(BaseModel):
     """Human-readable quantitative research reporting configuration."""
 
     daily_report: DailyResearchReportSettings = Field(default_factory=DailyResearchReportSettings)
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
     decision_support: DecisionSupportSettings = Field(default_factory=DecisionSupportSettings)
+    agent: ResearchAgentSettings = Field(default_factory=ResearchAgentSettings)
 
 
 class AppSettings(BaseModel):

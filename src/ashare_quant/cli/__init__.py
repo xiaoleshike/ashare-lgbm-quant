@@ -81,6 +81,7 @@ from ashare_quant.research import (
     ExplainabilityEngine,
     InvestmentDecisionSupport,
 )
+from ashare_quant.research.agent import ResearchAgentService
 from ashare_quant.strategy import CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
@@ -129,6 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_models_parser(subparsers)
     add_strategy_parser(subparsers)
     add_research_parser(subparsers)
+    add_research_agent_parser(subparsers)
     add_backtest_parser(subparsers)
     add_paper_trading_parser(subparsers)
     add_monitor_parser(subparsers)
@@ -510,6 +512,30 @@ def add_research_parser(subparsers: argparse._SubParsersAction[argparse.Argument
         "decision", help="Generate human-review investment decision support."
     )
     decision.add_argument("--as-of", required=True, help="Candidate date in YYYYMMDD.")
+
+
+def add_research_agent_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Add the isolated immutable-artifact research agent."""
+
+    parser = subparsers.add_parser(
+        "research-agent",
+        help="Summarize immutable research artifacts without model or trading access.",
+    )
+    parser.add_argument(
+        "--reports-root",
+        default=None,
+        help="Override the configured reports root.",
+    )
+    commands = parser.add_subparsers(dest="research_agent_command", required=True)
+    for name, help_text in (
+        ("generate", "Generate or idempotently reuse one research-agent report."),
+        ("validate", "Validate sources and one published research-agent report."),
+        ("status", "Inspect one published research-agent report."),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("--as-of", required=True, help="Research date in YYYYMMDD.")
 
 
 def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1591,6 +1617,44 @@ def run_research_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_research_agent_command(args: argparse.Namespace) -> int:
+    """Run one isolated research-agent operation."""
+
+    settings = load_settings(args.config)
+    configure_logging(settings.logging.level, settings.logging.json_logs)
+    reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    service = ResearchAgentService(
+        settings=settings.research.agent,
+        config_path=Path(effective_config_path(args.config)),
+        reports_root=reports_root,
+    )
+    try:
+        if args.research_agent_command == "generate":
+            result = service.generate(args.as_of)
+            print(
+                f"research_agent: as_of={result.as_of} mode={result.generation_mode} "
+                f"run_id={result.run_id} idempotent={result.idempotent} "
+                f"output={result.output_dir}"
+            )
+            return 0
+        validation = (
+            service.validate(args.as_of)
+            if args.research_agent_command == "validate"
+            else service.status(args.as_of)
+        )
+    except (DataValidationError, OSError, ValueError) as error:
+        print(f"research agent failed: {error}", file=sys.stderr)
+        return 2
+    stream = sys.stdout if validation.valid else sys.stderr
+    print(
+        f"research_agent_{args.research_agent_command}: as_of={validation.as_of} "
+        f"valid={validation.valid} exists={validation.exists} "
+        f"mode={validation.generation_mode} error={validation.error}",
+        file=stream,
+    )
+    return 0 if validation.valid else 2
+
+
 def run_backtest_command(args: argparse.Namespace) -> int:
     """Run one executable backtest command."""
 
@@ -2294,6 +2358,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_strategy_command(args)
     if args.command == "research":
         return run_research_command(args)
+    if args.command == "research-agent":
+        return run_research_agent_command(args)
     if args.command == "backtest":
         return run_backtest_command(args)
     if args.command == "paper-trading":

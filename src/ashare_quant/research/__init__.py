@@ -1,5 +1,6 @@
 """Human-readable quantitative research reports."""
 
+from ashare_quant.research.agent import ResearchAgentService
 from ashare_quant.research.daily_report import DailyReportResult, DailyResearchReportGenerator
 from ashare_quant.research.decision_support import (
     DecisionSupportResult,
@@ -14,4 +15,5 @@ __all__ = [
     "ExplainabilityEngine",
     "ExplainabilityResult",
     "InvestmentDecisionSupport",
+    "ResearchAgentService",
 ]

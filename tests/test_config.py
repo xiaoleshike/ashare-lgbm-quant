@@ -27,6 +27,8 @@ def test_load_settings_reads_yaml_and_env_token(monkeypatch: pytest.MonkeyPatch)
     assert settings.production.scheduler.enabled is True
     assert settings.production.scheduler.skip_if_already_successful is True
     assert settings.research.daily_report.top_candidates == 50
+    assert settings.research.agent.provider == "openai"
+    assert settings.research.agent.top_candidates == 20
     assert settings.monitoring.alerts.alpha_decay.warning == 0.70
     assert settings.monitoring.alerts.drawdown.critical == 0.20
 
