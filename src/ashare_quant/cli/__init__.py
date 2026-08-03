@@ -52,6 +52,7 @@ from ashare_quant.models import (
     PromotionGovernanceService,
     PurgedWalkForwardPlanner,
     RankerBaselineRunner,
+    RollbackService,
 )
 from ashare_quant.models.shadow import ShadowPredictionService
 from ashare_quant.monitoring import (
@@ -396,6 +397,18 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     for command_name in ("apply", "apply-status"):
         command = promotion_commands.add_parser(
             command_name, help=f"{command_name.title()} an approved promotion request."
+        )
+        command.add_argument("--request-id", required=True)
+    rollback_create = promotion_commands.add_parser(
+        "rollback-create", help="Create an immutable historical-Champion rollback request."
+    )
+    rollback_create.add_argument("--model-id", required=True)
+    rollback_create.add_argument("--reason-file", required=True)
+    rollback_create.add_argument("--reason-type", default="operator_requested")
+    rollback_create.add_argument("--deployment-slot", default="daily_stock_ranker")
+    for command_name in ("rollback-validate", "rollback-apply"):
+        command = promotion_commands.add_parser(
+            command_name, help=f"{command_name.title()} a governed rollback request."
         )
         command.add_argument("--request-id", required=True)
     for command_name in ("approve", "reject"):
@@ -1210,6 +1223,47 @@ def run_models_command(args: argparse.Namespace) -> int:
             reports_root=reports_root,
         )
         try:
+            if args.models_promotion_command == "rollback-create":
+                reason_path = Path(args.reason_file)
+                if not reason_path.is_file():
+                    raise DataValidationError(f"rollback reason file does not exist: {reason_path}")
+                rollback_result = RollbackService(
+                    models_root=output_root,
+                    settings=settings.promotion,
+                ).create(
+                    model_id=args.model_id,
+                    reason_type=args.reason_type,
+                    reason_description=reason_path.read_text(encoding="utf-8"),
+                    deployment_slot=args.deployment_slot,
+                )
+                print(
+                    f"rollback_request: request_id={rollback_result.request_id} "
+                    f"target={rollback_result.target_model_id} "
+                    f"champion={rollback_result.current_champion_model_id} "
+                    f"status={rollback_result.status} "
+                    f"idempotent={rollback_result.idempotent} "
+                    f"output={rollback_result.output_dir}"
+                )
+                return 0
+            if args.models_promotion_command in {"rollback-validate", "rollback-apply"}:
+                rollback_service = RollbackService(
+                    models_root=output_root,
+                    settings=settings.promotion,
+                )
+                rollback_result = (
+                    rollback_service.validate(args.request_id)
+                    if args.models_promotion_command == "rollback-validate"
+                    else rollback_service.apply(args.request_id)
+                )
+                print(
+                    f"rollback: request_id={rollback_result.request_id} "
+                    f"target={rollback_result.target_model_id} "
+                    f"status={rollback_result.status} "
+                    f"registry_version={rollback_result.registry_version_id} "
+                    f"assignment={rollback_result.champion_assignment_id} "
+                    f"idempotent={rollback_result.idempotent}"
+                )
+                return 0
             if args.models_promotion_command == "create":
                 promotion_result = service.create(
                     model_id=args.model_id,
@@ -1271,6 +1325,37 @@ def run_models_command(args: argparse.Namespace) -> int:
                 "reject",
                 "review-status",
             }:
+                is_rollback = (
+                    output_root / "rollback_requests" / args.request_id / "manifest.json"
+                ).is_file()
+                if is_rollback:
+                    rollback_review = RollbackService(
+                        models_root=output_root,
+                        settings=settings.promotion,
+                    )
+                    if args.models_promotion_command == "review":
+                        rollback_result = rollback_review.review(args.request_id)
+                    elif args.models_promotion_command == "review-status":
+                        rollback_result = rollback_review.status(args.request_id)
+                    else:
+                        comments_path = Path(args.comments_file)
+                        if not comments_path.is_file():
+                            raise DataValidationError(
+                                f"review comments file does not exist: {comments_path}"
+                            )
+                        comments = comments_path.read_text(encoding="utf-8")
+                        rollback_result = (
+                            rollback_review.approve(args.request_id, comments)
+                            if args.models_promotion_command == "approve"
+                            else rollback_review.reject(args.request_id, comments)
+                        )
+                    print(
+                        f"rollback_review: request_id={rollback_result.request_id} "
+                        f"status={rollback_result.status} "
+                        f"event_id={rollback_result.event_id} "
+                        f"idempotent={rollback_result.idempotent}"
+                    )
+                    return 1 if rollback_result.status in {"INVALID", "APPROVAL_EXPIRED"} else 0
                 review_service = HumanReviewService(
                     models_root=output_root,
                     reports_root=reports_root,
@@ -1295,7 +1380,8 @@ def run_models_command(args: argparse.Namespace) -> int:
                 print(
                     f"promotion_review: request_id={review_result.request_id} "
                     f"status={review_result.status} reviewer={review_result.reviewer} "
-                    f"requester={review_result.requester} event_id={review_result.event_id} "
+                    f"requester={review_result.requester} "
+                    f"event_id={review_result.event_id} "
                     f"idempotent={review_result.idempotent}"
                 )
                 return 1 if review_result.status in {"INVALID", "APPROVAL_EXPIRED"} else 0

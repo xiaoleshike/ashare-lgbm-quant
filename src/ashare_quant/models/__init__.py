@@ -37,6 +37,8 @@ from ashare_quant.models.promotion import (
     PromotionGovernanceResult,
     PromotionGovernanceService,
     ReviewWorkflowResult,
+    RollbackService,
+    RollbackWorkflowResult,
 )
 from ashare_quant.models.ranker import RankerBaselineRunner, RankerExperimentResult
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
@@ -75,6 +77,8 @@ __all__ = [
     "PromotionGovernanceResult",
     "PromotionGovernanceService",
     "ReviewWorkflowResult",
+    "RollbackService",
+    "RollbackWorkflowResult",
     "PurgedWalkForwardPlanner",
     "RankerBaselineRunner",
     "RankerExperimentResult",

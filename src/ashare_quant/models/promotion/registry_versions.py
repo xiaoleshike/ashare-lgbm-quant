@@ -65,6 +65,56 @@ def build_promoted_registry(
     return registry_version_id, payload, updated
 
 
+def build_rollback_registry(
+    *,
+    records: tuple[RegisteredModel, ...],
+    target_model_id: str,
+    current_champion_model_id: str,
+    parent_registry_hash: str,
+    request_id: str,
+    approval_event_id: str,
+    activated_at: str,
+) -> tuple[str, dict[str, Any], tuple[RegisteredModel, ...]]:
+    """Create a deterministic Registry version that restores a retired Champion."""
+
+    target = next((item for item in records if item.model_id == target_model_id), None)
+    current = next((item for item in records if item.model_id == current_champion_model_id), None)
+    if target is None or target.status != "retired":
+        raise DataValidationError("rollback target is absent or no longer retired")
+    if current is None or current.status != "champion":
+        raise DataValidationError("rollback current Champion assignment changed")
+    if target.model_type != current.model_type:
+        raise DataValidationError("rollback target and current Champion types differ")
+    updated = tuple(
+        replace(item, status="champion")
+        if item.model_id == target_model_id
+        else (
+            replace(item, status="retired") if item.model_id == current_champion_model_id else item
+        )
+        for item in records
+    )
+    identity = {
+        "parent_registry_hash": parent_registry_hash,
+        "rollback_request_id": request_id,
+        "approval_event_id": approval_event_id,
+        "target_model_id": target_model_id,
+        "previous_champion_model_id": current_champion_model_id,
+        "models": [item.to_dict() for item in updated],
+    }
+    version_id = f"registry_{canonical_payload_hash(identity)[:24]}"
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "artifact_name": "model_registry",
+        "registry_version_id": version_id,
+        "parent_registry_hash": parent_registry_hash,
+        "rollback_request_id": request_id,
+        "approval_event_id": approval_event_id,
+        "updated_at": activated_at,
+        "models": [item.to_dict() for item in updated],
+    }
+    return version_id, payload, updated
+
+
 def publish_registry_versions(
     *,
     models_root: Path,

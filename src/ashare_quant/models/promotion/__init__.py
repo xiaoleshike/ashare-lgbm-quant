@@ -4,6 +4,7 @@ from ashare_quant.models.promotion.apply import PromotionApplyResult, PromotionA
 from ashare_quant.models.promotion.approval import HumanReviewService, ReviewWorkflowResult
 from ashare_quant.models.promotion.evidence import PromotionEvidencePaths
 from ashare_quant.models.promotion.gates import PromotionGateEngine, PromotionGateEvaluation
+from ashare_quant.models.promotion.rollback import RollbackService, RollbackWorkflowResult
 from ashare_quant.models.promotion.service import (
     PromotionGovernanceResult,
     PromotionGovernanceService,
@@ -19,4 +20,6 @@ __all__ = [
     "PromotionGovernanceService",
     "HumanReviewService",
     "ReviewWorkflowResult",
+    "RollbackService",
+    "RollbackWorkflowResult",
 ]
