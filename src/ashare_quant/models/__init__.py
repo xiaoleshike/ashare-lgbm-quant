@@ -27,6 +27,11 @@ from ashare_quant.models.production_observation import (
     ProductionObservationRecorder,
     ProductionObservationResult,
 )
+from ashare_quant.models.promotion import (
+    PromotionEvidencePaths,
+    PromotionGovernanceResult,
+    PromotionGovernanceService,
+)
 from ashare_quant.models.ranker import RankerBaselineRunner, RankerExperimentResult
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
 from ashare_quant.models.walk_forward import (
@@ -55,6 +60,9 @@ __all__ = [
     "ProductionObservationResult",
     "ProductionRankerTrainer",
     "ProductionTrainingResult",
+    "PromotionEvidencePaths",
+    "PromotionGovernanceResult",
+    "PromotionGovernanceService",
     "PurgedWalkForwardPlanner",
     "RankerBaselineRunner",
     "RankerExperimentResult",

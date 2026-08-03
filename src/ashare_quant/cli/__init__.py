@@ -45,6 +45,8 @@ from ashare_quant.models import (
     ProductionInferenceEngine,
     ProductionObservationRecorder,
     ProductionRankerTrainer,
+    PromotionEvidencePaths,
+    PromotionGovernanceService,
     PurgedWalkForwardPlanner,
     RankerBaselineRunner,
 )
@@ -364,6 +366,30 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     promote.add_argument("model_id", help="Registered model identifier.")
     retire = commands.add_parser("retire", help="Retire a registered model.")
     retire.add_argument("model_id", help="Registered model identifier.")
+    promotion = commands.add_parser(
+        "promotion", help="Create and inspect immutable promotion governance requests."
+    )
+    promotion_commands = promotion.add_subparsers(dest="models_promotion_command", required=True)
+    promotion_create = promotion_commands.add_parser(
+        "create", help="Freeze a candidate promotion request without applying it."
+    )
+    promotion_create.add_argument("--model-id", required=True)
+    promotion_create.add_argument("--evidence-cutoff-date", required=True)
+    promotion_create.add_argument("--deployment-slot", default="daily_stock_ranker")
+    for argument in (
+        "challenger-evaluation",
+        "executable-validation",
+        "shadow-prediction",
+        "performance-observation",
+        "monitoring-summary",
+        "alerts",
+    ):
+        promotion_create.add_argument(f"--{argument}", required=True)
+    for command_name in ("validate", "status"):
+        command = promotion_commands.add_parser(
+            command_name, help=f"{command_name.title()} an immutable promotion request."
+        )
+        command.add_argument("--request-id", required=True)
     predict = commands.add_parser("predict", help="Score one completed session with the champion.")
     predict.add_argument("--as-of", required=True, help="Completed session in YYYYMMDD.")
     diagnostics = commands.add_parser(
@@ -1164,6 +1190,51 @@ def run_models_command(args: argparse.Namespace) -> int:
     )
     output_root = settings.paths.models if args.output_root is None else Path(args.output_root)
     reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    if args.models_command == "promotion":
+        service = PromotionGovernanceService(
+            models_root=output_root,
+            reports_root=reports_root,
+        )
+        try:
+            if args.models_promotion_command == "create":
+                promotion_result = service.create(
+                    model_id=args.model_id,
+                    evidence_cutoff_date=args.evidence_cutoff_date,
+                    deployment_slot=args.deployment_slot,
+                    evidence_paths=PromotionEvidencePaths(
+                        challenger_evaluation=Path(args.challenger_evaluation),
+                        executable_validation=Path(args.executable_validation),
+                        shadow_prediction=Path(args.shadow_prediction),
+                        performance_observation=Path(args.performance_observation),
+                        monitoring_summary=Path(args.monitoring_summary),
+                        alerts=Path(args.alerts),
+                    ),
+                )
+                print(
+                    f"promotion_request: request_id={promotion_result.request_id} "
+                    f"candidate={promotion_result.candidate_model_id} "
+                    f"champion={promotion_result.champion_model_id} "
+                    f"status={promotion_result.status} "
+                    f"idempotent={promotion_result.idempotent} "
+                    f"output={promotion_result.output_dir}"
+                )
+                return 0
+            if args.models_promotion_command == "validate":
+                validation_result = service.validate(args.request_id)
+                print(
+                    f"promotion_validation: request_id={validation_result.request_id} "
+                    f"status=VALID cutoff={validation_result.evidence_cutoff_date}"
+                )
+                return 0
+            status_result = service.status(args.request_id)
+            print(
+                f"promotion_status: request_id={status_result.request_id} "
+                f"status={status_result.status} output={status_result.output_dir}"
+            )
+            return 0 if status_result.status == "complete" else 1
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"promotion governance failed: {error}", file=sys.stderr)
+            return 2
     if args.models_command in {"shadow-predict", "shadow-status", "shadow-validate"}:
         shadow = ShadowPredictionService(
             settings=settings,
