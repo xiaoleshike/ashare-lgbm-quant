@@ -285,9 +285,7 @@ def test_universe_uses_historical_namechange_for_st_intervals() -> None:
         require_full_liquidity_window=True,
     )
 
-    frame = build_universe_frame(
-        historical_st_fixture_inputs(), settings, "20240102", "20240105"
-    )
+    frame = build_universe_frame(historical_st_fixture_inputs(), settings, "20240102", "20240105")
     rows = frame.set_index(["trade_date", "ts_code"])
 
     assert not bool(rows.loc[("20240103", "000001.SZ"), "is_st"])

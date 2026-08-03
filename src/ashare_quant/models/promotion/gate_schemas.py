@@ -32,6 +32,7 @@ class GateResult(BaseModel):
     candidate_model_id: str
     status: GateStatus
     checks: tuple[GateCheck, ...]
+    policy_version: str = "legacy_v1"
     policy_hash: str = Field(min_length=64, max_length=64)
     created_at: str
 
@@ -46,6 +47,7 @@ class GateManifest(BaseModel):
     request_id: str
     gate_identity: str = Field(min_length=64, max_length=64)
     status: GateStatus
+    policy_version: str = "legacy_v1"
     policy_hash: str = Field(min_length=64, max_length=64)
     source_request_manifest_hash: str = Field(min_length=64, max_length=64)
     artifact_hashes: dict[str, str]

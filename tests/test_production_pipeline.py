@@ -8,8 +8,11 @@ import pandas as pd
 import pytest
 
 from ashare_quant.cli import main
+from ashare_quant.governance.snapshot import GovernanceSnapshotResult
 from ashare_quant.models.inference import InferenceResult
 from ashare_quant.models.production_observation import ProductionObservationResult
+from ashare_quant.models.shadow.schemas import ShadowPredictionResult
+from ashare_quant.monitoring.schemas import MonitoringResult
 from ashare_quant.orchestration.daily import DailyPipelineStages, StageResult
 from ashare_quant.orchestration.freshness import GateResult
 from ashare_quant.orchestration.lock import ProductionLockError, production_lock
@@ -25,6 +28,7 @@ from ashare_quant.paper_trading.service import (
     PaperTradingRebalanceResult,
     PaperTradingReportResult,
 )
+from ashare_quant.research.agent.schemas import ResearchAgentResult
 from ashare_quant.research.daily_report import DailyReportResult
 from ashare_quant.research.decision_support import DecisionSupportResult
 from ashare_quant.research.explainability.schemas import ExplainabilityResult
@@ -67,6 +71,73 @@ def test_production_pipeline_uses_one_outer_lock_and_records_stage_order(
     assert manifest["pipeline_type"] == "production_daily"
     assert manifest["as_of"] == "20240105"
     assert manifest["model_id"] == "champion-1"
+
+
+@pytest.mark.parametrize(
+    ("failed_stage", "failed_service"),
+    [("shadow_prediction", "shadow"), ("monitoring", "monitoring")],
+)
+def test_closed_loop_component_failure_isolated_from_champion_output(
+    tmp_path: Path,
+    failed_stage: str,
+    failed_service: str,
+) -> None:
+    pipeline, calls = make_pipeline(tmp_path, include_paper_trading=True)
+    pipeline.shadow_prediction = FakeShadowService(
+        tmp_path / "reports", fail=failed_service == "shadow"
+    )
+    pipeline.monitoring = FakeMonitoringService(
+        tmp_path / "reports", fail=failed_service == "monitoring"
+    )
+    pipeline.research_agent = FakeResearchAgentService(tmp_path / "reports")
+    pipeline.governance_snapshot = FakeGovernanceSnapshotService(tmp_path / "reports")
+
+    result = pipeline.run("20240105")
+    run_manifest = load_json(result.run.manifest_path)
+    closed_loop = load_json(tmp_path / "reports/20240105/closed_loop_manifest.json")
+
+    assert result.status == "success"
+    assert (tmp_path / "reports/20240105/production_summary.json").is_file()
+    assert calls[-1] == "paper_trading_daily"
+    stage = next(item for item in closed_loop["stages"] if item["name"] == failed_stage)
+    assert stage["status"] == "warning"
+    assert run_manifest["status"] == "success"
+    assert any(failed_stage in warning for warning in run_manifest["warnings"])
+
+
+def test_closed_loop_records_component_ids_and_research_fallback(tmp_path: Path) -> None:
+    pipeline, _ = make_pipeline(tmp_path)
+    pipeline.shadow_prediction = FakeShadowService(tmp_path / "reports")
+    pipeline.monitoring = FakeMonitoringService(tmp_path / "reports")
+    pipeline.research_agent = FakeResearchAgentService(
+        tmp_path / "reports", generation_mode="deterministic_fallback"
+    )
+    pipeline.governance_snapshot = FakeGovernanceSnapshotService(tmp_path / "reports")
+
+    result = pipeline.run("20240105")
+    run_manifest = load_json(result.run.manifest_path)
+    closed_loop = load_json(tmp_path / "reports/20240105/closed_loop_manifest.json")
+
+    assert result.status == "success"
+    assert run_manifest["production_run_id"] == result.run.run_id
+    assert run_manifest["shadow_run_id"] == "shadow-20240105"
+    assert run_manifest["monitor_run_id"] == "monitor-20240105"
+    assert run_manifest["research_run_id"] == "research-20240105"
+    assert run_manifest["governance_snapshot_id"] == "governance-20240105"
+    assert closed_loop["shadow_run_id"] == "shadow-20240105"
+    closed_names = [item["name"] for item in closed_loop["stages"]]
+    assert closed_names[: len(PRODUCTION_STAGE_NAMES)] == list(PRODUCTION_STAGE_NAMES)
+    assert closed_names[-4:] == [
+        "shadow_prediction",
+        "monitoring",
+        "research_agent",
+        "governance_snapshot",
+    ]
+    assert all("duration_seconds" in item for item in closed_loop["stages"])
+    assert all("artifact_hashes" in item for item in closed_loop["stages"])
+    research = next(item for item in closed_loop["stages"] if item["name"] == "research_agent")
+    assert research["status"] == "success"
+    assert "deterministic fallback" in research["warnings"][0]
 
 
 def test_production_pipeline_stops_after_failure_and_does_not_publish_summary(
@@ -516,6 +587,97 @@ class FakePaperTrading:
             PaperTradingExecutionResult(as_of, 4, 60, 4, output),
             PaperTradingReportResult(as_of, report, summary, 4),
         )
+
+
+class FakeShadowService:
+    def __init__(self, reports_root: Path, *, fail: bool = False) -> None:
+        self.reports_root = reports_root
+        self.fail = fail
+
+    def predict(
+        self,
+        as_of: str,
+        *,
+        expected_production_run_id: str | None = None,
+    ) -> ShadowPredictionResult:
+        assert expected_production_run_id is not None
+        if self.fail:
+            raise DataError("forced shadow failure")
+        output = self.reports_root / "shadow_predictions" / as_of
+        output.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"trade_date": [as_of], "ts_code": ["000001.SZ"]}).to_parquet(
+            output / "predictions.parquet", index=False
+        )
+        (output / "manifest.json").write_text("{}\n", encoding="utf-8")
+        return ShadowPredictionResult(
+            as_of,
+            expected_production_run_id,
+            f"shadow-{as_of}",
+            1,
+            6,
+            output,
+        )
+
+
+class FakeMonitoringService:
+    def __init__(self, reports_root: Path, *, fail: bool = False) -> None:
+        self.reports_root = reports_root
+        self.fail = fail
+
+    def run(self, as_of: str) -> MonitoringResult:
+        if self.fail:
+            raise DataError("forced monitoring failure")
+        output = self.reports_root / "model_monitor" / as_of
+        output.mkdir(parents=True, exist_ok=True)
+        for name in ("health.json", "monitor_summary.json", "manifest.json"):
+            (output / name).write_text("{}\n", encoding="utf-8")
+        return MonitoringResult(as_of, f"monitor-{as_of}", output, 4, 2, 0, 0)
+
+
+class FakeResearchAgentService:
+    def __init__(self, reports_root: Path, *, generation_mode: str = "llm") -> None:
+        self.reports_root = reports_root
+        self.generation_mode = generation_mode
+
+    def generate(self, as_of: str) -> ResearchAgentResult:
+        output = self.reports_root / "research_agent" / as_of
+        output.mkdir(parents=True, exist_ok=True)
+        for name in ("daily_research.md", "research_summary.json", "manifest.json"):
+            (output / name).write_text("{}\n", encoding="utf-8")
+        return ResearchAgentResult(
+            as_of,
+            output,
+            self.generation_mode,
+            f"research-{as_of}",
+        )
+
+
+class FakeGovernanceSnapshotService:
+    def __init__(self, reports_root: Path) -> None:
+        self.reports_root = reports_root
+
+    def publish_daily(
+        self,
+        as_of: str,
+        *,
+        production_run_id: str,
+    ) -> GovernanceSnapshotResult:
+        assert production_run_id
+        output = self.reports_root / "governance" / as_of
+        output.mkdir(parents=True, exist_ok=True)
+        paths = tuple(
+            output / name
+            for name in (
+                "status.json",
+                "validation.json",
+                "recovery.json",
+                "promotion_status.json",
+                "manifest.json",
+            )
+        )
+        for path in paths:
+            path.write_text("{}\n", encoding="utf-8")
+        return GovernanceSnapshotResult(f"governance-{as_of}", paths, ())
 
 
 class DataError(ValueError):

@@ -103,6 +103,10 @@ class MonitoringService:
             **{f"paper:{k}": v for k, v in paper_hashes.items()},
         }
         aggregate_hash = _payload_hash(all_hashes)
+        champion_assignment = _champion_assignment(
+            self.settings.paths.models,
+            sources.model_id,
+        )
         run_id = f"monitor_{as_of}_{aggregate_hash[:16]}"
         completed_at = str(
             sources.production_summary.get("completed_time")
@@ -118,6 +122,8 @@ class MonitoringService:
             "source_artifact_hash": aggregate_hash,
             "source_artifact_hashes": all_hashes,
             "model_id": sources.model_id,
+            "champion_assignment": champion_assignment,
+            "performance_identity_contract": "model_id_and_horizon_are_never_mixed",
             "feature_hash": sources.feature_hash,
             "monitored_portfolio_ids": list(portfolio_ids),
             "row_counts": {
@@ -203,3 +209,29 @@ def _payload_hash(payload: object) -> str:
         payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _champion_assignment(models_root: Path, model_id: str) -> dict[str, Any] | None:
+    """Return current immutable deployment transition metadata when available."""
+
+    root = models_root / "champion_history"
+    matches: list[dict[str, Any]] = []
+    if not root.exists():
+        return None
+    for path in root.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("model_id") == model_id:
+            matches.append(payload)
+    if not matches:
+        return None
+    current = max(matches, key=lambda item: str(item.get("activated_at") or ""))
+    return {
+        "assignment_id": current.get("champion_assignment_id"),
+        "previous_champion_model_id": current.get("previous_champion_model_id"),
+        "new_champion_model_id": current.get("model_id"),
+        "effective_date": current.get("activated_at"),
+        "deployment_slot": current.get("deployment_slot"),
+    }

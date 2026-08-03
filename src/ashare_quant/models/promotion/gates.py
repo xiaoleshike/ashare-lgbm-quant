@@ -68,6 +68,7 @@ class PromotionGateEngine:
         checks.extend(self._deployment_checks(bundle, payloads))
         checks.extend(self._performance_checks(bundle, payloads))
         checks.extend(self._monitoring_checks(bundle, payloads))
+        checks.extend(self._resolved_evidence_checks(bundle))
         checks.extend(self._review_checks(bundle, payloads))
         ordered = tuple(sorted(checks, key=lambda item: item.name))
         status = (
@@ -92,6 +93,7 @@ class PromotionGateEngine:
             candidate_model_id=bundle.request.candidate.model_id,
             status=cast(GateStatus, status),
             checks=ordered,
+            policy_version=self.policy.policy_version,
             policy_hash=self.policy.policy_hash,
             created_at=utc_now_iso(),
         )
@@ -396,6 +398,7 @@ class PromotionGateEngine:
             candidate_model_id=bundle.request.candidate.model_id,
             evidence_hash=source.sha256,
             policy=self.policy,
+            horizon=bundle.contract.horizon,
         )
 
     def _monitoring_checks(
@@ -436,10 +439,15 @@ class PromotionGateEngine:
         ]
         critical = [item for item in active if item.get("severity") == "CRITICAL"]
         warning = [item for item in active if item.get("severity") == "WARNING"]
+        critical_status = (
+            "FAIL"
+            if critical and self.policy.block.critical_alert
+            else ("WARNING" if critical else "PASS")
+        )
         return (
             _check(
                 "candidate_critical_alerts",
-                "FAIL" if critical else "PASS",
+                critical_status,
                 f"unresolved candidate CRITICAL alerts={len(critical)}",
                 source.sha256,
             ),
@@ -465,6 +473,56 @@ class PromotionGateEngine:
             policy=self.policy,
         )
 
+    def _resolved_evidence_checks(self, bundle: PromotionBundle) -> tuple[GateCheck, ...]:
+        """Validate optional resolver evidence required by the active policy."""
+
+        if not self.policy.require.paper_trading:
+            return (
+                _check(
+                    "paper_trading_evidence",
+                    "PASS",
+                    "paper-trading evidence is not required by policy",
+                    bundle.evidence.evidence_snapshot_hash,
+                ),
+            )
+        path = bundle.output_dir / "evidence_manifest.json"
+        if not path.is_file():
+            return (
+                _check(
+                    "paper_trading_evidence",
+                    "FAIL",
+                    "policy requires resolver-bound paper-trading evidence",
+                    bundle.evidence.evidence_snapshot_hash,
+                ),
+            )
+        try:
+            payload = _load_json(path)
+            sources = payload.get("sources")
+            source_rows = sources if isinstance(sources, list) else []
+            paper = next(
+                item
+                for item in source_rows
+                if isinstance(item, dict) and item.get("evidence_type") == "paper_trading"
+            )
+            source_path = (self.reports_root / str(paper["source_path"])).resolve()
+            valid = (
+                source_path.is_relative_to(self.reports_root.resolve())
+                and file_sha256(source_path) == paper.get("sha256")
+                and str(paper.get("evidence_date")) <= bundle.request.evidence_cutoff_date
+            )
+        except (DataValidationError, OSError, StopIteration, TypeError, KeyError):
+            valid = False
+        return (
+            _check(
+                "paper_trading_evidence",
+                "PASS" if valid else "FAIL",
+                "paper-trading evidence hash and cutoff are valid"
+                if valid
+                else "paper-trading evidence is missing, changed, or newer than cutoff",
+                file_sha256(path),
+            ),
+        )
+
     def _source_state(self, bundle: PromotionBundle) -> list[dict[str, str]]:
         state: list[dict[str, str]] = []
         for source in bundle.evidence.sources:
@@ -473,6 +531,15 @@ class PromotionGateEngine:
                 {
                     "evidence_type": source.evidence_type,
                     "current_hash": file_sha256(path) if path.is_file() else "missing",
+                }
+            )
+        resolved = bundle.output_dir / "evidence_manifest.json"
+        if resolved.is_file():
+            state.append(
+                {
+                    "evidence_type": "resolved_evidence",
+                    "source_path": str(resolved),
+                    "sha256": file_sha256(resolved),
                 }
             )
         return state

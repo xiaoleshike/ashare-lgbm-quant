@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Protocol
 
 from ashare_quant.config.settings import AppSettings
@@ -16,10 +17,19 @@ from ashare_quant.data.quality_logging import append_validation_results
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.data.validation import DataValidator
 from ashare_quant.features import FeatureBuilder, FeatureStore, FeatureValidator
+from ashare_quant.governance.snapshot import GovernanceSnapshotResult
 from ashare_quant.models.inference import InferenceResult, ProductionInferenceEngine
 from ashare_quant.models.production_observation import (
     ProductionObservationRecorder,
     ProductionObservationResult,
+)
+from ashare_quant.models.shadow.schemas import ShadowPredictionResult
+from ashare_quant.monitoring.schemas import MonitoringResult
+from ashare_quant.orchestration.closed_loop import (
+    ClosedLoopStage,
+    artifact_hashes,
+    closed_loop_stages_from_run,
+    publish_closed_loop_manifest,
 )
 from ashare_quant.orchestration.daily import (
     AsOfResolver,
@@ -43,10 +53,12 @@ from ashare_quant.orchestration.run_manifest import (
     record_failure,
     record_stage_end,
     record_stage_start,
+    update_closed_loop_context,
     update_run_context,
     update_run_status,
 )
 from ashare_quant.paper_trading import PaperTradingDailyResult
+from ashare_quant.research.agent.schemas import ResearchAgentResult
 from ashare_quant.research.daily_report import DailyReportResult, DailyResearchReportGenerator
 from ashare_quant.research.decision_support import (
     DecisionSupportResult,
@@ -75,6 +87,13 @@ PRODUCTION_STAGE_NAMES = (
     "production_observation",
     "publish_production_summary",
 )
+CLOSED_LOOP_STAGE_NAMES = (
+    "shadow_prediction",
+    "monitoring",
+    "research_agent",
+    "governance_snapshot",
+    "publish_closed_loop_manifest",
+)
 DRY_RUN_STAGE_NAMES = ("dry_run_validation", "manifest_planning")
 
 
@@ -93,6 +112,24 @@ class PaperTradingDailyRunner(Protocol):
         *,
         production_summary_path: Path | None = None,
     ) -> PaperTradingDailyResult: ...
+
+
+class ShadowPredictionRunner(Protocol):
+    def predict(
+        self, as_of: str, *, expected_production_run_id: str | None = None
+    ) -> ShadowPredictionResult: ...
+
+
+class MonitoringRunner(Protocol):
+    def run(self, as_of: str) -> MonitoringResult: ...
+
+
+class ResearchAgentRunner(Protocol):
+    def generate(self, as_of: str) -> ResearchAgentResult: ...
+
+
+class GovernanceSnapshotRunner(Protocol):
+    def publish_daily(self, as_of: str, *, production_run_id: str) -> GovernanceSnapshotResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +365,10 @@ class ProductionPipeline:
         decision_support: InvestmentDecisionSupport,
         observation: ProductionObservationRecorder,
         paper_trading: PaperTradingDailyRunner | None = None,
+        shadow_prediction: ShadowPredictionRunner | None = None,
+        monitoring: MonitoringRunner | None = None,
+        research_agent: ResearchAgentRunner | None = None,
+        governance_snapshot: GovernanceSnapshotRunner | None = None,
         runs_root: Path = DEFAULT_RUNS_ROOT,
         lock_path: Path = DEFAULT_PRODUCTION_LOCK_PATH,
     ) -> None:
@@ -346,6 +387,10 @@ class ProductionPipeline:
         self.decision_support = decision_support
         self.observation = observation
         self.paper_trading = paper_trading
+        self.shadow_prediction = shadow_prediction
+        self.monitoring = monitoring
+        self.research_agent = research_agent
+        self.governance_snapshot = governance_snapshot
         self.runs_root = runs_root
         self.lock_path = lock_path
 
@@ -375,6 +420,22 @@ class ProductionPipeline:
                 if self.paper_trading is not None
                 else PRODUCTION_STAGE_NAMES
             )
+            closed_loop_stages = tuple(
+                name
+                for name, enabled in (
+                    ("shadow_prediction", self.shadow_prediction is not None),
+                    ("monitoring", self.monitoring is not None),
+                    ("research_agent", self.research_agent is not None),
+                    ("governance_snapshot", self.governance_snapshot is not None),
+                )
+                if enabled
+            )
+            if closed_loop_stages:
+                production_stages = (
+                    *production_stages,
+                    *closed_loop_stages,
+                    "publish_closed_loop_manifest",
+                )
             declared_stages = DRY_RUN_STAGE_NAMES if dry_run else production_stages
             run = create_run(
                 command,
@@ -421,7 +482,7 @@ class ProductionPipeline:
                     daily.error_message,
                 )
 
-            state: dict[str, Any] = {"artifacts": [], "warnings": []}
+            state: dict[str, Any] = {"artifacts": [], "warnings": [], "run": run}
             stages = (
                 ("model_predict", lambda: self._predict(resolved_as_of, state)),
                 ("strategy_candidates", lambda: self._candidates(resolved_as_of, state)),
@@ -455,6 +516,56 @@ class ProductionPipeline:
                         stage_name,
                         failure,
                     )
+            soft_stages = (
+                *(
+                    (("shadow_prediction", lambda: self._shadow(run, resolved_as_of, state)),)
+                    if self.shadow_prediction is not None
+                    else ()
+                ),
+                *(
+                    (("monitoring", lambda: self._monitor(resolved_as_of, state)),)
+                    if self.monitoring is not None
+                    else ()
+                ),
+                *(
+                    (("research_agent", lambda: self._research_agent(resolved_as_of, state)),)
+                    if self.research_agent is not None
+                    else ()
+                ),
+                *(
+                    (
+                        (
+                            "governance_snapshot",
+                            lambda: self._governance_snapshot(run, resolved_as_of, state),
+                        ),
+                    )
+                    if self.governance_snapshot is not None
+                    else ()
+                ),
+            )
+            closed_loop_results: list[ClosedLoopStage] = []
+            for stage_name, operation in soft_stages:
+                closed_loop_results.append(
+                    self._execute_soft_stage(run, stage_name, operation, state)
+                )
+            if soft_stages:
+                failure = self._execute_stage(
+                    run,
+                    "publish_closed_loop_manifest",
+                    lambda: self._closed_loop_manifest(
+                        run, resolved_as_of, state, tuple(closed_loop_results)
+                    ),
+                    state,
+                )
+                if failure is not None:
+                    return ProductionPipelineResult(
+                        run,
+                        "failed",
+                        2,
+                        resolved_as_of,
+                        "publish_closed_loop_manifest",
+                        failure,
+                    )
             try:
                 validate_production_publication(
                     reports_root=self.reports_root,
@@ -482,6 +593,51 @@ class ProductionPipeline:
                 resolved_as_of,
                 summary_path=self.reports_root / resolved_as_of / "production_summary.json",
             )
+
+    def _execute_soft_stage(
+        self,
+        run: ProductionRun,
+        stage_name: str,
+        operation: Callable[[], StageResult],
+        state: dict[str, Any],
+    ) -> ClosedLoopStage:
+        """Record an optional component failure without failing Champion production."""
+
+        record_stage_start(run, stage_name)
+        started = perf_counter()
+        try:
+            result = operation()
+            if result.status == "failed":
+                raise DataValidationError(result.error_message or f"{stage_name} failed")
+            _require_artifacts(result.artifact_paths)
+            status = "success"
+            warnings = result.warnings
+            metrics = result.metrics or {}
+            paths = result.artifact_paths
+        except Exception as error:  # noqa: BLE001 - explicit soft component boundary.
+            status = "warning"
+            warning = (
+                f"{stage_name} failed without blocking Champion production: "
+                f"{_exception_message(error)}"
+            )
+            warnings = (warning,)
+            metrics = {"component_status": "failed", "error": _exception_message(error)}
+            paths = ()
+        duration = round(perf_counter() - started, 6)
+        state["artifacts"].extend(paths)
+        state["warnings"].extend(warnings)
+        update_run_context(run, artifact_paths=paths, warnings=warnings)
+        stage = ClosedLoopStage(
+            name=stage_name,
+            status=status,
+            artifact_paths=paths,
+            artifact_hashes=artifact_hashes(paths),
+            duration_seconds=duration,
+            warnings=warnings,
+            metrics=metrics,
+        )
+        record_stage_end(run, stage_name, result=stage.to_dict())
+        return stage
 
     def _run_dry(self, run: ProductionRun, as_of: str) -> ProductionPipelineResult:
         def validate() -> StageResult:
@@ -620,6 +776,116 @@ class ProductionPipeline:
             "success",
             (str(result.output_path),),
             {"candidate_count": result.candidate_count, "model_id": result.model_id},
+        )
+
+    def _shadow(self, run: ProductionRun, as_of: str, state: dict[str, Any]) -> StageResult:
+        if self.shadow_prediction is None:
+            raise DataValidationError("shadow-prediction service is unavailable")
+        result = self.shadow_prediction.predict(as_of, expected_production_run_id=run.run_id)
+        state["shadow_run_id"] = str(result.shadow_run_id)
+        update_closed_loop_context(run, shadow_run_id=str(result.shadow_run_id))
+        paths = tuple(
+            str(result.output_dir / name) for name in ("predictions.parquet", "manifest.json")
+        )
+        return StageResult(
+            "success",
+            paths,
+            {
+                "shadow_run_id": result.shadow_run_id,
+                "prediction_rows": result.prediction_rows,
+                "model_count": result.model_count,
+            },
+        )
+
+    def _monitor(self, as_of: str, state: dict[str, Any]) -> StageResult:
+        if self.monitoring is None:
+            raise DataValidationError("monitoring service is unavailable")
+        result = self.monitoring.run(as_of)
+        state["monitor_run_id"] = str(result.run_id)
+        update_closed_loop_context(run=state["run"], monitor_run_id=str(result.run_id))
+        paths = tuple(
+            str(result.output_dir / name)
+            for name in ("health.json", "monitor_summary.json", "manifest.json")
+        )
+        return StageResult(
+            "success",
+            paths,
+            {
+                "monitor_run_id": result.run_id,
+                "portfolio_count": result.portfolio_count,
+                "alert_count": result.alert_count,
+            },
+        )
+
+    def _research_agent(self, as_of: str, state: dict[str, Any]) -> StageResult:
+        if self.research_agent is None:
+            raise DataValidationError("research-agent service is unavailable")
+        result = self.research_agent.generate(as_of)
+        state["research_run_id"] = str(result.run_id)
+        update_closed_loop_context(run=state["run"], research_run_id=str(result.run_id))
+        paths = tuple(
+            str(result.output_dir / name)
+            for name in ("daily_research.md", "research_summary.json", "manifest.json")
+        )
+        warnings = (
+            ("research agent used deterministic fallback",)
+            if result.generation_mode == "deterministic_fallback"
+            else ()
+        )
+        return StageResult(
+            "success",
+            paths,
+            {
+                "research_run_id": result.run_id,
+                "generation_mode": result.generation_mode,
+            },
+            warnings,
+        )
+
+    def _governance_snapshot(
+        self, run: ProductionRun, as_of: str, state: dict[str, Any]
+    ) -> StageResult:
+        if self.governance_snapshot is None:
+            raise DataValidationError("governance snapshot service is unavailable")
+        result = self.governance_snapshot.publish_daily(as_of, production_run_id=run.run_id)
+        state["governance_snapshot_id"] = str(result.snapshot_id)
+        update_closed_loop_context(run, governance_snapshot_id=str(result.snapshot_id))
+        return StageResult(
+            "success",
+            tuple(str(path) for path in result.artifact_paths),
+            {"governance_snapshot_id": result.snapshot_id},
+            tuple(result.warnings),
+        )
+
+    def _closed_loop_manifest(
+        self,
+        run: ProductionRun,
+        as_of: str,
+        state: dict[str, Any],
+        stages: tuple[ClosedLoopStage, ...],
+    ) -> StageResult:
+        all_stages = closed_loop_stages_from_run(
+            run.manifest_path,
+            overrides=stages,
+        )
+        path, closed_loop_id = publish_closed_loop_manifest(
+            reports_root=self.reports_root,
+            as_of=as_of,
+            production_run_id=run.run_id,
+            component_ids={
+                "shadow_run_id": state.get("shadow_run_id"),
+                "monitor_run_id": state.get("monitor_run_id"),
+                "research_run_id": state.get("research_run_id"),
+                "governance_snapshot_id": state.get("governance_snapshot_id"),
+            },
+            stages=all_stages,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        return StageResult(
+            "success",
+            (str(path),),
+            {"closed_loop_id": closed_loop_id},
+            tuple(warning for stage in all_stages for warning in stage.warnings),
         )
 
     def _publish_summary(

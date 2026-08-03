@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from ashare_quant.config.settings import AppSettings
+from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.governance.schemas import GovernanceCheck
 from ashare_quant.governance.status import SourceCatalog
 from ashare_quant.models.feature_lists import feature_list_hash
@@ -259,3 +261,112 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"JSON must contain an object: {path}")
     return payload
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryRecoveryPreview:
+    latest_valid_registry: Path
+    registry_hash: str
+    champion_model_id: str
+    champion_assignment_id: str | None
+    registry_version_id: str | None
+    transition_manifest: Path | None
+    corrupted_versions: tuple[str, ...]
+
+
+def registry_recovery_preview(models_root: Path) -> RegistryRecoveryPreview:
+    """Select the latest lineage-valid registry version without restoring it."""
+
+    versions_root = models_root / "registry_versions"
+    valid: list[tuple[str, Path, dict[str, Any], dict[str, Any] | None, Path | None]] = []
+    corrupted: list[str] = []
+    for path in sorted(versions_root.glob("*.json")) if versions_root.exists() else []:
+        try:
+            records = load_registry_records(path)
+            payload = _load_json(path)
+            champions = [item for item in records if item.status == "champion"]
+            if len(champions) != 1:
+                raise ValueError("registry version does not have exactly one Champion")
+            assignment, transition = _registry_transition_lineage(models_root, path, payload)
+            valid.append(
+                (str(payload.get("updated_at") or ""), path, payload, assignment, transition)
+            )
+        except Exception:
+            corrupted.append(path.name)
+    current = models_root / "registry.json"
+    if current.is_file():
+        try:
+            records = load_registry_records(current)
+            payload = _load_json(current)
+            champions = [item for item in records if item.status == "champion"]
+            if len(champions) == 1:
+                assignment, transition = _registry_transition_lineage(models_root, current, payload)
+                valid.append(
+                    (str(payload.get("updated_at") or ""), current, payload, assignment, transition)
+                )
+        except Exception:  # noqa: S110 - a corrupted current file is reported by validation.
+            pass
+    if not valid:
+        raise DataValidationError("no valid registry version is available for manual recovery")
+    _, path, payload, assignment, transition = max(valid, key=lambda item: (item[0], str(item[1])))
+    records = load_registry_records(path)
+    champion = next(item for item in records if item.status == "champion")
+    version_id = payload.get("registry_version_id")
+    assignment_id = (
+        str(assignment.get("champion_assignment_id")) if assignment is not None else None
+    )
+    return RegistryRecoveryPreview(
+        latest_valid_registry=path,
+        registry_hash=file_sha256(path),
+        champion_model_id=champion.model_id,
+        champion_assignment_id=assignment_id,
+        registry_version_id=None if version_id is None else str(version_id),
+        transition_manifest=transition,
+        corrupted_versions=tuple(corrupted),
+    )
+
+
+def _registry_transition_lineage(
+    models_root: Path,
+    registry_path: Path,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any] | None, Path | None]:
+    """Validate history and apply commit marker for a governed Registry version."""
+
+    version_id = payload.get("registry_version_id")
+    if not isinstance(version_id, str):
+        return None, None
+    history_root = models_root / "champion_history"
+    assignments: list[dict[str, Any]] = []
+    if history_root.exists():
+        for path in sorted(history_root.glob("*.json")):
+            assignment = _load_json(path)
+            if assignment.get("registry_version_id") == version_id:
+                assignments.append(assignment)
+    if len(assignments) != 1:
+        raise ValueError("governed Registry version lacks one Champion assignment")
+    assignment = assignments[0]
+    request_id = payload.get("promotion_request_id") or payload.get("rollback_request_id")
+    if not isinstance(request_id, str):
+        raise ValueError("governed Registry version lacks transition request identity")
+    if payload.get("promotion_request_id") is not None:
+        manifests = sorted(
+            (models_root / "promotion_requests" / request_id / "apply").glob("*/manifest.json")
+        )
+    else:
+        rollback = models_root / "rollback_requests" / request_id / "rollback_apply_manifest.json"
+        manifests = [rollback] if rollback.is_file() else []
+    matching = []
+    for manifest_path in manifests:
+        manifest = _load_json(manifest_path)
+        if manifest.get("registry_version_id") == version_id:
+            matching.append((manifest_path, manifest))
+    if len(matching) != 1:
+        raise ValueError("governed Registry version lacks one apply commit manifest")
+    transition_path, transition = matching[0]
+    if transition.get("registry_file_hash") != file_sha256(registry_path):
+        raise ValueError("apply manifest Registry hash differs")
+    assignment_path = history_root / f"{assignment.get('champion_assignment_id')}.json"
+    if transition.get("champion_history_hash") != file_sha256(assignment_path):
+        raise ValueError("apply manifest Champion history hash differs")
+    return assignment, transition_path

@@ -82,10 +82,22 @@ class ShadowPredictionService:
             runs_root=runs_root,
         )
 
-    def predict(self, as_of: str) -> ShadowPredictionResult:
+    def predict(
+        self,
+        as_of: str,
+        *,
+        expected_production_run_id: str | None = None,
+    ) -> ShadowPredictionResult:
         """Score four candidates and publish one immutable six-model bundle."""
 
-        context = self.readiness.require_ready(as_of)
+        context = (
+            self.readiness.require_ready(as_of)
+            if expected_production_run_id is None
+            else self.readiness.require_ready(
+                as_of,
+                expected_production_run_id=expected_production_run_id,
+            )
+        )
         shadow_run_id = self._shadow_run_id(context)
         output_dir = self.reports_root / "shadow_predictions" / as_of
         existing = read_complete_manifest(output_dir)

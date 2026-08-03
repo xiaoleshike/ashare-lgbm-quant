@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -14,7 +15,9 @@ from ashare_quant.config.settings import (
     PaperTradingSettings,
     PathSettings,
 )
+from ashare_quant.governance.recovery import registry_recovery_preview
 from ashare_quant.governance.service import GovernanceService
+from ashare_quant.governance.snapshot import DailyGovernanceSnapshotService
 from ashare_quant.models.feature_lists import feature_list_hash
 from ashare_quant.models.shadow.storage import file_sha256
 from ashare_quant.utils.manifest import atomic_write_json
@@ -357,3 +360,82 @@ def test_governance_cli_returns_nonzero_on_hard_failure(tmp_path: Path) -> None:
     )
     assert main(["--config", str(config), "governance", "validate-production"]) == 1
     assert main(["--config", str(config), "governance", "status"]) == 0
+
+
+def test_registry_recovery_preview_selects_latest_valid_version_without_mutation(
+    tmp_path: Path,
+) -> None:
+    settings, _ = _settings(tmp_path)
+    registry = _model_registry(settings)
+    before = registry.read_bytes()
+    payload = json.loads(before)
+    payload["updated_at"] = "2026-08-02T12:00:00+00:00"
+    payload["registry_version_id"] = "registry_v2"
+    payload["promotion_request_id"] = "request_v2"
+    payload["approval_event_id"] = "approval_v2"
+    versions = settings.paths.models / "registry_versions"
+    version = versions / "registry_v2.json"
+    atomic_write_json(version, payload)
+    (versions / "corrupt.json").write_text("{broken", encoding="utf-8")
+    orphan = dict(payload)
+    orphan["updated_at"] = "2026-08-03T12:00:00+00:00"
+    orphan["registry_version_id"] = "registry_orphan"
+    orphan["promotion_request_id"] = "request_orphan"
+    atomic_write_json(versions / "registry_orphan.json", orphan)
+    assignment = settings.paths.models / "champion_history/assignment_v2.json"
+    atomic_write_json(
+        assignment,
+        {
+            "champion_assignment_id": "assignment_v2",
+            "model_id": "model_a",
+            "registry_version_id": "registry_v2",
+            "activated_at": "2026-08-02T12:00:00+00:00",
+        },
+    )
+    apply_manifest = (
+        settings.paths.models / "promotion_requests/request_v2/apply/apply_v2/manifest.json"
+    )
+    atomic_write_json(
+        apply_manifest,
+        {
+            "registry_version_id": "registry_v2",
+            "registry_file_hash": file_sha256(version),
+            "champion_history_hash": file_sha256(assignment),
+        },
+    )
+
+    preview = registry_recovery_preview(settings.paths.models)
+
+    assert preview.latest_valid_registry == versions / "registry_v2.json"
+    assert preview.champion_model_id == "model_a"
+    assert preview.champion_assignment_id == "assignment_v2"
+    assert preview.transition_manifest == apply_manifest
+    assert preview.corrupted_versions == ("corrupt.json", "registry_orphan.json")
+    assert registry.read_bytes() == before
+
+
+def test_daily_governance_snapshot_is_dated_atomic_and_idempotent(tmp_path: Path) -> None:
+    settings, config = _settings(tmp_path)
+    _model_registry(settings)
+    _production(settings, tmp_path)
+    _monitor(settings)
+    service = DailyGovernanceSnapshotService(
+        settings=settings,
+        config_path=config,
+        project_root=tmp_path,
+    )
+
+    first = service.publish_daily("20260731", production_run_id="run_1")
+    second = service.publish_daily("20260731", production_run_id="run_1")
+
+    assert first.snapshot_id == second.snapshot_id
+    assert [path.name for path in first.artifact_paths] == [
+        "status.json",
+        "validation.json",
+        "recovery.json",
+        "promotion_status.json",
+        "manifest.json",
+    ]
+    assert all(path.is_file() for path in first.artifact_paths)
+    history = settings.paths.reports / "governance/20260731/history"
+    assert [path.name for path in history.iterdir()] == [first.snapshot_id]

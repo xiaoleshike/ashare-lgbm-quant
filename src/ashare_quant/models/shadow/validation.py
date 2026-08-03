@@ -42,24 +42,41 @@ class ShadowReadinessValidator:
         self.reports_root = reports_root
         self.runs_root = runs_root
 
-    def validate(self, as_of: str) -> tuple[ReadinessResult, ShadowContext | None]:
+    def validate(
+        self,
+        as_of: str,
+        *,
+        expected_production_run_id: str | None = None,
+    ) -> tuple[ReadinessResult, ShadowContext | None]:
         """Return structured readiness and a context only when every hard check passes."""
 
         try:
-            context, checks = self._validate(as_of)
+            context, checks = self._validate(as_of, expected_production_run_id)
         except (DataValidationError, OSError, ValueError) as error:
             return ReadinessResult(False, (str(error),), {}), None
         return ReadinessResult(True, (), checks), context
 
-    def require_ready(self, as_of: str) -> ShadowContext:
+    def require_ready(
+        self,
+        as_of: str,
+        *,
+        expected_production_run_id: str | None = None,
+    ) -> ShadowContext:
         """Return a validated context or fail before any model scoring occurs."""
 
-        result, context = self.validate(as_of)
+        result, context = self.validate(
+            as_of,
+            expected_production_run_id=expected_production_run_id,
+        )
         if not result.ready or context is None:
             raise DataValidationError("shadow readiness failed: " + "; ".join(result.hard_failures))
         return context
 
-    def _validate(self, as_of: str) -> tuple[ShadowContext, dict[str, Any]]:
+    def _validate(
+        self,
+        as_of: str,
+        expected_production_run_id: str | None,
+    ) -> tuple[ShadowContext, dict[str, Any]]:
         if len(as_of) != 8 or not as_of.isdigit():
             raise DataValidationError(f"shadow as_of must use YYYYMMDD: {as_of}")
         shadow_settings = self.settings.models.shadow_predictions
@@ -70,6 +87,8 @@ class ShadowReadinessValidator:
             reports_root=self.reports_root,
             runs_root=self.runs_root,
             as_of=as_of,
+            expected_run_id=expected_production_run_id,
+            require_successful_run=expected_production_run_id is None,
         )
         production_run_id = str(summary["run_id"])
         report_dir = self.reports_root / as_of

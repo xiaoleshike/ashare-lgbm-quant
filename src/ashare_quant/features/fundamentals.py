@@ -363,10 +363,9 @@ def prepare_ocf_to_profit(income: DataFrame, cashflow: DataFrame) -> DataFrame:
     income_key = pd.to_numeric(merged["availability_date_income"], errors="coerce")
     cashflow_key = pd.to_numeric(merged["availability_date_cashflow"], errors="coerce")
     merged["availability_date"] = np.maximum(income_key, cashflow_key).astype("Int64").astype(str)
-    merged["ocf_to_profit"] = (
-        pd.to_numeric(merged["n_cashflow_act"], errors="coerce")
-        / pd.to_numeric(merged["n_income"], errors="coerce").replace(0, np.nan)
-    )
+    merged["ocf_to_profit"] = pd.to_numeric(
+        merged["n_cashflow_act"], errors="coerce"
+    ) / pd.to_numeric(merged["n_income"], errors="coerce").replace(0, np.nan)
     return merged[
         [
             "ts_code",

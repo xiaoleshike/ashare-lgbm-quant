@@ -2,10 +2,36 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from ashare_quant.models.promotion.gate_schemas import GateCheck
 from ashare_quant.models.shadow.storage import canonical_payload_hash
+
+
+class PromotionObservationPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    h5: int = Field(default=20, gt=0)
+    h10: int = Field(default=20, gt=0)
+    h20: int = Field(default=20, gt=0)
+    h60: int = Field(default=20, gt=0)
+
+
+class PromotionRequiredEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    executable_validation: bool = True
+    performance_observation: bool = True
+    paper_trading: bool = False
+
+
+class PromotionBlockPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    critical_alert: bool = True
 
 
 class PromotionGatePolicy(BaseModel):
@@ -14,6 +40,10 @@ class PromotionGatePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = 1
+    policy_version: str = "legacy_v1"
+    observation: PromotionObservationPolicy = Field(default_factory=PromotionObservationPolicy)
+    require: PromotionRequiredEvidence = Field(default_factory=PromotionRequiredEvidence)
+    block: PromotionBlockPolicy = Field(default_factory=PromotionBlockPolicy)
     minimum_mature_sessions: int = Field(default=20, gt=0)
     minimum_paper_sessions: int = Field(default=20, gt=0)
     high_turnover_threshold: float = Field(default=1.0, gt=0)
@@ -25,6 +55,26 @@ class PromotionGatePolicy(BaseModel):
 
         return canonical_payload_hash(self.model_dump(mode="json"))
 
+    def mature_sessions_for(self, horizon: int) -> int:
+        """Return the horizon-specific prospective observation requirement."""
+
+        value = getattr(self.observation, f"h{horizon}", None)
+        return int(value) if isinstance(value, int) else self.minimum_mature_sessions
+
+
+def load_promotion_gate_policy(path: Path) -> PromotionGatePolicy:
+    """Load one versioned policy without changing the main production config hash."""
+
+    if not path.is_file():
+        return PromotionGatePolicy()
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"promotion policy must contain a mapping: {path}")
+    promotion = payload.get("promotion")
+    if not isinstance(promotion, dict):
+        raise ValueError("promotion policy lacks `promotion` mapping")
+    return PromotionGatePolicy.model_validate(promotion)
+
 
 def performance_checks(
     *,
@@ -33,6 +83,7 @@ def performance_checks(
     candidate_model_id: str,
     evidence_hash: str,
     policy: PromotionGatePolicy,
+    horizon: int = 5,
 ) -> tuple[GateCheck, ...]:
     """Evaluate prospective maturity and observation coverage."""
 
@@ -78,11 +129,12 @@ def performance_checks(
         )
     )
     mature_sessions = _mature_sessions(metrics, candidate_model_id)
+    required_sessions = policy.mature_sessions_for(horizon)
     checks.append(
         _check(
             "minimum_mature_sessions",
-            "PASS" if mature_sessions >= policy.minimum_mature_sessions else "FAIL",
-            f"mature_sessions={mature_sessions}, required={policy.minimum_mature_sessions}",
+            "PASS" if mature_sessions >= required_sessions else "FAIL",
+            f"mature_sessions={mature_sessions}, required={required_sessions}, horizon={horizon}",
             evidence_hash,
         )
     )

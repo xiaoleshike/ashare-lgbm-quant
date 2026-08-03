@@ -79,6 +79,11 @@ def create_run(
         "elapsed_seconds": None,
         "status": "running",
         "pipeline_type": pipeline_type,
+        "production_run_id": resolved_run_id if pipeline_type == "production_daily" else None,
+        "shadow_run_id": None,
+        "monitor_run_id": None,
+        "research_run_id": None,
+        "governance_snapshot_id": None,
         "as_of": as_of,
         "invocation_source": invocation_source,
         "resolved_as_of": resolved_as_of or as_of,
@@ -136,6 +141,33 @@ def update_run_context(
         raise ValueError("run manifest has invalid output context")
     manifest["artifact_paths"] = list(dict.fromkeys([*current_paths, *artifact_paths]))
     manifest["warnings"] = list(dict.fromkeys([*current_warnings, *warnings]))
+    atomic_write_json(run.manifest_path, manifest)
+    return manifest
+
+
+def update_closed_loop_context(
+    run: ProductionRun,
+    *,
+    shadow_run_id: str | None = None,
+    monitor_run_id: str | None = None,
+    research_run_id: str | None = None,
+    governance_snapshot_id: str | None = None,
+) -> dict[str, Any]:
+    """Record optional closed-loop identities while the production run is active."""
+
+    manifest = _read_running_manifest(run)
+    values = {
+        "shadow_run_id": shadow_run_id,
+        "monitor_run_id": monitor_run_id,
+        "research_run_id": research_run_id,
+        "governance_snapshot_id": governance_snapshot_id,
+    }
+    for key, value in values.items():
+        if value is not None:
+            current = manifest.get(key)
+            if current not in {None, value}:
+                raise ValueError(f"run manifest {key} cannot be rebound")
+            manifest[key] = value
     atomic_write_json(run.manifest_path, manifest)
     return manifest
 

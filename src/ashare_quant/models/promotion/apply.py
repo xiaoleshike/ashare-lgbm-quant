@@ -81,6 +81,19 @@ class PromotionApplyResult:
     idempotent: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class PromotionApplyDryRunResult:
+    """Read-only preview of an approved registry transition."""
+
+    request_id: str
+    current_champion_model_id: str
+    target_champion_model_id: str
+    registry_changes: tuple[dict[str, str], ...]
+    files_affected: tuple[str, ...]
+    registry_hash: str
+    deployment_contract_hash: str
+
+
 class PromotionApplyService:
     """Apply an approved request under production then registry lock ordering."""
 
@@ -219,6 +232,43 @@ class PromotionApplyService:
                         promoted_path.unlink(missing_ok=True)
                     raise
                 return _result(manifest, manifest_path)
+
+    def dry_run(self, request_id: str) -> PromotionApplyDryRunResult:
+        """Validate all apply preconditions and preview changes without acquiring write locks."""
+
+        context = validate_apply_preconditions(
+            request_id=request_id,
+            models_root=self.models_root,
+            reports_root=self.reports_root,
+            now=self.clock(),
+        )
+        changes = (
+            {
+                "model_id": context.champion.model_id,
+                "from_status": "champion",
+                "to_status": "retired",
+            },
+            {
+                "model_id": context.candidate.model_id,
+                "from_status": "candidate",
+                "to_status": "champion",
+            },
+        )
+        request_root = context.bundle.output_dir
+        return PromotionApplyDryRunResult(
+            request_id=request_id,
+            current_champion_model_id=context.champion.model_id,
+            target_champion_model_id=context.candidate.model_id,
+            registry_changes=changes,
+            files_affected=(
+                str(self.models_root / "registry_versions" / "<new_registry_version>.json"),
+                str(self.models_root / "registry.json"),
+                str(self.models_root / "champion_history" / "<new_assignment>.json"),
+                str(request_root / "apply" / "<apply_id>" / "manifest.json"),
+            ),
+            registry_hash=context.registry_hash,
+            deployment_contract_hash=context.bundle.contract.deployment_contract_hash,
+        )
 
     def status(self, request_id: str) -> PromotionApplyResult:
         """Return committed, pending, or missing apply state without mutation."""

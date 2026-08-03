@@ -165,12 +165,7 @@ class ParquetDataStore:
         """Return path for an allowed-empty completion marker."""
 
         entity_part = "all" if entity is None else entity.replace("/", "_").replace(".", "_")
-        return (
-            self.dataset_dir(spec)
-            / "_empty"
-            / f"trade_date={trade_date}"
-            / f"{entity_part}.txt"
-        )
+        return self.dataset_dir(spec) / "_empty" / f"trade_date={trade_date}" / f"{entity_part}.txt"
 
     def _validate_frame(self, spec: DatasetSpec, frame: DataFrame) -> None:
         missing = [column for column in spec.required_columns if column not in frame.columns]

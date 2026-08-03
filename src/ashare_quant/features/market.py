@@ -101,12 +101,9 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
                 / zero_to_null(pl.col("_intraday_range"))
             ).alias("lower_shadow_pct"),
             (
-                (pl.col("adj_close") - pl.col("adj_low"))
-                / zero_to_null(pl.col("_intraday_range"))
+                (pl.col("adj_close") - pl.col("adj_low")) / zero_to_null(pl.col("_intraday_range"))
             ).alias("close_location_value"),
-            (pl.col("adj_open") / zero_to_null(pl.col("_prev_close")) - 1.0).alias(
-                "gap_open_ret"
-            ),
+            (pl.col("adj_open") / zero_to_null(pl.col("_prev_close")) - 1.0).alias("gap_open_ret"),
             (pl.col("ret_1d").abs() / zero_to_null(pl.col("amount"))).alias("amihud_raw"),
         ]
     )
@@ -137,10 +134,10 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
                     pl.col(f"ret_{window}d")
                     - (
                         (pl.col("benchmark_ret_1d") + 1.0)
-                            .log()
-                            .rolling_sum(window_size=window, min_samples=minp)
-                            .over("ts_code")
-                            .exp()
+                        .log()
+                        .rolling_sum(window_size=window, min_samples=minp)
+                        .over("ts_code")
+                        .exp()
                         - 1.0
                     )
                 ).alias(f"market_excess_ret_{window}d")
@@ -170,9 +167,9 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
             [
                 (pl.col("adj_close") / zero_to_null(ma) - 1.0).alias(f"ma_ratio_{window}d"),
                 ((pl.col("adj_close") - ma) / zero_to_null(std)).alias(f"ma_z_{window}d"),
-                (
-                    ma / zero_to_null(pl.col("adj_close").shift(window).over("ts_code")) - 1.0
-                ).alias(f"trend_slope_{window}d"),
+                (ma / zero_to_null(pl.col("adj_close").shift(window).over("ts_code")) - 1.0).alias(
+                    f"trend_slope_{window}d"
+                ),
                 (pl.col("ret_1d") > 0)
                 .cast(pl.Float64)
                 .rolling_mean(window_size=window, min_samples=minp)
@@ -182,22 +179,27 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
                 .rolling_std(window_size=window, min_samples=minp)
                 .over("ts_code")
                 .alias(f"realized_vol_{window}d"),
-                downside_squared
-                .rolling_mean(window_size=window, min_samples=minp)
+                downside_squared.rolling_mean(window_size=window, min_samples=minp)
                 .over("ts_code")
                 .sqrt()
                 .alias(f"downside_vol_{window}d"),
-                (pl.col("vol") / zero_to_null(
-                    pl.col("vol").rolling_mean(window_size=window, min_samples=minp).over("ts_code")
-                )).alias(f"volume_ratio_{window}d"),
-                (pl.col("amount") / zero_to_null(amount_mean)).alias(
-                    f"amount_ratio_{window}d"
-                ),
-                (pl.col("turnover_rate") / zero_to_null(
+                (
+                    pl.col("vol")
+                    / zero_to_null(
+                        pl.col("vol")
+                        .rolling_mean(window_size=window, min_samples=minp)
+                        .over("ts_code")
+                    )
+                ).alias(f"volume_ratio_{window}d"),
+                (pl.col("amount") / zero_to_null(amount_mean)).alias(f"amount_ratio_{window}d"),
+                (
                     pl.col("turnover_rate")
-                    .rolling_mean(window_size=window, min_samples=minp)
-                    .over("ts_code")
-                )).alias(f"turnover_ratio_{window}d"),
+                    / zero_to_null(
+                        pl.col("turnover_rate")
+                        .rolling_mean(window_size=window, min_samples=minp)
+                        .over("ts_code")
+                    )
+                ).alias(f"turnover_ratio_{window}d"),
                 (
                     pl.col("amount")
                     .rolling_std(window_size=window, min_samples=minp)
@@ -229,8 +231,7 @@ def add_market_features_polars(frame: DataFrame, settings: FeatureSettings) -> D
                     f"range_pos_{window}d"
                 ),
                 drawdown.alias(f"drawdown_{window}d"),
-                drawdown
-                .rolling_min(window_size=window, min_samples=minp)
+                drawdown.rolling_min(window_size=window, min_samples=minp)
                 .over("ts_code")
                 .alias(f"max_drawdown_{window}d"),
                 pl.col("amihud_raw")
@@ -302,9 +303,11 @@ def rolling_cov_expr(left: str, right: str, window: int, minimum_periods: int) -
     mean_right = right_expr.rolling_mean(window_size=window, min_samples=minimum_periods).over(
         "ts_code"
     )
-    mean_product = (left_expr * right_expr).rolling_mean(
-        window_size=window, min_samples=minimum_periods
-    ).over("ts_code")
+    mean_product = (
+        (left_expr * right_expr)
+        .rolling_mean(window_size=window, min_samples=minimum_periods)
+        .over("ts_code")
+    )
     count = (
         (left_expr.is_not_null() & right_expr.is_not_null())
         .cast(pl.Float64)
@@ -318,11 +321,11 @@ def rolling_corr_expr(left: str, right: str, window: int, minimum_periods: int) 
     """Return grouped rolling correlation expression."""
 
     cov = rolling_cov_expr(left, right, window, minimum_periods)
-    left_std = pl.col(left).rolling_std(window_size=window, min_samples=minimum_periods).over(
-        "ts_code"
+    left_std = (
+        pl.col(left).rolling_std(window_size=window, min_samples=minimum_periods).over("ts_code")
     )
-    right_std = pl.col(right).rolling_std(window_size=window, min_samples=minimum_periods).over(
-        "ts_code"
+    right_std = (
+        pl.col(right).rolling_std(window_size=window, min_samples=minimum_periods).over("ts_code")
     )
     return cov / zero_to_null(left_std * right_std)
 
@@ -592,8 +595,8 @@ def add_trend_features(frame: DataFrame, settings: FeatureSettings) -> DataFrame
             lambda values, w=window, m=minp: values.rolling(w, min_periods=m).std()
         )
         working[f"downside_vol_{window}d"] = grouped["ret_1d"].transform(
-            lambda values, w=window, m=minp, mar=settings.downside_mar: (
-                rolling_downside_deviation(values, w, m, mar)
+            lambda values, w=window, m=minp, mar=settings.downside_mar: rolling_downside_deviation(
+                values, w, m, mar
             )
         )
     for window in settings.long_windows:

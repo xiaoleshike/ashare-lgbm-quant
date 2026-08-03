@@ -37,6 +37,7 @@ def validate_production_state(
     project_root: Path,
     sources: SourceCatalog,
     now: datetime | None = None,
+    expected_production_run_id: str | None = None,
 ) -> tuple[dict[str, Any], list[GovernanceCheck]]:
     """Validate current production, model, monitor, ledger, and approval integrity."""
 
@@ -44,7 +45,14 @@ def validate_production_state(
         settings=settings, project_root=project_root, sources=sources
     )
     checks: list[GovernanceCheck] = []
-    checks.extend(_validate_pipeline(summary, project_root, sources))
+    checks.extend(
+        _validate_pipeline(
+            summary,
+            project_root,
+            sources,
+            expected_production_run_id=expected_production_run_id,
+        )
+    )
     checks.extend(_validate_registry(settings.paths.models, sources))
     checks.extend(_validate_monitor(settings.paths.reports, summary, sources))
     checks.extend(_validate_paper(settings.paths.paper_trading, settings, sources))
@@ -61,7 +69,11 @@ def validate_production_state(
 
 
 def _validate_pipeline(
-    summary: dict[str, Any], project_root: Path, sources: SourceCatalog
+    summary: dict[str, Any],
+    project_root: Path,
+    sources: SourceCatalog,
+    *,
+    expected_production_run_id: str | None,
 ) -> list[GovernanceCheck]:
     checks: list[GovernanceCheck] = []
     production = summary["production"]
@@ -95,7 +107,12 @@ def _validate_pipeline(
         )
     else:
         run = sources.json(Path(run_path))
-        valid = run.get("status") == "success" and run.get("run_id") == payload.get("run_id")
+        status_valid = run.get("status") == "success" or (
+            expected_production_run_id is not None
+            and run.get("status") == "running"
+            and run.get("run_id") == expected_production_run_id
+        )
+        valid = status_valid and run.get("run_id") == payload.get("run_id")
         checks.append(
             GovernanceCheck(
                 name="pipeline.run_manifest",

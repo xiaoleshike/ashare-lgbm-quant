@@ -52,6 +52,7 @@ def publish_gate_result(
             request_id=result.request_id,
             gate_identity=gate_identity,
             status=result.status,
+            policy_version=result.policy_version,
             policy_hash=result.policy_hash,
             source_request_manifest_hash=source_request_manifest_hash,
             artifact_hashes=hashes,
@@ -78,7 +79,12 @@ def read_gate_result(output_dir: Path) -> tuple[GateResult, GateManifest] | None
         result = GateResult.model_validate(_load_json(output_dir / "gate_result.json"))
     except ValidationError as error:
         raise DataValidationError(f"invalid promotion gate schema: {error}") from error
-    if result.request_id != manifest.request_id or result.status != manifest.status:
+    if (
+        result.request_id != manifest.request_id
+        or result.status != manifest.status
+        or result.policy_version != manifest.policy_version
+        or result.policy_hash != manifest.policy_hash
+    ):
         raise DataValidationError("promotion gate result and manifest identities differ")
     for name, digest in manifest.artifact_hashes.items():
         if file_sha256(output_dir / name) != digest:

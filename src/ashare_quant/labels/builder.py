@@ -271,14 +271,16 @@ def attach_entry_exit_universe(frame: DataFrame, universe: DataFrame) -> DataFra
             "is_limit_up": "entry_is_limit_up",
             "is_suspended": "entry_is_suspended",
         }
-    )[[
-        "entry_date",
-        "ts_code",
-        "entry_in_base_universe",
-        "entry_can_buy",
-        "entry_is_limit_up",
-        "entry_is_suspended",
-    ]]
+    )[
+        [
+            "entry_date",
+            "ts_code",
+            "entry_in_base_universe",
+            "entry_can_buy",
+            "entry_is_limit_up",
+            "entry_is_suspended",
+        ]
+    ]
     exit_flags = universe_flags.rename(
         columns={
             "trade_date": "exit_date",
@@ -287,14 +289,16 @@ def attach_entry_exit_universe(frame: DataFrame, universe: DataFrame) -> DataFra
             "is_limit_down": "exit_is_limit_down",
             "is_suspended": "exit_is_suspended",
         }
-    )[[
-        "exit_date",
-        "ts_code",
-        "exit_in_base_universe",
-        "exit_can_sell",
-        "exit_is_limit_down",
-        "exit_is_suspended",
-    ]]
+    )[
+        [
+            "exit_date",
+            "ts_code",
+            "exit_in_base_universe",
+            "exit_can_sell",
+            "exit_is_limit_down",
+            "exit_is_suspended",
+        ]
+    ]
     merged = frame.merge(entry_flags, on=["entry_date", "ts_code"], how="left")
     return merged.merge(exit_flags, on=["exit_date", "ts_code"], how="left")
 
@@ -307,9 +311,9 @@ def attach_prices_and_benchmark(
     entry_prices = prices.rename(
         columns={"trade_date": "entry_date", "adjusted_open": "entry_price"}
     )[["ts_code", "entry_date", "entry_price"]]
-    exit_prices = prices.rename(
-        columns={"trade_date": "exit_date", "adjusted_open": "exit_price"}
-    )[["ts_code", "exit_date", "exit_price"]]
+    exit_prices = prices.rename(columns={"trade_date": "exit_date", "adjusted_open": "exit_price"})[
+        ["ts_code", "exit_date", "exit_price"]
+    ]
     benchmark_entry = benchmark.rename(
         columns={"trade_date": "entry_date", "benchmark_open": "benchmark_entry_price"}
     )[["entry_date", "benchmark_entry_price"]]
@@ -346,24 +350,28 @@ def attach_label_inputs_duckdb(
             "in_base_universe": "entry_in_base_universe",
             "is_suspended": "entry_is_suspended",
         }
-    )[[
-        "entry_date",
-        "ts_code",
-        "entry_in_base_universe",
-        "entry_is_suspended",
-    ]]
+    )[
+        [
+            "entry_date",
+            "ts_code",
+            "entry_in_base_universe",
+            "entry_is_suspended",
+        ]
+    ]
     exit_flags = universe_flags.rename(
         columns={
             "trade_date": "exit_date",
             "in_base_universe": "exit_in_base_universe",
             "is_suspended": "exit_is_suspended",
         }
-    )[[
-        "exit_date",
-        "ts_code",
-        "exit_in_base_universe",
-        "exit_is_suspended",
-    ]]
+    )[
+        [
+            "exit_date",
+            "ts_code",
+            "exit_in_base_universe",
+            "exit_is_suspended",
+        ]
+    ]
     entry_prices = prices.rename(
         columns={
             "trade_date": "entry_date",
@@ -505,12 +513,14 @@ def assign_label_availability(frame: DataFrame, settings: LabelSettings) -> Data
     working["benchmark_forward_ret"] = pd.NA
     working["future_excess_ret"] = pd.NA
     if bool(available.any()):
-        stock_forward_ret = working.loc[available, "exit_price"] / working.loc[
-            available, "entry_price"
-        ] - 1.0
-        benchmark_forward_ret = working.loc[available, "benchmark_exit_price"] / working.loc[
-            available, "benchmark_entry_price"
-        ] - 1.0
+        stock_forward_ret = (
+            working.loc[available, "exit_price"] / working.loc[available, "entry_price"] - 1.0
+        )
+        benchmark_forward_ret = (
+            working.loc[available, "benchmark_exit_price"]
+            / working.loc[available, "benchmark_entry_price"]
+            - 1.0
+        )
         working.loc[available, "stock_forward_ret"] = stock_forward_ret
         working.loc[available, "benchmark_forward_ret"] = benchmark_forward_ret
         working.loc[available, "future_excess_ret"] = stock_forward_ret - benchmark_forward_ret
@@ -569,11 +579,7 @@ def usable_limit_prices(up_limit: pd.Series, down_limit: pd.Series) -> pd.Series
 
     no_price_limit = up_limit.eq(99999.99) & down_limit.eq(0)
     return (
-        up_limit.notna()
-        & down_limit.notna()
-        & up_limit.gt(0)
-        & down_limit.gt(0)
-        & ~no_price_limit
+        up_limit.notna() & down_limit.notna() & up_limit.gt(0) & down_limit.gt(0) & ~no_price_limit
     )
 
 
@@ -908,9 +914,9 @@ def lookup_limit_prices(
     if match.empty:
         return None, None
     up_limit = pd.to_numeric(pd.Series([match.iloc[-1].get("up_limit")]), errors="coerce").iloc[0]
-    down_limit = pd.to_numeric(
-        pd.Series([match.iloc[-1].get("down_limit")]), errors="coerce"
-    ).iloc[0]
+    down_limit = pd.to_numeric(pd.Series([match.iloc[-1].get("down_limit")]), errors="coerce").iloc[
+        0
+    ]
     return (
         None if pd.isna(up_limit) else float(up_limit),
         None if pd.isna(down_limit) else float(down_limit),

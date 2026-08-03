@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Literal
 
 from ashare_quant.config.settings import AppSettings
-from ashare_quant.governance.recovery import validate_recovery_state
+from ashare_quant.governance.recovery import (
+    RegistryRecoveryPreview,
+    registry_recovery_preview,
+    validate_recovery_state,
+)
 from ashare_quant.governance.reporting import GovernanceReportPublisher
 from ashare_quant.governance.schemas import GovernanceCheck, GovernanceReport, overall_status
 from ashare_quant.governance.status import SourceCatalog, collect_governance_status
@@ -72,6 +76,11 @@ class GovernanceService:
         sources = SourceCatalog()
         summary, checks = validate_recovery_state(settings=self.settings, sources=sources)
         return self._publish("recovery", summary, checks, sources)
+
+    def recover_registry_dry_run(self) -> RegistryRecoveryPreview:
+        """Return the latest recoverable Registry identity without restoring bytes."""
+
+        return registry_recovery_preview(self.settings.paths.models)
 
     def _publish(
         self,

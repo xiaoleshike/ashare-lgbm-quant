@@ -1,0 +1,18 @@
+promotion:
+  schema_version: 1
+  policy_version: v2
+  observation:
+    h5: 60
+    h10: 60
+    h20: 90
+    h60: 120
+  require:
+    executable_validation: true
+    performance_observation: true
+    paper_trading: true
+  block:
+    critical_alert: true
+  minimum_mature_sessions: 20
+  minimum_paper_sessions: 20
+  high_turnover_threshold: 1.0
+  expected_execution_rule: next_open

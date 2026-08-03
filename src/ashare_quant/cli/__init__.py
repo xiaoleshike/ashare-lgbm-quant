@@ -32,7 +32,7 @@ from ashare_quant.features import (
     FeatureValidationResult,
     FeatureValidator,
 )
-from ashare_quant.governance import GovernanceService
+from ashare_quant.governance import DailyGovernanceSnapshotService, GovernanceService
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
 from ashare_quant.models import (
@@ -49,11 +49,14 @@ from ashare_quant.models import (
     ProductionRankerTrainer,
     PromotionApplyService,
     PromotionEvidencePaths,
+    PromotionEvidenceResolver,
     PromotionGateEngine,
+    PromotionGatePolicy,
     PromotionGovernanceService,
     PurgedWalkForwardPlanner,
     RankerBaselineRunner,
     RollbackService,
+    load_promotion_gate_policy,
 )
 from ashare_quant.models.shadow import ShadowPredictionService
 from ashare_quant.monitoring import (
@@ -382,6 +385,10 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     promotion_create.add_argument("--model-id", required=True)
     promotion_create.add_argument("--evidence-cutoff-date", required=True)
     promotion_create.add_argument("--deployment-slot", default="daily_stock_ranker")
+    promotion_prepare = promotion_commands.add_parser(
+        "prepare", help="Discover and freeze immutable candidate promotion evidence."
+    )
+    promotion_prepare.add_argument("--model-id", required=True)
     for argument in (
         "challenger-evaluation",
         "executable-validation",
@@ -401,6 +408,8 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
             command_name, help=f"{command_name.title()} an approved promotion request."
         )
         command.add_argument("--request-id", required=True)
+        if command_name == "apply":
+            command.add_argument("--dry-run", action="store_true")
     rollback_create = promotion_commands.add_parser(
         "rollback-create", help="Create an immutable historical-Champion rollback request."
     )
@@ -787,6 +796,10 @@ def add_governance_parser(
     commands.add_parser(
         "validate-recovery", help="Validate registry and interrupted-run recovery inputs."
     )
+    recover = commands.add_parser(
+        "recover-registry", help="Preview the latest recoverable immutable Registry version."
+    )
+    recover.add_argument("--dry-run", action="store_true", required=True)
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -1243,6 +1256,19 @@ def run_models_command(args: argparse.Namespace) -> int:
             reports_root=reports_root,
         )
         try:
+            if args.models_promotion_command == "prepare":
+                prepared = PromotionEvidenceResolver(
+                    models_root=output_root,
+                    reports_root=reports_root,
+                ).prepare(args.model_id)
+                print(
+                    f"promotion_prepared: request_id={prepared.request_id} "
+                    f"candidate={prepared.candidate_model_id} "
+                    f"cutoff={prepared.evidence_cutoff_date} "
+                    f"idempotent={prepared.idempotent} "
+                    f"manifest={prepared.evidence_manifest_path}"
+                )
+                return 0
             if args.models_promotion_command == "rollback-create":
                 reason_path = Path(args.reason_file)
                 if not reason_path.is_file():
@@ -1308,9 +1334,17 @@ def run_models_command(args: argparse.Namespace) -> int:
                 )
                 return 0
             if args.models_promotion_command == "validate":
+                resolved_evidence = (
+                    output_root / "promotion_requests" / args.request_id / "evidence_manifest.json"
+                )
                 gate_result = PromotionGateEngine(
                     models_root=output_root,
                     reports_root=reports_root,
+                    policy=(
+                        load_promotion_gate_policy(Path("config/promotion_policy.yaml"))
+                        if resolved_evidence.is_file()
+                        else PromotionGatePolicy()
+                    ),
                 ).evaluate(args.request_id)
                 print(
                     f"promotion_gate: request_id={gate_result.request_id} "
@@ -1324,6 +1358,22 @@ def run_models_command(args: argparse.Namespace) -> int:
                     models_root=output_root,
                     reports_root=reports_root,
                 )
+                if args.models_promotion_command == "apply" and args.dry_run:
+                    preview = apply_service.dry_run(args.request_id)
+                    print(
+                        f"promotion_apply_dry_run: request_id={preview.request_id} "
+                        f"current={preview.current_champion_model_id} "
+                        f"target={preview.target_champion_model_id} "
+                        f"registry_hash={preview.registry_hash}"
+                    )
+                    for change in preview.registry_changes:
+                        print(
+                            f"  model={change['model_id']} "
+                            f"status={change['from_status']}->{change['to_status']}"
+                        )
+                    for path in preview.files_affected:
+                        print(f"  would_write={path}")
+                    return 0
                 apply_result = (
                     apply_service.apply(args.request_id)
                     if args.models_promotion_command == "apply"
@@ -2121,6 +2171,33 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
             )
             if settings.paper_trading.enabled
             else None,
+            shadow_prediction=ShadowPredictionService(
+                settings=settings,
+                config_path=config_path,
+                registry=ModelRegistry(models_root),
+                processed_root=settings.paths.processed_data,
+                reports_root=reports_root,
+            ),
+            monitoring=MonitoringService(
+                settings=settings,
+                config_path=config_path,
+                reports_root=reports_root,
+                paper_root=settings.paths.paper_trading,
+            ),
+            research_agent=ResearchAgentService(
+                settings=settings.research.agent,
+                config_path=config_path,
+                reports_root=reports_root,
+            ),
+            governance_snapshot=DailyGovernanceSnapshotService(
+                settings=settings,
+                config_path=config_path,
+                project_root=(
+                    config_path.resolve().parent.parent
+                    if config_path.resolve().parent.name == "config"
+                    else Path.cwd().resolve()
+                ),
+            ),
         )
         scheduler = ProductionScheduler(
             settings=settings,
@@ -2589,6 +2666,17 @@ def run_governance_command(args: argparse.Namespace) -> int:
             result = service.status()
             _print_governance_status(result.report.summary)
             print(f"report: {result.report_path}")
+            return 0
+        if args.governance_command == "recover-registry":
+            preview = service.recover_registry_dry_run()
+            print("Registry Recovery Dry Run")
+            print(f"latest_valid_registry: {preview.latest_valid_registry}")
+            print(f"registry_hash: {preview.registry_hash}")
+            print(f"champion_model_id: {preview.champion_model_id}")
+            print(f"champion_assignment_id: {preview.champion_assignment_id}")
+            print(f"registry_version_id: {preview.registry_version_id}")
+            print(f"transition_manifest: {preview.transition_manifest}")
+            print(f"corrupted_versions: {list(preview.corrupted_versions)}")
             return 0
         if args.governance_command == "validate-production":
             result = service.validate_production()

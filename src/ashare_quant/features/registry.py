@@ -371,10 +371,10 @@ def build_feature_registry() -> tuple[FeatureSpec, ...]:
 def disable_unsafe_feature(spec: FeatureSpec) -> FeatureSpec:
     """Mark features that lack production-grade PIT safety as disabled."""
 
-    depends_on_industry = (
-        spec.family in {"industry_relative_momentum", "industry_neutral_percentile_ranks"}
-        or any("industry_excess_ret_" in source for source in spec.required_source_columns)
-    )
+    depends_on_industry = spec.family in {
+        "industry_relative_momentum",
+        "industry_neutral_percentile_ranks",
+    } or any("industry_excess_ret_" in source for source in spec.required_source_columns)
     depends_on_fina_indicator = "fina_indicator" in spec.source_datasets
     if depends_on_industry:
         return replace(

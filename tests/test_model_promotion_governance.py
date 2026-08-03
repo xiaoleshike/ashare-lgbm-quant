@@ -21,11 +21,13 @@ from ashare_quant.models.promotion import (
     HumanReviewService,
     PromotionApplyService,
     PromotionEvidencePaths,
+    PromotionEvidenceResolver,
     PromotionGateEngine,
     PromotionGovernanceResult,
     PromotionGovernanceService,
 )
 from ashare_quant.models.promotion import apply as promotion_apply_module
+from ashare_quant.models.promotion.gate_rules import PromotionGatePolicy
 from ashare_quant.models.promotion.storage import PromotionStorage
 from ashare_quant.models.registry import ModelRegistry
 from ashare_quant.models.shadow.storage import file_sha256
@@ -236,6 +238,73 @@ def test_create_is_immutable_idempotent_and_does_not_change_registry(tmp_path: P
     assert registry.registry_path.read_bytes() == registry_before
     assert registry.get_champion().model_id == champion_id  # type: ignore[union-attr]
     assert (first.output_dir / "manifest.json").is_file()
+
+
+def test_evidence_resolver_discovers_and_hash_binds_immutable_sources(tmp_path: Path) -> None:
+    models_root = tmp_path / "models"
+    reports_root = tmp_path / "reports"
+    registry, champion_id, candidate_id = _setup_registry(models_root)
+    registry_before = registry.registry_path.read_bytes()
+    _evidence(reports_root, candidate_id, champion_id)
+    paper = _write(
+        reports_root / "paper_trading_daily/20260729/summary.json",
+        {
+            "schema_version": 1,
+            "artifact_name": "paper_trading_daily_report",
+            "as_of": "20260729",
+            "portfolio_count": 4,
+        },
+    )
+
+    resolver = PromotionEvidenceResolver(models_root=models_root, reports_root=reports_root)
+    first = resolver.prepare(candidate_id)
+    second = resolver.prepare(candidate_id)
+    payload = json.loads(first.evidence_manifest_path.read_text(encoding="utf-8"))
+
+    assert second.idempotent is True
+    assert payload["candidate_model_id"] == candidate_id
+    assert {item["evidence_type"] for item in payload["sources"]} == {
+        "alerts",
+        "challenger_evaluation",
+        "executable_validation",
+        "monitoring_summary",
+        "paper_trading",
+        "performance_observation",
+        "shadow_prediction",
+    }
+    assert registry.registry_path.read_bytes() == registry_before
+
+    paper.write_text('{"artifact_name":"paper_trading_daily_report"}', encoding="utf-8")
+    with pytest.raises(DataValidationError, match="source changed|identity differs"):
+        resolver.prepare(candidate_id)
+
+
+def test_gate_policy_hash_changes_when_version_or_threshold_changes() -> None:
+    first = PromotionGatePolicy(policy_version="v1")
+    second = PromotionGatePolicy(policy_version="v2")
+    stricter = PromotionGatePolicy(
+        policy_version="v1",
+        observation={"h5": 60, "h10": 60, "h20": 90, "h60": 120},
+    )
+
+    assert first.policy_hash != second.policy_hash
+    assert first.policy_hash != stricter.policy_hash
+
+
+def test_gate_policy_change_invalidates_existing_immutable_gate_result(tmp_path: Path) -> None:
+    _, request, models_root, reports_root = _create(tmp_path)
+    PromotionGateEngine(
+        models_root=models_root,
+        reports_root=reports_root,
+        policy=PromotionGatePolicy(policy_version="v1"),
+    ).evaluate(request.request_id)
+
+    with pytest.raises(DataValidationError, match="different immutable evaluation identity"):
+        PromotionGateEngine(
+            models_root=models_root,
+            reports_root=reports_root,
+            policy=PromotionGatePolicy(policy_version="v2"),
+        ).evaluate(request.request_id)
 
 
 def test_evidence_cutoff_rejects_newer_source(tmp_path: Path) -> None:
@@ -848,6 +917,39 @@ def test_approved_request_applies_with_versions_and_champion_history(tmp_path: P
     assert json.loads(history.read_text(encoding="utf-8"))["previous_champion_model_id"] == (
         "champion_model"
     )
+
+
+def test_apply_dry_run_validates_without_any_registry_or_history_mutation(tmp_path: Path) -> None:
+    request, models_root, reports_root, reviewed_at = _approved_ready(tmp_path)
+    registry_path = models_root / "registry.json"
+    before = registry_path.read_bytes()
+    service = _apply_service(
+        tmp_path,
+        models_root,
+        reports_root,
+        clock=lambda: reviewed_at + timedelta(minutes=1),
+    )
+
+    preview = service.dry_run(request.request_id)
+
+    assert preview.current_champion_model_id == "champion_model"
+    assert preview.target_champion_model_id == "challenger_h5"
+    assert preview.registry_changes == (
+        {
+            "model_id": "champion_model",
+            "from_status": "champion",
+            "to_status": "retired",
+        },
+        {
+            "model_id": "challenger_h5",
+            "from_status": "candidate",
+            "to_status": "champion",
+        },
+    )
+    assert registry_path.read_bytes() == before
+    assert not (models_root / "registry_versions").exists()
+    assert not (models_root / "champion_history").exists()
+    assert not (request.output_dir / "apply").exists()
 
 
 def test_rejected_or_expired_approval_cannot_apply(tmp_path: Path) -> None:

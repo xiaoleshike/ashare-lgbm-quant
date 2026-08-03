@@ -45,6 +45,12 @@ non-trading days, and does not repeat an already valid publication. The full-dat
 timer runs Wednesday and Sunday at 12:00 and resolves its end date from
 `trade_cal`; it performs all-dataset update, snapshot refresh, and gap repair.
 
+The production command now attempts the complete closed loop after its hard Champion path:
+Shadow Prediction, Monitoring, Research Agent, and a dated Governance snapshot. Those components
+are soft-failure isolated and are also safe to schedule as idempotent recovery checks at 19:00 and
+19:15. Weekly operations should run `governance validate-production` and
+`governance validate-recovery`; no timer may approve, apply, or roll back a model.
+
 ## Operations
 
 Manual production execution:
