@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.models.promotion.gate_rules import load_promotion_gate_policy
 from ashare_quant.retraining.configuration import RetrainingPolicy, load_retraining_policy
 from ashare_quant.retraining.evaluator import evaluate_sources, select_manual_target
 from ashare_quant.retraining.schemas import (
@@ -28,16 +29,21 @@ class RetrainingTriggerService:
         reports_root: Path,
         config_path: Path,
         policy_path: Path,
+        promotion_policy_path: Path | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.reports_root = reports_root
         self.config_path = config_path
         self.policy_path = policy_path
         self.policy: RetrainingPolicy = load_retraining_policy(policy_path)
+        self.promotion_policy = load_promotion_gate_policy(
+            promotion_policy_path or Path("config/promotion_policy.yaml")
+        )
         self.storage = RetrainingRequestStorage(
             reports_root=reports_root,
             config_path=config_path,
             policy=self.policy,
+            promotion_policy=self.promotion_policy,
             clock=clock,
         )
 
@@ -101,6 +107,14 @@ class RetrainingTriggerService:
             if request.policy_version != self.policy.policy_version:
                 raise DataValidationError(
                     "retraining policy version changed after request creation"
+                )
+            if request.promotion_policy_hash != self.promotion_policy.policy_hash:
+                raise DataValidationError(
+                    "promotion policy hash changed after retraining request creation"
+                )
+            if request.promotion_policy_version != self.promotion_policy.policy_version:
+                raise DataValidationError(
+                    "promotion policy version changed after retraining request creation"
                 )
             validate_recorded_evidence(self.reports_root, request.evidence)
             if evidence_hash(request.evidence) != request.evidence_hash:

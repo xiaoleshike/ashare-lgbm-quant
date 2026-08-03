@@ -15,6 +15,7 @@ import pandas as pd
 from pydantic import ValidationError
 
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.models.promotion.gate_rules import PromotionGatePolicy
 from ashare_quant.models.shadow.storage import canonical_payload_hash, file_sha256
 from ashare_quant.monitoring.alerts.storage import replace_targets_atomically
 from ashare_quant.retraining.configuration import RetrainingPolicy
@@ -55,11 +56,13 @@ class RetrainingRequestStorage:
         reports_root: Path,
         config_path: Path,
         policy: RetrainingPolicy,
+        promotion_policy: PromotionGatePolicy,
         clock: Clock | None = None,
     ) -> None:
         self.reports_root = reports_root
         self.config_path = config_path
         self.policy = policy
+        self.promotion_policy = promotion_policy
         self.clock = clock or (lambda: datetime.now(UTC))
         self.root = reports_root / "retraining"
         self.requests_root = self.root / "requests"
@@ -83,6 +86,7 @@ class RetrainingRequestStorage:
             "policy_hash": self.policy.policy_hash,
             "evidence_hash": evidence_hash,
             "generation_mode": generation_mode,
+            "promotion_policy_hash": self.promotion_policy.policy_hash,
         }
         request_id = f"training_{canonical_payload_hash(identity)[:24]}"
         output_dir = self.requests_root / request_id
@@ -97,6 +101,7 @@ class RetrainingRequestStorage:
                 or request.policy_hash != self.policy.policy_hash
                 or request.evidence_hash != evidence_hash
                 or request.generation_mode != generation_mode
+                or request.promotion_policy_hash != self.promotion_policy.policy_hash
             ):
                 raise DataValidationError("immutable retraining request identity differs")
             if request_id not in set(self.history()["request_id"].astype(str)):
@@ -131,6 +136,8 @@ class RetrainingRequestStorage:
             evidence_hash=evidence_hash,
             policy_hash=self.policy.policy_hash,
             policy_version=self.policy.policy_version,
+            promotion_policy_hash=self.promotion_policy.policy_hash,
+            promotion_policy_version=self.promotion_policy.policy_version,
             generation_mode=cast(Any, generation_mode),
         )
         self._publish(request)
@@ -170,6 +177,8 @@ class RetrainingRequestStorage:
             or manifest.evidence_hash != request.evidence_hash
             or manifest.policy_hash != request.policy_hash
             or manifest.policy_version != request.policy_version
+            or manifest.promotion_policy_hash != request.promotion_policy_hash
+            or manifest.promotion_policy_version != request.promotion_policy_version
             or manifest.generated_at != request.created_at
         ):
             raise DataValidationError("retraining request and manifest identities differ")
@@ -196,13 +205,23 @@ class RetrainingRequestStorage:
         ]
         if matches.empty:
             return None
-        latest = str(matches.iloc[-1]["created_at"])
-        created = datetime.fromisoformat(latest).astimezone(UTC)
-        return (
-            latest
-            if self.clock().astimezone(UTC) < created + timedelta(days=self.policy.cooldown_days)
-            else None
-        )
+        for row in reversed(list(matches.to_dict("records"))):
+            request_id = str(row["request_id"])
+            stored = self.read(request_id)
+            if stored is None:
+                raise DataValidationError(f"retraining history request is missing: {request_id}")
+            request, _ = stored
+            if request.promotion_policy_hash != self.promotion_policy.policy_hash:
+                continue
+            latest = str(row["created_at"])
+            created = datetime.fromisoformat(latest).astimezone(UTC)
+            return (
+                latest
+                if self.clock().astimezone(UTC)
+                < created + timedelta(days=self.policy.cooldown_days)
+                else None
+            )
+        return None
 
     def _publish(self, request: TrainingRequest) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -228,6 +247,8 @@ class RetrainingRequestStorage:
                 evidence_hash=request.evidence_hash,
                 policy_hash=request.policy_hash,
                 policy_version=request.policy_version,
+                promotion_policy_hash=request.promotion_policy_hash,
+                promotion_policy_version=request.promotion_policy_version,
                 git_commit=git["commit"],
                 git_dirty=bool(git["dirty"]),
                 config_hash=config_hash(self.config_path),

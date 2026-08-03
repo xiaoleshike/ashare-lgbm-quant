@@ -152,6 +152,29 @@ def test_cooldown_blocks_new_evidence_but_not_idempotent_identity(tmp_path: Path
     assert len(service.status()) == 1
 
 
+def test_changed_promotion_policy_is_not_blocked_by_old_policy_cooldown(
+    tmp_path: Path,
+) -> None:
+    retraining_fixture(tmp_path, h10_alpha=0.5)
+    promotion_path = tmp_path / "config/promotion_policy.yaml"
+    promotion_path.write_text("promotion:\n  policy_version: v2\n", encoding="utf-8")
+    arguments = {
+        "reports_root": tmp_path / "reports",
+        "config_path": tmp_path / "config/default.yaml",
+        "policy_path": tmp_path / "config/retraining_policy.yaml",
+        "promotion_policy_path": promotion_path,
+    }
+    first_service = RetrainingTriggerService(**arguments)
+    first = _decision(first_service.evaluate(AS_OF), H10)
+    promotion_path.write_text("promotion:\n  policy_version: v3\n", encoding="utf-8")
+    second_service = RetrainingTriggerService(**arguments)
+    second = _decision(second_service.evaluate(AS_OF), H10)
+
+    assert first.request_id != second.request_id
+    assert second.status == "TRIGGERED"
+    assert len(second_service.status()) == 2
+
+
 def test_atomic_publish_failure_leaves_no_request_or_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

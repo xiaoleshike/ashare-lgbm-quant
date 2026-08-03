@@ -93,6 +93,7 @@ from ashare_quant.research import (
 )
 from ashare_quant.research.agent import ResearchAgentService
 from ashare_quant.retraining import RetrainingTriggerService
+from ashare_quant.retraining.readiness import RetrainingExecutionReadinessValidator
 from ashare_quant.strategy import CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
@@ -823,6 +824,14 @@ def add_retraining_parser(
     commands.add_parser("status", help="List immutable training-request history.")
     validate = commands.add_parser("validate", help="Validate one request and active policy.")
     validate.add_argument("--request-id", required=True)
+    readiness = commands.add_parser(
+        "readiness", help="Validate governance before any retraining execution."
+    )
+    readiness.add_argument("--as-of", required=True, help="Production date in YYYYMMDD.")
+    readiness.add_argument(
+        "--request-id",
+        help="Explicit request identity; required when a date has multiple requests.",
+    )
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -2211,6 +2220,7 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
                 reports_root=reports_root,
                 config_path=config_path,
                 policy_path=_retraining_policy_path(config_path),
+                promotion_policy_path=_promotion_policy_path(config_path),
             ),
             research_agent=ResearchAgentService(
                 settings=settings.research.agent,
@@ -2225,6 +2235,7 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
                     if config_path.resolve().parent.name == "config"
                     else Path.cwd().resolve()
                 ),
+                promotion_policy_path=_promotion_policy_path(config_path),
             ),
         )
         scheduler = ProductionScheduler(
@@ -2732,7 +2743,29 @@ def run_retraining_command(args: argparse.Namespace) -> int:
             reports_root=settings.paths.reports,
             config_path=config_path,
             policy_path=_retraining_policy_path(config_path),
+            promotion_policy_path=_promotion_policy_path(config_path),
         )
+        if args.retraining_command == "readiness":
+            project_root = (
+                config_path.resolve().parent.parent
+                if config_path.resolve().parent.name == "config"
+                else Path.cwd().resolve()
+            )
+            result = RetrainingExecutionReadinessValidator(
+                settings=settings,
+                config_path=config_path,
+                project_root=project_root,
+                retraining_policy_path=_retraining_policy_path(config_path),
+                promotion_policy_path=_promotion_policy_path(config_path),
+            ).validate(args.as_of, request_id=args.request_id)
+            print(
+                f"retraining_readiness: status={result.report.status} "
+                f"as_of={result.report.as_of} request_id={result.report.request_id} "
+                f"output={result.output_dir}"
+            )
+            for check in result.report.check_details:
+                print(f"  {check.status} {check.name}: {check.message}")
+            return 0 if result.report.status == "READY" else 1
         if args.retraining_command == "evaluate":
             evaluation_result = service.evaluate(args.as_of)
             print(
@@ -2796,6 +2829,12 @@ def _retraining_policy_path(config_path: Path) -> Path:
         if resolved.parent.name == "config"
         else Path("config/retraining_policy.yaml")
     )
+
+
+def _promotion_policy_path(config_path: Path) -> Path:
+    resolved = config_path.resolve()
+    candidate = resolved.parent / "promotion_policy.yaml"
+    return candidate if candidate.is_file() else Path("config/promotion_policy.yaml")
 
 
 def _print_governance_status(summary: dict[str, object]) -> None:

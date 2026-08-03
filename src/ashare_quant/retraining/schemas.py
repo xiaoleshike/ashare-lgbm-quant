@@ -71,7 +71,7 @@ class TrainingRequest(BaseModel):
     schema_version: Literal[1] = 1
     artifact_name: Literal["governed_training_request"] = "governed_training_request"
     request_id: str
-    status: Literal["CREATED"] = "CREATED"
+    status: Literal["CREATED", "VALIDATED"] = "CREATED"
     created_at: str
     as_of: str
     target_models: tuple[TrainingTarget, ...] = Field(min_length=1, max_length=1)
@@ -80,6 +80,8 @@ class TrainingRequest(BaseModel):
     evidence_hash: str = Field(min_length=64, max_length=64)
     policy_hash: str = Field(min_length=64, max_length=64)
     policy_version: str
+    promotion_policy_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    promotion_policy_version: str | None = None
     generation_mode: Literal["automatic", "manual"]
     training_allowed: Literal[True] = True
     promotion_allowed: Literal[False] = False
@@ -103,6 +105,8 @@ class TrainingRequestManifest(BaseModel):
     evidence_hash: str = Field(min_length=64, max_length=64)
     policy_hash: str = Field(min_length=64, max_length=64)
     policy_version: str
+    promotion_policy_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    promotion_policy_version: str | None = None
     git_commit: str | None
     git_dirty: bool
     config_hash: str | None

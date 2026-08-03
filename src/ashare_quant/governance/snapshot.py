@@ -16,6 +16,7 @@ from ashare_quant.governance.recovery import validate_recovery_state
 from ashare_quant.governance.schemas import GovernanceCheck, GovernanceReport, overall_status
 from ashare_quant.governance.status import SourceCatalog, collect_governance_status
 from ashare_quant.governance.validation import validate_production_state
+from ashare_quant.models.promotion.gate_rules import load_promotion_gate_policy
 from ashare_quant.models.shadow.storage import canonical_payload_hash, file_sha256
 from ashare_quant.utils.manifest import atomic_write_json
 
@@ -36,13 +37,16 @@ class DailyGovernanceSnapshotService:
         settings: AppSettings,
         config_path: Path,
         project_root: Path,
+        promotion_policy_path: Path | None = None,
     ) -> None:
         self.settings = settings
         self.config_path = config_path
         self.project_root = project_root
+        self.promotion_policy_path = promotion_policy_path or Path("config/promotion_policy.yaml")
 
     def publish_daily(self, as_of: str, *, production_run_id: str) -> GovernanceSnapshotResult:
         generated_at = datetime.now(UTC).isoformat()
+        promotion_policy = load_promotion_gate_policy(self.promotion_policy_path)
         status_sources = SourceCatalog()
         status_summary, status_checks = collect_governance_status(
             settings=self.settings,
@@ -99,6 +103,8 @@ class DailyGovernanceSnapshotService:
                 "artifact_name": "governance_promotion_status",
                 "as_of": as_of,
                 "production_run_id": production_run_id,
+                "promotion_policy_version": promotion_policy.policy_version,
+                "promotion_policy_hash": promotion_policy.policy_hash,
                 "promotion": status_summary.get("promotion", {}),
                 "rollback": status_summary.get("rollback", {}),
                 "generated_at": generated_at,
