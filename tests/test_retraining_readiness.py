@@ -7,16 +7,27 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pytest
 import yaml
 
 from ashare_quant.cli import main
 from ashare_quant.config.settings import AppSettings, PathSettings
+from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.feature_lists import feature_list_hash
 from ashare_quant.models.promotion.gate_rules import load_promotion_gate_policy
+from ashare_quant.models.ranker_data import RankerDataset
 from ashare_quant.models.shadow.storage import file_sha256
 from ashare_quant.retraining.configuration import load_retraining_policy
+from ashare_quant.retraining.execution import GovernedRetrainingExecutionService
+from ashare_quant.retraining.execution.lifecycle import LifecycleJournal
+from ashare_quant.retraining.execution.schemas import (
+    DatasetManifest,
+    PreparedTrainingData,
+    TrainedRanker,
+)
 from ashare_quant.retraining.readiness import RetrainingExecutionReadinessValidator
+from ashare_quant.retraining.readiness.schemas import RetrainingReadinessReport
 from ashare_quant.retraining.schemas import (
     EvidenceReference,
     RetrainingEvidence,
@@ -25,7 +36,7 @@ from ashare_quant.retraining.schemas import (
     TrainingTarget,
 )
 from ashare_quant.retraining.validators import evidence_hash
-from ashare_quant.utils.manifest import atomic_write_json
+from ashare_quant.utils.manifest import atomic_write_json, config_hash
 
 AS_OF = "20260731"
 NOW = datetime(2026, 8, 1, 0, 0, tzinfo=UTC)
@@ -261,6 +272,315 @@ def test_cli_returns_nonzero_when_readiness_fails(tmp_path: Path, capsys) -> Non
     assert "status=FAILED" in capsys.readouterr().out
 
 
+class _ExecutionBooster:
+    def __init__(self, *, write_model: bool = True) -> None:
+        self.write_model = write_model
+
+    def save_model(self, path: str) -> None:
+        if self.write_model:
+            Path(path).write_text("governed challenger model\n", encoding="utf-8")
+
+
+class _ExecutionModel:
+    def __init__(self, *, write_model: bool = True) -> None:
+        self.booster_ = _ExecutionBooster(write_model=write_model)
+
+
+class _ExecutionPreparer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def prepare(self, **kwargs: object) -> PreparedTrainingData:
+        self.calls += 1
+        readiness = kwargs["readiness"]
+        assert isinstance(readiness, RetrainingReadinessReport)
+        frame = pd.DataFrame(
+            {
+                "trade_date": ["20200102", "20200102"],
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "ret_5d": [0.1, 0.2],
+                "relevance": [0, 1],
+            }
+        )
+        dataset = RankerDataset(frame, ("ret_5d",))
+        manifest = DatasetManifest(
+            feature_hash=feature_list_hash(("ret_5d",)),
+            feature_manifest_hash=str(readiness.feature_hash),
+            universe_hash=str(readiness.universe_hash),
+            label_hash=str(readiness.label_hash),
+            horizon=5,
+            label_name="future_excess_ret_5d",
+            train_dates={"start": "20100104", "end": "20191231"},
+            validation_dates={"start": "20200102", "end": "20211231"},
+            fold_manifest="reports/walk_forward/fold/manifest.json",
+            fold_manifest_hash="f" * 64,
+            fold_id="fold_1",
+        )
+        return PreparedTrainingData(manifest, ("ret_5d",), dataset, dataset, 5, "next_open")
+
+
+class _ExecutionTrainer:
+    def __init__(self, *, fail: bool = False, write_model: bool = True) -> None:
+        self.fail = fail
+        self.write_model = write_model
+        self.calls = 0
+
+    def train(self, prepared: PreparedTrainingData) -> TrainedRanker:
+        del prepared
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("forced training failure")
+        return TrainedRanker(
+            _ExecutionModel(write_model=self.write_model),
+            {"rank_ic": 0.01},
+            [{"feature": "ret_5d", "gain": 1.0, "split": 1}],
+        )
+
+
+def test_governed_execution_publishes_candidate_without_registry_change(tmp_path: Path) -> None:
+    readiness = readiness_fixture(tmp_path)
+    assert readiness.validate(AS_OF, request_id=REQUEST_ID).report.status == "READY"
+    preparer = _ExecutionPreparer()
+    trainer = _ExecutionTrainer()
+    service = execution_service(tmp_path, preparer=preparer, trainer=trainer)
+    registry = tmp_path / "models/registry.json"
+    before = registry.read_bytes()
+
+    first = service.execute(REQUEST_ID)
+    second = service.execute(REQUEST_ID)
+
+    assert first.status == "COMPLETED"
+    assert second.idempotent is True
+    assert preparer.calls == 1
+    assert trainer.calls == 1
+    assert registry.read_bytes() == before
+    assert first.artifact_dir is not None
+    manifest = read_json(first.artifact_dir / "manifest.json")
+    assert manifest["model_role"] == "challenger"
+    assert manifest["training_type"] == "challenger_refresh"
+    assert manifest["horizon"] == 5
+    assert manifest["training_status"] == "completed"
+    registration = read_json(
+        tmp_path / f"models/candidate_registrations/{first.model_id}/registration.json"
+    )
+    assert registration["status"] == "candidate"
+    assert registration["registry_json_modified"] is False
+
+
+def test_failed_or_stale_readiness_prevents_training(tmp_path: Path) -> None:
+    readiness = readiness_fixture(tmp_path)
+    assert readiness.validate(AS_OF, request_id=REQUEST_ID).report.status == "READY"
+    manifest = tmp_path / "data/processed/features_daily/_manifest.json"
+    atomic_write_json(manifest, {"artifact_name": "changed"})
+    trainer = _ExecutionTrainer()
+
+    with pytest.raises(Exception, match="FAILED_STALE_REQUEST"):
+        execution_service(tmp_path, trainer=trainer).execute(REQUEST_ID)
+    assert trainer.calls == 0
+    assert not list((tmp_path / "models/challengers").glob("challenger_refresh_*"))
+
+
+def test_failed_readiness_artifact_prevents_training(tmp_path: Path) -> None:
+    readiness = readiness_fixture(tmp_path)
+    next((tmp_path / "runs/scheduler").glob("*/*.json")).unlink()
+    assert readiness.validate(AS_OF, request_id=REQUEST_ID).report.status == "FAILED"
+    trainer = _ExecutionTrainer()
+
+    with pytest.raises(DataValidationError, match="readiness is not valid and READY"):
+        execution_service(tmp_path, trainer=trainer).execute(REQUEST_ID)
+    assert trainer.calls == 0
+
+
+def test_request_changed_after_readiness_prevents_training(tmp_path: Path) -> None:
+    readiness = readiness_fixture(tmp_path)
+    assert readiness.validate(AS_OF, request_id=REQUEST_ID).report.status == "READY"
+    request = tmp_path / f"reports/retraining/requests/{REQUEST_ID}/training_request.json"
+    payload = read_json(request)
+    payload["trigger_reason"] = ["manual_request"]
+    atomic_write_json(request, payload)
+    trainer = _ExecutionTrainer()
+
+    with pytest.raises(DataValidationError, match="request .*hash mismatch"):
+        execution_service(tmp_path, trainer=trainer).execute(REQUEST_ID)
+    assert trainer.calls == 0
+
+
+def test_policy_change_prevents_execution(tmp_path: Path) -> None:
+    readiness = readiness_fixture(tmp_path)
+    readiness.validate(AS_OF, request_id=REQUEST_ID)
+    policy = tmp_path / "config/retraining_policy.yaml"
+    policy.write_text("retraining:\n  policy_version: changed\n", encoding="utf-8")
+    trainer = _ExecutionTrainer()
+
+    with pytest.raises(Exception, match="policy hash mismatch"):
+        execution_service(tmp_path, trainer=trainer).execute(REQUEST_ID)
+    assert trainer.calls == 0
+
+
+@pytest.mark.parametrize("failure", ["training", "artifact"])
+def test_execution_failure_publishes_no_candidate_or_model(tmp_path: Path, failure: str) -> None:
+    readiness_fixture(tmp_path).validate(AS_OF, request_id=REQUEST_ID)
+    trainer = _ExecutionTrainer(
+        fail=failure == "training",
+        write_model=failure != "artifact",
+    )
+    service = execution_service(tmp_path, trainer=trainer)
+
+    with pytest.raises((RuntimeError, DataValidationError)):
+        service.execute(REQUEST_ID)
+
+    assert not list((tmp_path / "models/challengers").glob("challenger_refresh_*"))
+    assert not (tmp_path / "models/candidate_registrations").exists()
+    journals = list((tmp_path / "reports/retraining/execution_journals").iterdir())
+    assert len(journals) == 1
+    events = LifecycleJournal(journals[0].parent, journals[0].name).events()
+    assert events[-1].status == "FAILED"
+
+
+def test_execution_recovery_marks_interrupted_and_cleans_staging(tmp_path: Path) -> None:
+    readiness_fixture(tmp_path)
+    run_id = "retraining_interrupted"
+    journal = LifecycleJournal(tmp_path / "reports/retraining/execution_journals", run_id)
+    journal.append("CREATED")
+    journal.append("TRAINING")
+    staging = tmp_path / f"reports/retraining/.tmp/execution_{run_id}_leftover"
+    staging.mkdir(parents=True)
+
+    result = execution_service(tmp_path).recovery(run_id)
+
+    assert result.status == "INTERRUPTED"
+    assert result.retry_allowed is True
+    assert not staging.exists()
+
+
+def test_execution_publication_is_atomic_and_manifest_is_written_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    readiness_fixture(tmp_path).validate(AS_OF, request_id=REQUEST_ID)
+    from ashare_quant.retraining.execution import artifact as artifact_module
+    from ashare_quant.retraining.execution import storage as storage_module
+
+    writes: list[str] = []
+    original_write = artifact_module.atomic_write_json
+
+    def tracked_write(path: Path, payload: dict[str, Any]) -> None:
+        writes.append(path.name)
+        original_write(path, payload)
+
+    def fail_transaction(*args: object, **kwargs: object) -> None:
+        raise OSError("forced retraining transaction failure")
+
+    monkeypatch.setattr(artifact_module, "atomic_write_json", tracked_write)
+    monkeypatch.setattr(storage_module, "replace_targets_atomically", fail_transaction)
+
+    with pytest.raises(OSError, match="forced retraining transaction failure"):
+        execution_service(tmp_path).execute(REQUEST_ID)
+
+    assert writes[-1] == "manifest.json"
+    assert not (tmp_path / "models/challengers").exists()
+    assert not (tmp_path / "models/candidate_registrations").exists()
+    assert not (tmp_path / "reports/retraining/executions").exists()
+
+
+def test_changed_published_identity_cannot_be_overwritten(tmp_path: Path) -> None:
+    readiness_fixture(tmp_path).validate(AS_OF, request_id=REQUEST_ID)
+    service = execution_service(tmp_path)
+    result = service.execute(REQUEST_ID)
+    assert result.artifact_dir is not None
+    (result.artifact_dir / "model.txt").write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(DataValidationError, match="artifact hash mismatch"):
+        service.execute(REQUEST_ID)
+
+
+def test_execution_status_reports_terminal_state(tmp_path: Path) -> None:
+    readiness_fixture(tmp_path).validate(AS_OF, request_id=REQUEST_ID)
+    service = execution_service(tmp_path)
+    result = service.execute(REQUEST_ID)
+
+    status = service.status(result.training_run_id)
+
+    assert status["status"] == "COMPLETED"
+    assert status["artifact_published"] is True
+
+
+def test_execution_cli_routes_without_stateful_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    readiness_fixture(tmp_path)
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def execute(self, request_id: str):
+            assert request_id == REQUEST_ID
+            return type(
+                "Result",
+                (),
+                {
+                    "status": "COMPLETED",
+                    "training_run_id": "run_1",
+                    "model_id": "candidate_1",
+                    "output_dir": tmp_path / "reports/retraining/executions/run_1",
+                    "idempotent": False,
+                },
+            )()
+
+    monkeypatch.setattr("ashare_quant.cli.GovernedRetrainingExecutionService", FakeExecutionService)
+
+    code = main(
+        [
+            "--config",
+            str(tmp_path / "config/default.yaml"),
+            "retraining",
+            "execute",
+            "--request-id",
+            REQUEST_ID,
+        ]
+    )
+
+    assert code == 0
+    assert "model_id=candidate_1" in capsys.readouterr().out
+
+
+def test_execution_does_not_call_forbidden_services(tmp_path: Path, monkeypatch) -> None:
+    readiness_fixture(tmp_path).validate(AS_OF, request_id=REQUEST_ID)
+    from ashare_quant.models.inference import ProductionInferenceEngine
+    from ashare_quant.models.promotion.apply import PromotionApplyService
+    from ashare_quant.models.registry import ModelRegistry
+    from ashare_quant.paper_trading import PaperTradingService
+    from ashare_quant.strategy import CandidateSelector
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("forbidden service called")
+
+    monkeypatch.setattr(ProductionInferenceEngine, "predict", forbidden)
+    monkeypatch.setattr(PromotionApplyService, "apply", forbidden)
+    monkeypatch.setattr(ModelRegistry, "register_model", forbidden)
+    monkeypatch.setattr(ModelRegistry, "promote_model", forbidden)
+    monkeypatch.setattr(PaperTradingService, "execute", forbidden)
+    monkeypatch.setattr(CandidateSelector, "select", forbidden)
+
+    execution_service(tmp_path).execute(REQUEST_ID)
+
+
+def execution_service(
+    tmp_path: Path,
+    *,
+    preparer: _ExecutionPreparer | None = None,
+    trainer: _ExecutionTrainer | None = None,
+) -> GovernedRetrainingExecutionService:
+    return GovernedRetrainingExecutionService(
+        settings=make_settings(tmp_path),
+        config_path=tmp_path / "config/default.yaml",
+        retraining_policy_path=tmp_path / "config/retraining_policy.yaml",
+        promotion_policy_path=tmp_path / "config/promotion_policy.yaml",
+        dataset_preparer=preparer or _ExecutionPreparer(),
+        trainer=trainer or _ExecutionTrainer(),
+    )
+
+
 def readiness_fixture(tmp_path: Path) -> RetrainingExecutionReadinessValidator:
     settings = make_settings(tmp_path)
     write_configs(tmp_path)
@@ -268,6 +588,7 @@ def readiness_fixture(tmp_path: Path) -> RetrainingExecutionReadinessValidator:
     write_registry(tmp_path)
     write_governance(tmp_path)
     write_request(tmp_path)
+    write_processed_manifests(tmp_path)
     return make_service(tmp_path, settings=settings)
 
 
@@ -309,6 +630,7 @@ def write_configs(tmp_path: Path) -> None:
                 "paths": {
                     "reports": str(tmp_path / "reports"),
                     "models": str(tmp_path / "models"),
+                    "processed_data": str(tmp_path / "data/processed"),
                 }
             }
         ),
@@ -529,11 +851,19 @@ def write_request(tmp_path: Path) -> None:
         promotion_policy_version=request.promotion_policy_version,
         git_commit="abc",
         git_dirty=False,
-        config_hash="cfg",
+        config_hash=str(config_hash(tmp_path / "config/default.yaml")),
         generated_at=request.created_at,
         request_file_sha256=file_sha256(root / "training_request.json"),
     )
     atomic_write_json(root / "manifest.json", manifest.model_dump(mode="json"))
+
+
+def write_processed_manifests(tmp_path: Path) -> None:
+    for name in ("features_daily", "universe_daily", "labels_forward"):
+        atomic_write_json(
+            tmp_path / f"data/processed/{name}/_manifest.json",
+            {"schema_version": 1, "artifact_name": name, "max_date": AS_OF},
+        )
 
 
 def _mutate_governance_report(root: Path, name: str, mutate) -> None:

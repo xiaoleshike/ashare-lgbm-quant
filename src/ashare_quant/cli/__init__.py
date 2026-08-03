@@ -93,6 +93,7 @@ from ashare_quant.research import (
 )
 from ashare_quant.research.agent import ResearchAgentService
 from ashare_quant.retraining import RetrainingTriggerService
+from ashare_quant.retraining.execution import GovernedRetrainingExecutionService
 from ashare_quant.retraining.readiness import RetrainingExecutionReadinessValidator
 from ashare_quant.strategy import CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
@@ -832,6 +833,18 @@ def add_retraining_parser(
         "--request-id",
         help="Explicit request identity; required when a date has multiple requests.",
     )
+    execute = commands.add_parser(
+        "execute", help="Execute one READY request as an immutable Challenger refresh."
+    )
+    execute.add_argument("--request-id", required=True)
+    execution_status = commands.add_parser(
+        "execution-status", help="Inspect one governed retraining execution."
+    )
+    execution_status.add_argument("--run-id", required=True)
+    recovery = commands.add_parser(
+        "recovery", help="Mark an interrupted execution and clean unpublished staging."
+    )
+    recovery.add_argument("--run-id", required=True)
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -2739,6 +2752,33 @@ def run_retraining_command(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     config_path = Path(effective_config_path(args.config))
     try:
+        if args.retraining_command in {"execute", "execution-status", "recovery"}:
+            execution = GovernedRetrainingExecutionService(
+                settings=settings,
+                config_path=config_path,
+                retraining_policy_path=_retraining_policy_path(config_path),
+                promotion_policy_path=_promotion_policy_path(config_path),
+            )
+            if args.retraining_command == "execute":
+                execution_result = execution.execute(args.request_id)
+                print(
+                    f"retraining_execution: status={execution_result.status} "
+                    f"run_id={execution_result.training_run_id} "
+                    f"model_id={execution_result.model_id} "
+                    f"output={execution_result.output_dir} "
+                    f"idempotent={execution_result.idempotent}"
+                )
+                return 0
+            if args.retraining_command == "execution-status":
+                print(json.dumps(execution.status(args.run_id), sort_keys=True))
+                return 0
+            recovery_result = execution.recovery(args.run_id)
+            print(
+                f"retraining_recovery: run_id={recovery_result.training_run_id} "
+                f"status={recovery_result.status} retry_allowed={recovery_result.retry_allowed} "
+                f"staging_paths={len(recovery_result.staging_paths)}"
+            )
+            return 0
         service = RetrainingTriggerService(
             reports_root=settings.paths.reports,
             config_path=config_path,
@@ -2751,7 +2791,7 @@ def run_retraining_command(args: argparse.Namespace) -> int:
                 if config_path.resolve().parent.name == "config"
                 else Path.cwd().resolve()
             )
-            result = RetrainingExecutionReadinessValidator(
+            readiness_result = RetrainingExecutionReadinessValidator(
                 settings=settings,
                 config_path=config_path,
                 project_root=project_root,
@@ -2759,13 +2799,14 @@ def run_retraining_command(args: argparse.Namespace) -> int:
                 promotion_policy_path=_promotion_policy_path(config_path),
             ).validate(args.as_of, request_id=args.request_id)
             print(
-                f"retraining_readiness: status={result.report.status} "
-                f"as_of={result.report.as_of} request_id={result.report.request_id} "
-                f"output={result.output_dir}"
+                f"retraining_readiness: status={readiness_result.report.status} "
+                f"as_of={readiness_result.report.as_of} "
+                f"request_id={readiness_result.report.request_id} "
+                f"output={readiness_result.output_dir}"
             )
-            for check in result.report.check_details:
+            for check in readiness_result.report.check_details:
                 print(f"  {check.status} {check.name}: {check.message}")
-            return 0 if result.report.status == "READY" else 1
+            return 0 if readiness_result.report.status == "READY" else 1
         if args.retraining_command == "evaluate":
             evaluation_result = service.evaluate(args.as_of)
             print(

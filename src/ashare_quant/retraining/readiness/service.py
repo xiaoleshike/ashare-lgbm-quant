@@ -88,6 +88,9 @@ class RetrainingExecutionReadinessValidator:
         production_run_id: str | None = None
         governance_hash: str | None = None
         request_hash: str | None = None
+        feature_hash: str | None = None
+        universe_hash: str | None = None
+        label_hash: str | None = None
         resolved_request_id = request_id
         failed = False
         scheduler_context = None
@@ -135,9 +138,14 @@ class RetrainingExecutionReadinessValidator:
                     assert governance_context is not None
                     validate_promotion_policy(self.promotion_policy, governance_context)
                 else:
-                    resolved_request_id, request, request_hash = self._validate_request(
-                        as_of, resolved_request_id, tracker
-                    )
+                    (
+                        resolved_request_id,
+                        request,
+                        request_hash,
+                        feature_hash,
+                        universe_hash,
+                        label_hash,
+                    ) = self._validate_request(as_of, resolved_request_id, tracker)
                     assert governance_context is not None
                     validate_promotion_policy(self.promotion_policy, governance_context, request)
                 details.append(ReadinessCheck(name=name, status="PASS", message="validated"))
@@ -157,6 +165,9 @@ class RetrainingExecutionReadinessValidator:
             "source_hashes": dict(sorted(tracker.hashes.items())),
             "promotion_policy_hash": self.promotion_policy.policy_hash,
             "request_hash": request_hash,
+            "feature_hash": feature_hash,
+            "universe_hash": universe_hash,
+            "label_hash": label_hash,
             "checks": checks,
         }
         run_id = f"readiness_{as_of}_{canonical_payload_hash(identity)[:16]}"
@@ -171,12 +182,15 @@ class RetrainingExecutionReadinessValidator:
             governance_snapshot_hash=governance_hash,
             promotion_policy_hash=self.promotion_policy.policy_hash,
             request_hash=request_hash,
+            feature_hash=feature_hash,
+            universe_hash=universe_hash,
+            label_hash=label_hash,
         )
         return self._publish(report, tracker.hashes)
 
     def _validate_request(
         self, as_of: str, request_id: str | None, tracker: SourceTracker
-    ) -> tuple[str, Any, str]:
+    ) -> tuple[str, Any, str, str, str, str]:
         if request_id is None:
             candidates: list[str] = []
             for directory in sorted(self.storage.requests_root.glob("training_*")):
@@ -206,7 +220,20 @@ class RetrainingExecutionReadinessValidator:
         tracker.track(manifest_path)
         if manifest.request_file_sha256 != file_sha256(request_path):
             raise DataValidationError("retraining request manifest hash mismatch")
-        return request_id, request, file_sha256(request_path)
+        processed = self.settings.paths.processed_data
+        features_manifest = processed / "features_daily" / "_manifest.json"
+        universe_manifest = processed / "universe_daily" / "_manifest.json"
+        label_manifest = processed / "labels_forward" / "_manifest.json"
+        for path in (features_manifest, universe_manifest, label_manifest):
+            tracker.track(path)
+        return (
+            request_id,
+            request,
+            file_sha256(request_path),
+            file_sha256(features_manifest),
+            file_sha256(universe_manifest),
+            file_sha256(label_manifest),
+        )
 
     def _publish(
         self, report: RetrainingReadinessReport, hashes: dict[str, str]
@@ -259,6 +286,9 @@ class RetrainingExecutionReadinessValidator:
                 source_hashes=dict(sorted(hashes.items())),
                 promotion_policy_hash=report.promotion_policy_hash,
                 request_hash=report.request_hash,
+                feature_hash=report.feature_hash,
+                universe_hash=report.universe_hash,
+                label_hash=report.label_hash,
                 git_commit=git["commit"],
                 git_dirty=bool(git["dirty"]),
                 config_hash=config_hash(self.config_path),

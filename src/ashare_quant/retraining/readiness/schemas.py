@@ -34,6 +34,9 @@ class RetrainingReadinessReport(BaseModel):
     governance_snapshot_hash: str | None
     promotion_policy_hash: str
     request_hash: str | None
+    feature_hash: str | None
+    universe_hash: str | None
+    label_hash: str | None
     read_only: Literal[True] = True
 
 
@@ -53,6 +56,9 @@ class RetrainingReadinessManifest(BaseModel):
     source_hashes: dict[str, str]
     promotion_policy_hash: str
     request_hash: str | None
+    feature_hash: str | None
+    universe_hash: str | None
+    label_hash: str | None
     git_commit: str | None
     git_dirty: bool
     config_hash: str | None
