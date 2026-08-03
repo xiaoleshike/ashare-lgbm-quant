@@ -140,6 +140,23 @@ def test_closed_loop_records_component_ids_and_research_fallback(tmp_path: Path)
     assert "deterministic fallback" in research["warnings"][0]
 
 
+def test_retraining_evaluation_failure_is_soft_and_does_not_change_trading(
+    tmp_path: Path,
+) -> None:
+    pipeline, calls = make_pipeline(tmp_path, include_paper_trading=True)
+    pipeline.monitoring = FakeMonitoringService(tmp_path / "reports")
+    pipeline.retraining = FakeRetrainingService(fail=True)
+
+    result = pipeline.run("20240105")
+    closed_loop = load_json(tmp_path / "reports/20240105/closed_loop_manifest.json")
+    stage = next(item for item in closed_loop["stages"] if item["name"] == "retraining_evaluation")
+
+    assert result.status == "success"
+    assert stage["status"] == "warning"
+    assert calls[-1] == "paper_trading_daily"
+    assert (tmp_path / "reports/20240105/production_summary.json").is_file()
+
+
 def test_production_pipeline_stops_after_failure_and_does_not_publish_summary(
     tmp_path: Path,
 ) -> None:
@@ -650,6 +667,16 @@ class FakeResearchAgentService:
             self.generation_mode,
             f"research-{as_of}",
         )
+
+
+class FakeRetrainingService:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+
+    def evaluate(self, as_of: str):
+        if self.fail:
+            raise DataError("forced retraining evaluation failure")
+        raise AssertionError(f"unexpected success-path call for {as_of}")
 
 
 class FakeGovernanceSnapshotService:

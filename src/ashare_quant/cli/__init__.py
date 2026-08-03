@@ -92,6 +92,7 @@ from ashare_quant.research import (
     InvestmentDecisionSupport,
 )
 from ashare_quant.research.agent import ResearchAgentService
+from ashare_quant.retraining import RetrainingTriggerService
 from ashare_quant.strategy import CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
@@ -145,6 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_paper_trading_parser(subparsers)
     add_monitor_parser(subparsers)
     add_governance_parser(subparsers)
+    add_retraining_parser(subparsers)
     add_pipeline_parser(subparsers)
     return parser
 
@@ -800,6 +802,27 @@ def add_governance_parser(
         "recover-registry", help="Preview the latest recoverable immutable Registry version."
     )
     recover.add_argument("--dry-run", action="store_true", required=True)
+
+
+def add_retraining_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Add governed, non-training retraining trigger commands."""
+
+    parser = subparsers.add_parser(
+        "retraining", help="Evaluate immutable monitoring evidence for retraining needs."
+    )
+    commands = parser.add_subparsers(dest="retraining_command", required=True)
+    evaluate = commands.add_parser("evaluate", help="Evaluate all monitored model horizons.")
+    evaluate.add_argument("--as-of", required=True, help="Monitoring date in YYYYMMDD.")
+    create = commands.add_parser(
+        "create-request", help="Create one manually requested governed training request."
+    )
+    create.add_argument("--model-id", required=True)
+    create.add_argument("--as-of", required=True, help="Monitoring date in YYYYMMDD.")
+    commands.add_parser("status", help="List immutable training-request history.")
+    validate = commands.add_parser("validate", help="Validate one request and active policy.")
+    validate.add_argument("--request-id", required=True)
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -2184,6 +2207,11 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
                 reports_root=reports_root,
                 paper_root=settings.paths.paper_trading,
             ),
+            retraining=RetrainingTriggerService(
+                reports_root=reports_root,
+                config_path=config_path,
+                policy_path=_retraining_policy_path(config_path),
+            ),
             research_agent=ResearchAgentService(
                 settings=settings.research.agent,
                 config_path=config_path,
@@ -2694,6 +2722,82 @@ def run_governance_command(args: argparse.Namespace) -> int:
     return 1 if result.report.status == "FAIL" else 0
 
 
+def run_retraining_command(args: argparse.Namespace) -> int:
+    """Evaluate or validate governed training requests without training models."""
+
+    settings = load_settings(args.config)
+    config_path = Path(effective_config_path(args.config))
+    try:
+        service = RetrainingTriggerService(
+            reports_root=settings.paths.reports,
+            config_path=config_path,
+            policy_path=_retraining_policy_path(config_path),
+        )
+        if args.retraining_command == "evaluate":
+            evaluation_result = service.evaluate(args.as_of)
+            print(
+                json.dumps(
+                    {
+                        "status": (
+                            "TRIGGERED"
+                            if evaluation_result.triggered_count
+                            else "NO_ACTION_REQUIRED"
+                        ),
+                        "as_of": evaluation_result.as_of,
+                        "triggered_count": evaluation_result.triggered_count,
+                        "decisions": [
+                            {
+                                "model_id": item.model_id,
+                                "model_role": item.model_role,
+                                "horizon": item.horizon,
+                                "status": item.status,
+                                "reasons": list(item.reasons),
+                                "request_id": item.request_id,
+                            }
+                            for item in evaluation_result.decisions
+                        ],
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.retraining_command == "create-request":
+            manual_result = service.create_request(model_id=args.model_id, as_of=args.as_of)
+            item = manual_result.decisions[0]
+            print(
+                f"retraining_request: status={item.status} model_id={item.model_id} "
+                f"horizon={item.horizon} request_id={item.request_id}"
+            )
+            return 0
+        if args.retraining_command == "status":
+            rows = service.status()
+            print(json.dumps({"requests": rows}, sort_keys=True, default=str))
+            return 0
+        if args.retraining_command == "validate":
+            validation_result = service.validate(args.request_id)
+            stream = sys.stdout if validation_result.valid else sys.stderr
+            print(
+                f"retraining_validation: request_id={validation_result.request_id} "
+                f"valid={validation_result.valid} status={validation_result.status} "
+                f"error={validation_result.error}",
+                file=stream,
+            )
+            return 0 if validation_result.valid else 2
+    except (DataValidationError, OSError, ValueError) as error:
+        print(f"retraining {args.retraining_command} failed: {error}", file=sys.stderr)
+        return 2
+    raise ValueError(f"unsupported retraining command: {args.retraining_command}")
+
+
+def _retraining_policy_path(config_path: Path) -> Path:
+    resolved = config_path.resolve()
+    return (
+        resolved.parent / "retraining_policy.yaml"
+        if resolved.parent.name == "config"
+        else Path("config/retraining_policy.yaml")
+    )
+
+
 def _print_governance_status(summary: dict[str, object]) -> None:
     """Render the stable operator-facing governance overview."""
 
@@ -2755,6 +2859,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_monitor_command(args)
     if args.command == "governance":
         return run_governance_command(args)
+    if args.command == "retraining":
+        return run_retraining_command(args)
     if args.command == "pipeline":
         return run_pipeline_command(args)
     raise ValueError(f"Unsupported command: {args.command}")

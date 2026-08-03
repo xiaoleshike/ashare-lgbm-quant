@@ -1,0 +1,23 @@
+retraining:
+  schema_version: 1
+  policy_version: v1
+  enabled: true
+  cooldown_days: 30
+  minimum_observation_sessions:
+    h5: 60
+    h10: 60
+    h20: 90
+    h60: 120
+  triggers:
+    alpha_decay:
+      enabled: true
+      threshold: 0.7
+    ic_decline:
+      enabled: true
+      rolling_window: 60
+      threshold: 0.0
+    feature_drift:
+      enabled: true
+      psi_threshold: 0.2
+    critical_alert:
+      enabled: true

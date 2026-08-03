@@ -66,6 +66,7 @@ from ashare_quant.research.decision_support import (
 )
 from ashare_quant.research.explainability.engine import ExplainabilityEngine
 from ashare_quant.research.explainability.schemas import ExplainabilityResult
+from ashare_quant.retraining.schemas import RetrainingEvaluationResult
 from ashare_quant.strategy.candidate_selector import CandidateSelectionResult, CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.utils.manifest import (
@@ -90,6 +91,7 @@ PRODUCTION_STAGE_NAMES = (
 CLOSED_LOOP_STAGE_NAMES = (
     "shadow_prediction",
     "monitoring",
+    "retraining_evaluation",
     "research_agent",
     "governance_snapshot",
     "publish_closed_loop_manifest",
@@ -122,6 +124,10 @@ class ShadowPredictionRunner(Protocol):
 
 class MonitoringRunner(Protocol):
     def run(self, as_of: str) -> MonitoringResult: ...
+
+
+class RetrainingEvaluationRunner(Protocol):
+    def evaluate(self, as_of: str) -> RetrainingEvaluationResult: ...
 
 
 class ResearchAgentRunner(Protocol):
@@ -367,6 +373,7 @@ class ProductionPipeline:
         paper_trading: PaperTradingDailyRunner | None = None,
         shadow_prediction: ShadowPredictionRunner | None = None,
         monitoring: MonitoringRunner | None = None,
+        retraining: RetrainingEvaluationRunner | None = None,
         research_agent: ResearchAgentRunner | None = None,
         governance_snapshot: GovernanceSnapshotRunner | None = None,
         runs_root: Path = DEFAULT_RUNS_ROOT,
@@ -389,6 +396,7 @@ class ProductionPipeline:
         self.paper_trading = paper_trading
         self.shadow_prediction = shadow_prediction
         self.monitoring = monitoring
+        self.retraining = retraining
         self.research_agent = research_agent
         self.governance_snapshot = governance_snapshot
         self.runs_root = runs_root
@@ -425,6 +433,7 @@ class ProductionPipeline:
                 for name, enabled in (
                     ("shadow_prediction", self.shadow_prediction is not None),
                     ("monitoring", self.monitoring is not None),
+                    ("retraining_evaluation", self.retraining is not None),
                     ("research_agent", self.research_agent is not None),
                     ("governance_snapshot", self.governance_snapshot is not None),
                 )
@@ -525,6 +534,16 @@ class ProductionPipeline:
                 *(
                     (("monitoring", lambda: self._monitor(resolved_as_of, state)),)
                     if self.monitoring is not None
+                    else ()
+                ),
+                *(
+                    (
+                        (
+                            "retraining_evaluation",
+                            lambda: self._retraining(resolved_as_of),
+                        ),
+                    )
+                    if self.retraining is not None
                     else ()
                 ),
                 *(
@@ -840,6 +859,30 @@ class ProductionPipeline:
                 "generation_mode": result.generation_mode,
             },
             warnings,
+        )
+
+    def _retraining(self, as_of: str) -> StageResult:
+        if self.retraining is None:
+            raise DataValidationError("retraining trigger service is unavailable")
+        result = self.retraining.evaluate(as_of)
+        return StageResult(
+            "success",
+            tuple(str(path) for path in result.request_paths),
+            {
+                "triggered_count": result.triggered_count,
+                "decisions": [
+                    {
+                        "model_id": decision.model_id,
+                        "model_role": decision.model_role,
+                        "horizon": decision.horizon,
+                        "status": decision.status,
+                        "reasons": list(decision.reasons),
+                        "request_id": decision.request_id,
+                    }
+                    for decision in result.decisions
+                ],
+            },
+            result.warnings,
         )
 
     def _governance_snapshot(
