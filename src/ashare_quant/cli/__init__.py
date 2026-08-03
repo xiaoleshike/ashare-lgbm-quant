@@ -46,6 +46,7 @@ from ashare_quant.models import (
     ProductionObservationRecorder,
     ProductionRankerTrainer,
     PromotionEvidencePaths,
+    PromotionGateEngine,
     PromotionGovernanceService,
     PurgedWalkForwardPlanner,
     RankerBaselineRunner,
@@ -1220,12 +1221,17 @@ def run_models_command(args: argparse.Namespace) -> int:
                 )
                 return 0
             if args.models_promotion_command == "validate":
-                validation_result = service.validate(args.request_id)
+                gate_result = PromotionGateEngine(
+                    models_root=output_root,
+                    reports_root=reports_root,
+                ).evaluate(args.request_id)
                 print(
-                    f"promotion_validation: request_id={validation_result.request_id} "
-                    f"status=VALID cutoff={validation_result.evidence_cutoff_date}"
+                    f"promotion_gate: request_id={gate_result.request_id} "
+                    f"candidate={gate_result.candidate_model_id} "
+                    f"status={gate_result.status} checks={gate_result.checks} "
+                    f"idempotent={gate_result.idempotent} output={gate_result.output_dir}"
                 )
-                return 0
+                return 1 if gate_result.status == "FAIL" else 0
             status_result = service.status(args.request_id)
             print(
                 f"promotion_status: request_id={status_result.request_id} "

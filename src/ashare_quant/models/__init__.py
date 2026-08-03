@@ -29,6 +29,8 @@ from ashare_quant.models.production_observation import (
 )
 from ashare_quant.models.promotion import (
     PromotionEvidencePaths,
+    PromotionGateEngine,
+    PromotionGateEvaluation,
     PromotionGovernanceResult,
     PromotionGovernanceService,
 )
@@ -61,6 +63,8 @@ __all__ = [
     "ProductionRankerTrainer",
     "ProductionTrainingResult",
     "PromotionEvidencePaths",
+    "PromotionGateEngine",
+    "PromotionGateEvaluation",
     "PromotionGovernanceResult",
     "PromotionGovernanceService",
     "PurgedWalkForwardPlanner",
