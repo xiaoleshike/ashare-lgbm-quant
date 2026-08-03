@@ -32,6 +32,7 @@ from ashare_quant.features import (
     FeatureValidationResult,
     FeatureValidator,
 )
+from ashare_quant.governance import GovernanceService
 from ashare_quant.labels import LabelBuilder, LabelStore, LabelValidator
 from ashare_quant.labels.validation import LabelValidationResult
 from ashare_quant.models import (
@@ -140,6 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_backtest_parser(subparsers)
     add_paper_trading_parser(subparsers)
     add_monitor_parser(subparsers)
+    add_governance_parser(subparsers)
     add_pipeline_parser(subparsers)
     return parser
 
@@ -767,6 +769,24 @@ def add_monitor_parser(
         help="Validate alert inputs without publishing.",
     )
     alerts_validate.add_argument("--as-of", required=True, help="Monitoring date in YYYYMMDD.")
+
+
+def add_governance_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Add read-only production governance commands."""
+
+    parser = subparsers.add_parser(
+        "governance", help="Inspect production governance and recovery readiness."
+    )
+    commands = parser.add_subparsers(dest="governance_command", required=True)
+    commands.add_parser("status", help="Publish a read-only governance overview.")
+    commands.add_parser(
+        "validate-production", help="Validate current production and governance integrity."
+    )
+    commands.add_parser(
+        "validate-recovery", help="Validate registry and interrupted-run recovery inputs."
+    )
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -2558,6 +2578,55 @@ def print_manifest_status(artifact_name: str, artifact_dir: Path, config_path: s
     )
 
 
+def run_governance_command(args: argparse.Namespace) -> int:
+    """Run read-only governance status or validation operations."""
+
+    settings = load_settings(args.config)
+    config_path = Path(effective_config_path(args.config))
+    service = GovernanceService(settings=settings, config_path=config_path)
+    try:
+        if args.governance_command == "status":
+            result = service.status()
+            _print_governance_status(result.report.summary)
+            print(f"report: {result.report_path}")
+            return 0
+        if args.governance_command == "validate-production":
+            result = service.validate_production()
+        elif args.governance_command == "validate-recovery":
+            result = service.validate_recovery()
+        else:
+            raise ValueError(f"unsupported governance command: {args.governance_command}")
+    except (DataValidationError, OSError, ValueError) as error:
+        print(f"governance {args.governance_command} failed: {error}", file=sys.stderr)
+        return 2
+    print(f"{result.report.status}: {result.report.artifact_name}")
+    for check in result.report.checks:
+        print(f"  {check.status} {check.name}: {check.message}")
+    print(f"report: {result.report_path}")
+    return 1 if result.report.status == "FAIL" else 0
+
+
+def _print_governance_status(summary: dict[str, object]) -> None:
+    """Render the stable operator-facing governance overview."""
+
+    labels = (
+        ("Production", "production"),
+        ("Champion", "champion"),
+        ("Monitoring", "monitoring"),
+        ("Paper Trading", "paper_trading"),
+        ("Promotion", "promotion"),
+        ("Rollback", "rollback"),
+        ("Research Agent", "research_agent"),
+    )
+    print("Governance Status")
+    for title, key in labels:
+        print(f"\n{title}:")
+        payload = summary.get(key)
+        if isinstance(payload, dict):
+            for name, value in payload.items():
+                print(f"{name}: {value}")
+
+
 def effective_config_path(config_arg: str | None) -> str:
     """Return the config path used by load_settings for manifest hashing."""
 
@@ -2596,6 +2665,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_paper_trading_command(args)
     if args.command == "monitor":
         return run_monitor_command(args)
+    if args.command == "governance":
+        return run_governance_command(args)
     if args.command == "pipeline":
         return run_pipeline_command(args)
     raise ValueError(f"Unsupported command: {args.command}")
