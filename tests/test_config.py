@@ -29,6 +29,8 @@ def test_load_settings_reads_yaml_and_env_token(monkeypatch: pytest.MonkeyPatch)
     assert settings.research.daily_report.top_candidates == 50
     assert settings.research.agent.provider == "openai"
     assert settings.research.agent.top_candidates == 20
+    assert settings.research.agent.prompt_version == "v2"
+    assert settings.research.agent.allow_advisory_language is True
     assert settings.monitoring.alerts.alpha_decay.warning == 0.70
     assert settings.monitoring.alerts.drawdown.critical == 0.20
 

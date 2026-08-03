@@ -69,7 +69,11 @@ class ResearchAgentService:
             collected,
             top_candidates=self.settings.top_candidates,
         )
-        system_prompt, user_prompt = build_prompts(context, self.settings.prompt_version)
+        system_prompt, user_prompt = build_prompts(
+            context,
+            self.settings.prompt_version,
+            allow_advisory_language=self.settings.allow_advisory_language,
+        )
         provider = provider_configuration(self.settings)
         identity = self._identity(
             collected.source_hashes,
@@ -101,7 +105,11 @@ class ResearchAgentService:
             system_prompt,
             user_prompt,
         )
-        validate_summary(summary, context)
+        validate_summary(
+            summary,
+            context,
+            allow_advisory_language=self.settings.allow_advisory_language,
+        )
         summary_payload = {
             "schema_version": 1,
             "artifact_name": "daily_llm_research_summary",
@@ -127,7 +135,10 @@ class ResearchAgentService:
             ],
             "source_hash": canonical_payload_hash(collected.source_hashes),
             "context_hash": context_hash(context),
-            "prompt_hash": prompt_hash(self.settings.prompt_version),
+            "prompt_hash": prompt_hash(
+                self.settings.prompt_version,
+                allow_advisory_language=self.settings.allow_advisory_language,
+            ),
             "request_hash": canonical_payload_hash({"system": system_prompt, "user": user_prompt}),
             "response_hash": response_hash,
             "provider": provider.provider,
@@ -144,6 +155,8 @@ class ResearchAgentService:
             "models_modified": False,
             "registry_modified": False,
             "trading_modified": False,
+            "advisory_language_allowed": self.settings.allow_advisory_language,
+            "automatic_execution_allowed": False,
             "status": "success" if mode == "llm" else "success_with_fallback",
         }
         publish_research_agent(
@@ -171,7 +184,12 @@ class ResearchAgentService:
                 )
             _validate_published_sources(manifest, collected.source_hashes, as_of)
             payload = load_summary_payload(output_dir)
-            _validate_summary_payload(payload, context, as_of)
+            _validate_summary_payload(
+                payload,
+                context,
+                as_of,
+                allow_advisory_language=self.settings.allow_advisory_language,
+            )
         except (DataValidationError, OSError, ValueError, ValidationError) as error:
             return ResearchAgentValidationResult(
                 as_of,
@@ -225,7 +243,11 @@ class ResearchAgentService:
         for attempt in range(provider.max_retries + 1):
             try:
                 response = self.adapter_factory(provider).generate(system_prompt, user_prompt)
-                summary = parse_and_validate_summary(response, context)
+                summary = parse_and_validate_summary(
+                    response,
+                    context,
+                    allow_advisory_language=self.settings.allow_advisory_language,
+                )
                 return summary, "llm", None, canonical_payload_hash(response)
             except Exception as error:  # provider and output failures use the safe fallback
                 error_name = type(error).__name__
@@ -251,7 +273,10 @@ class ResearchAgentService:
                 "as_of": context.as_of,
                 "source_hashes": source_hashes,
                 "context_hash": context_hash(context),
-                "prompt_hash": prompt_hash(self.settings.prompt_version),
+                "prompt_hash": prompt_hash(
+                    self.settings.prompt_version,
+                    allow_advisory_language=self.settings.allow_advisory_language,
+                ),
                 "request_hash": canonical_payload_hash(
                     {"system": system_prompt, "user": user_prompt}
                 ),
@@ -266,6 +291,8 @@ def _validate_summary_payload(
     payload: dict[str, Any],
     context: ResearchContext,
     as_of: str,
+    *,
+    allow_advisory_language: bool,
 ) -> None:
     if (
         payload.get("schema_version") != 1
@@ -277,7 +304,11 @@ def _validate_summary_payload(
         summary = ResearchAgentSummary.model_validate(payload.get("summary"))
     except ValidationError as error:
         raise DataValidationError(f"invalid published research-agent summary: {error}") from error
-    validate_summary(summary, context)
+    validate_summary(
+        summary,
+        context,
+        allow_advisory_language=allow_advisory_language,
+    )
 
 
 def _validate_published_sources(

@@ -94,8 +94,13 @@ def validate_collected_artifacts(collected: CollectedArtifacts) -> None:
         raise DataValidationError("paper summary does not assert no real orders")
 
 
-def parse_and_validate_summary(raw: str, context: ResearchContext) -> ResearchAgentSummary:
-    """Parse strict JSON and enforce grounding and non-trading language."""
+def parse_and_validate_summary(
+    raw: str,
+    context: ResearchContext,
+    *,
+    allow_advisory_language: bool = True,
+) -> ResearchAgentSummary:
+    """Parse strict JSON and enforce factual grounding and configured language policy."""
 
     if raw.lstrip().startswith("```"):
         raise DataValidationError("LLM response must be JSON only, without code fences")
@@ -104,12 +109,21 @@ def parse_and_validate_summary(raw: str, context: ResearchContext) -> ResearchAg
         summary = ResearchAgentSummary.model_validate(value)
     except (json.JSONDecodeError, ValidationError) as error:
         raise DataValidationError(f"invalid structured LLM response: {error}") from error
-    validate_summary(summary, context)
+    validate_summary(
+        summary,
+        context,
+        allow_advisory_language=allow_advisory_language,
+    )
     return summary
 
 
-def validate_summary(summary: ResearchAgentSummary, context: ResearchContext) -> None:
-    """Require fact grounding, unchanged candidate identities, and neutral language."""
+def validate_summary(
+    summary: ResearchAgentSummary,
+    context: ResearchContext,
+    *,
+    allow_advisory_language: bool = True,
+) -> None:
+    """Require fact grounding, unchanged candidate identities, and policy compliance."""
 
     facts = {fact.fact_id: fact for fact in context.fact_catalog}
     candidate_ranks = {
@@ -123,7 +137,8 @@ def validate_summary(summary: ResearchAgentSummary, context: ResearchContext) ->
         if unknown:
             raise DataValidationError(f"research conclusion cites unknown fact_id: {unknown}")
         cited.update(conclusion.fact_ids)
-        _reject_forbidden_language(conclusion.text)
+        if not allow_advisory_language:
+            _reject_forbidden_language(conclusion.text)
         _validate_stocks_and_ranks(conclusion.text, candidate_ranks)
         _validate_numeric_grounding(
             conclusion.text,

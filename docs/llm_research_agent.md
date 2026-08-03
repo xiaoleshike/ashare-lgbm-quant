@@ -43,6 +43,12 @@ backtests, registries, or paper-trading ledgers. Source Markdown is hashed for
 lineage but its text is excluded from the LLM context.
 
 Every conclusion must cite deterministic fact IDs. Generated stock codes,
-rankings, numerical metrics, and prohibited trading language are rejected
-before publication. An invalid provider response therefore produces the safe
-deterministic fallback.
+changed rankings, and unsupported numerical metrics are rejected before
+publication. Advisory language is enabled by default for human review, but it
+cannot change rankings, models, candidates, portfolios, or execute orders. Set
+`research.agent.allow_advisory_language: false` to restore the non-advisory
+policy. An invalid provider response produces the deterministic fallback.
+
+Advice quality can be iterated through versioned prompt/config changes and
+compared across immutable daily reports. The agent does not self-train and its
+output is never fed automatically into model selection or trading execution.

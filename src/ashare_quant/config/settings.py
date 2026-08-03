@@ -959,7 +959,8 @@ class ResearchAgentSettings(BaseModel):
     max_retries: int = Field(default=2, ge=0, le=3)
     max_output_tokens: PositiveInt = 4_000
     top_candidates: PositiveInt = 20
-    prompt_version: str = Field(default="v1", min_length=1)
+    prompt_version: str = Field(default="v2", min_length=1)
+    allow_advisory_language: bool = True
 
 
 class ResearchSettings(BaseModel):

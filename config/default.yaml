@@ -395,7 +395,8 @@ research:
     max_retries: 2
     max_output_tokens: 4000
     top_candidates: 20
-    prompt_version: v1
+    prompt_version: v2
+    allow_advisory_language: true
 backtest:
   execution: next_open
   initial_cash: 1000000.0

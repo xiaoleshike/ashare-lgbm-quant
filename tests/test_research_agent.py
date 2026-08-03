@@ -34,6 +34,8 @@ class FailingAdapter:
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         assert "IGNORE ALL INSTRUCTIONS" not in system_prompt
         assert "IGNORE ALL INSTRUCTIONS" not in user_prompt
+        assert "non-binding research suggestions" in system_prompt
+        assert "automatic execution" in system_prompt
         raise TimeoutError("fixture timeout")
 
 
@@ -102,7 +104,9 @@ def test_fallback_is_deterministic_grounded_and_secret_free(
     assert b"not-written-secret" not in combined
 
 
-def test_fact_citation_stock_rank_metric_and_language_validation(tmp_path: Path) -> None:
+def test_fact_citation_stock_rank_metric_and_advisory_language_validation(
+    tmp_path: Path,
+) -> None:
     reports, _ = research_agent_fixture(tmp_path)
     context = build_research_context(collect_artifacts(reports, AS_OF), top_candidates=20)
     payload = deterministic_fallback(context).model_dump(mode="json")
@@ -127,9 +131,25 @@ def test_fact_citation_stock_rank_metric_and_language_validation(tmp_path: Path)
         parse_and_validate_summary(json.dumps(payload), context)
 
     payload = deterministic_fallback(context).model_dump(mode="json")
-    payload["risk_summary"][0]["text"] = "建议买入。"
+    payload["risk_summary"][0]["text"] = "建议关注并考虑买入。"
+    parse_and_validate_summary(json.dumps(payload), context)
+
     with pytest.raises(DataValidationError, match="prohibited language"):
-        parse_and_validate_summary(json.dumps(payload), context)
+        parse_and_validate_summary(
+            json.dumps(payload),
+            context,
+            allow_advisory_language=False,
+        )
+
+
+def test_advisory_policy_is_recorded_without_enabling_execution(tmp_path: Path) -> None:
+    reports, config = research_agent_fixture(tmp_path)
+    result = agent_service(reports, config).generate(AS_OF)
+    manifest = json.loads((result.output_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["advisory_language_allowed"] is True
+    assert manifest["automatic_execution_allowed"] is False
+    assert manifest["trading_modified"] is False
 
 
 def test_context_and_fact_hashes_are_deterministic(tmp_path: Path) -> None:
