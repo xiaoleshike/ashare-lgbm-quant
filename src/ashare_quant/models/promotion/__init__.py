@@ -1,5 +1,7 @@
 """Immutable model-promotion governance foundations."""
 
+from ashare_quant.models.promotion.apply import PromotionApplyResult, PromotionApplyService
+from ashare_quant.models.promotion.approval import HumanReviewService, ReviewWorkflowResult
 from ashare_quant.models.promotion.evidence import PromotionEvidencePaths
 from ashare_quant.models.promotion.gates import PromotionGateEngine, PromotionGateEvaluation
 from ashare_quant.models.promotion.service import (
@@ -9,8 +11,12 @@ from ashare_quant.models.promotion.service import (
 
 __all__ = [
     "PromotionEvidencePaths",
+    "PromotionApplyResult",
+    "PromotionApplyService",
     "PromotionGateEngine",
     "PromotionGateEvaluation",
     "PromotionGovernanceResult",
     "PromotionGovernanceService",
+    "HumanReviewService",
+    "ReviewWorkflowResult",
 ]

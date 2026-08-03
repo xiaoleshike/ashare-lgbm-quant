@@ -79,6 +79,7 @@ class DeploymentContract(BaseModel):
     holding_period: int = Field(gt=0)
     execution_rule: str = Field(min_length=1)
     inference_compatibility: InferenceCompatibility
+    artifact_hashes: dict[str, str] = Field(default_factory=dict)
     deployment_contract_hash: str = Field(min_length=64, max_length=64)
 
 
@@ -110,6 +111,7 @@ class PromotionRequest(BaseModel):
     evidence_snapshot_hash: str = Field(min_length=64, max_length=64)
     deployment_contract_hash: str = Field(min_length=64, max_length=64)
     registry_hash: str = Field(min_length=64, max_length=64)
+    requester: str = "unknown"
     created_time: str = Field(min_length=1)
 
 

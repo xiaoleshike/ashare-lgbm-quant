@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -84,6 +85,7 @@ class PromotionGovernanceService:
             evidence_snapshot_hash=evidence.evidence_snapshot_hash,
             deployment_contract_hash=contract.deployment_contract_hash,
             registry_hash=registry_hash,
+            requester=getpass.getuser(),
             created_time=utc_now_iso(),
         )
         identity_hash = canonical_payload_hash(request_identity_payload(request_base))

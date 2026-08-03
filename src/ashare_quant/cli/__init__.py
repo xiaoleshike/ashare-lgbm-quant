@@ -38,6 +38,7 @@ from ashare_quant.models import (
     ChallengerEvaluationEngine,
     ChallengerPredictionEngine,
     ChallengerTrainer,
+    HumanReviewService,
     ModelDriftDiagnosticEngine,
     ModelRegistry,
     MultiHorizonEnsembleEngine,
@@ -45,6 +46,7 @@ from ashare_quant.models import (
     ProductionInferenceEngine,
     ProductionObservationRecorder,
     ProductionRankerTrainer,
+    PromotionApplyService,
     PromotionEvidencePaths,
     PromotionGateEngine,
     PromotionGovernanceService,
@@ -386,11 +388,22 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "alerts",
     ):
         promotion_create.add_argument(f"--{argument}", required=True)
-    for command_name in ("validate", "status"):
+    for command_name in ("validate", "status", "review", "review-status"):
         command = promotion_commands.add_parser(
             command_name, help=f"{command_name.title()} an immutable promotion request."
         )
         command.add_argument("--request-id", required=True)
+    for command_name in ("apply", "apply-status"):
+        command = promotion_commands.add_parser(
+            command_name, help=f"{command_name.title()} an approved promotion request."
+        )
+        command.add_argument("--request-id", required=True)
+    for command_name in ("approve", "reject"):
+        command = promotion_commands.add_parser(
+            command_name, help=f"Append an immutable {command_name} review event."
+        )
+        command.add_argument("--request-id", required=True)
+        command.add_argument("--comments-file", required=True)
     predict = commands.add_parser("predict", help="Score one completed session with the champion.")
     predict.add_argument("--as-of", required=True, help="Completed session in YYYYMMDD.")
     diagnostics = commands.add_parser(
@@ -1232,13 +1245,67 @@ def run_models_command(args: argparse.Namespace) -> int:
                     f"idempotent={gate_result.idempotent} output={gate_result.output_dir}"
                 )
                 return 1 if gate_result.status == "FAIL" else 0
+            if args.models_promotion_command in {"apply", "apply-status"}:
+                apply_service = PromotionApplyService(
+                    models_root=output_root,
+                    reports_root=reports_root,
+                )
+                apply_result = (
+                    apply_service.apply(args.request_id)
+                    if args.models_promotion_command == "apply"
+                    else apply_service.status(args.request_id)
+                )
+                print(
+                    f"promotion_apply: request_id={apply_result.request_id} "
+                    f"status={apply_result.status} model_id={apply_result.model_id} "
+                    f"previous_champion={apply_result.previous_champion_model_id} "
+                    f"registry_version={apply_result.registry_version_id} "
+                    f"assignment={apply_result.champion_assignment_id} "
+                    f"idempotent={apply_result.idempotent} "
+                    f"manifest={apply_result.manifest_path}"
+                )
+                return 0 if apply_result.status == "PROMOTED" else 1
+            if args.models_promotion_command in {
+                "review",
+                "approve",
+                "reject",
+                "review-status",
+            }:
+                review_service = HumanReviewService(
+                    models_root=output_root,
+                    reports_root=reports_root,
+                    settings=settings.promotion,
+                )
+                if args.models_promotion_command == "review":
+                    review_result = review_service.review(args.request_id)
+                elif args.models_promotion_command == "review-status":
+                    review_result = review_service.status(args.request_id)
+                else:
+                    comments_path = Path(args.comments_file)
+                    if not comments_path.is_file():
+                        raise DataValidationError(
+                            f"review comments file does not exist: {comments_path}"
+                        )
+                    comments = comments_path.read_text(encoding="utf-8")
+                    review_result = (
+                        review_service.approve(args.request_id, comments)
+                        if args.models_promotion_command == "approve"
+                        else review_service.reject(args.request_id, comments)
+                    )
+                print(
+                    f"promotion_review: request_id={review_result.request_id} "
+                    f"status={review_result.status} reviewer={review_result.reviewer} "
+                    f"requester={review_result.requester} event_id={review_result.event_id} "
+                    f"idempotent={review_result.idempotent}"
+                )
+                return 1 if review_result.status in {"INVALID", "APPROVAL_EXPIRED"} else 0
             status_result = service.status(args.request_id)
             print(
                 f"promotion_status: request_id={status_result.request_id} "
                 f"status={status_result.status} output={status_result.output_dir}"
             )
             return 0 if status_result.status == "complete" else 1
-        except (DataValidationError, OSError, ValueError) as error:
+        except (DataValidationError, OSError, ProductionLockError, ValueError) as error:
             print(f"promotion governance failed: {error}", file=sys.stderr)
             return 2
     if args.models_command in {"shadow-predict", "shadow-status", "shadow-validate"}:

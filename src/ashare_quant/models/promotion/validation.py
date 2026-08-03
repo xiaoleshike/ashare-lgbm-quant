@@ -42,7 +42,7 @@ def request_identity_payload(request: object) -> dict[str, object]:
 
     if not isinstance(request, PromotionRequest):
         raise TypeError("request must be PromotionRequest")
-    return {
+    identity: dict[str, object] = {
         "candidate": request.candidate.model_dump(mode="json"),
         "current_champion": request.current_champion.model_dump(mode="json"),
         "current_champion_assignment": request.current_champion_assignment.model_dump(mode="json"),
@@ -51,3 +51,6 @@ def request_identity_payload(request: object) -> dict[str, object]:
         "deployment_contract_hash": request.deployment_contract_hash,
         "registry_hash": request.registry_hash,
     }
+    if request.requester != "unknown":
+        identity["requester"] = request.requester
+    return identity

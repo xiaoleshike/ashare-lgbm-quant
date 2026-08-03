@@ -33,6 +33,9 @@ def test_load_settings_reads_yaml_and_env_token(monkeypatch: pytest.MonkeyPatch)
     assert settings.research.agent.allow_advisory_language is True
     assert settings.monitoring.alerts.alpha_decay.warning == 0.70
     assert settings.monitoring.alerts.drawdown.critical == 0.20
+    assert settings.promotion.reviewer_allowlist == ()
+    assert settings.promotion.allow_requester_as_reviewer is False
+    assert settings.promotion.review_expire_hours == 72
 
 
 def test_load_settings_does_not_require_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,6 +93,17 @@ def test_invalid_alert_threshold_order_is_rejected(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValidationError, match="critical threshold"):
+        load_settings(config_file)
+
+
+def test_invalid_promotion_reviewer_policy_is_rejected(tmp_path: Path) -> None:
+    config_file = tmp_path / "invalid_promotion.yaml"
+    config_file.write_text(
+        "promotion:\n  reviewer_allowlist: [reviewer, reviewer]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="duplicate reviewers"):
         load_settings(config_file)
 
 

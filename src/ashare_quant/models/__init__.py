@@ -28,11 +28,15 @@ from ashare_quant.models.production_observation import (
     ProductionObservationResult,
 )
 from ashare_quant.models.promotion import (
+    HumanReviewService,
+    PromotionApplyResult,
+    PromotionApplyService,
     PromotionEvidencePaths,
     PromotionGateEngine,
     PromotionGateEvaluation,
     PromotionGovernanceResult,
     PromotionGovernanceService,
+    ReviewWorkflowResult,
 )
 from ashare_quant.models.ranker import RankerBaselineRunner, RankerExperimentResult
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
@@ -52,6 +56,7 @@ __all__ = [
     "EnsembleEvaluationResult",
     "InferenceResult",
     "HorizonExperimentPlanResult",
+    "HumanReviewService",
     "ModelDriftDiagnosticEngine",
     "ModelDriftDiagnosticResult",
     "ModelRegistry",
@@ -63,10 +68,13 @@ __all__ = [
     "ProductionRankerTrainer",
     "ProductionTrainingResult",
     "PromotionEvidencePaths",
+    "PromotionApplyResult",
+    "PromotionApplyService",
     "PromotionGateEngine",
     "PromotionGateEvaluation",
     "PromotionGovernanceResult",
     "PromotionGovernanceService",
+    "ReviewWorkflowResult",
     "PurgedWalkForwardPlanner",
     "RankerBaselineRunner",
     "RankerExperimentResult",

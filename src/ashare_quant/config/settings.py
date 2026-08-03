@@ -972,6 +972,24 @@ class ResearchSettings(BaseModel):
     agent: ResearchAgentSettings = Field(default_factory=ResearchAgentSettings)
 
 
+class PromotionReviewSettings(BaseModel):
+    """Human-review authorization and approval expiry policy."""
+
+    reviewer_allowlist: tuple[str, ...] = ()
+    allow_requester_as_reviewer: bool = False
+    review_expire_hours: PositiveInt = 72
+
+    @model_validator(mode="after")
+    def validate_reviewers(self) -> PromotionReviewSettings:
+        """Require unique, non-empty OS account names."""
+
+        if any(not value.strip() for value in self.reviewer_allowlist):
+            raise ValueError("promotion.reviewer_allowlist contains an empty reviewer")
+        if len(self.reviewer_allowlist) != len(set(self.reviewer_allowlist)):
+            raise ValueError("promotion.reviewer_allowlist contains duplicate reviewers")
+        return self
+
+
 class AppSettings(BaseModel):
     """Top-level validated settings.
 
@@ -999,6 +1017,7 @@ class AppSettings(BaseModel):
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     paper_trading: PaperTradingSettings = Field(default_factory=PaperTradingSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    promotion: PromotionReviewSettings = Field(default_factory=PromotionReviewSettings)
     tushare_token: SecretStr | None = None
 
     @property

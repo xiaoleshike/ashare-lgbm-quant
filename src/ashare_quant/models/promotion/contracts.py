@@ -10,7 +10,7 @@ from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.feature_lists import feature_list_hash
 from ashare_quant.models.promotion.schemas import DeploymentContract, InferenceCompatibility
 from ashare_quant.models.registry import RegisteredModel
-from ashare_quant.models.shadow.storage import canonical_payload_hash
+from ashare_quant.models.shadow.storage import canonical_payload_hash, file_sha256
 
 
 def build_deployment_contract(candidate: RegisteredModel) -> DeploymentContract:
@@ -63,6 +63,7 @@ def build_deployment_contract(candidate: RegisteredModel) -> DeploymentContract:
         required_artifacts=required,
         feature_count=len(features),
     )
+    artifact_hashes = {name: file_sha256(artifact / name) for name in required}
     core = {
         "schema_version": 1,
         "artifact_name": "promotion_deployment_contract",
@@ -72,6 +73,7 @@ def build_deployment_contract(candidate: RegisteredModel) -> DeploymentContract:
         "holding_period": holding_period,
         "execution_rule": execution_rule,
         "inference_compatibility": compatibility.model_dump(mode="json"),
+        "artifact_hashes": artifact_hashes,
     }
     return DeploymentContract(
         model_id=candidate.model_id,
@@ -80,6 +82,7 @@ def build_deployment_contract(candidate: RegisteredModel) -> DeploymentContract:
         holding_period=holding_period,
         execution_rule=execution_rule,
         inference_compatibility=compatibility,
+        artifact_hashes=artifact_hashes,
         deployment_contract_hash=canonical_payload_hash(core),
     )
 
@@ -90,6 +93,8 @@ def validate_deployment_contract(contract: DeploymentContract) -> None:
     if contract.horizon != contract.holding_period:
         raise DataValidationError("deployment holding_period must equal model horizon")
     core = contract.model_dump(mode="json", exclude={"deployment_contract_hash"})
+    if not contract.artifact_hashes:
+        core.pop("artifact_hashes", None)
     if canonical_payload_hash(core) != contract.deployment_contract_hash:
         raise DataValidationError("deployment contract hash is invalid")
 
