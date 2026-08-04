@@ -85,8 +85,19 @@ class RetrainingExecutionStorage:
             )
             staged_registration = staging / "registration"
             staged_registration.mkdir()
+            registration_id = (
+                "candidate_"
+                + canonical_payload_hash(
+                    {
+                        "model_id": model_id,
+                        "training_run_id": training_run_id,
+                        "artifact_hash": artifact_manifest.artifact_hash,
+                    }
+                )[:16]
+            )
             registration = CandidateRegistration(
                 model_id=model_id,
+                candidate_registration_id=registration_id,
                 training_run_id=training_run_id,
                 artifact_path=str((self.models_root / "challengers" / model_id).resolve()),
                 artifact_hash=artifact_manifest.artifact_hash,

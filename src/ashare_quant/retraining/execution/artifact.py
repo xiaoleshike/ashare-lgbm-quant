@@ -69,6 +69,7 @@ def write_staged_artifact(
         training_run_id=training_run_id,
         training_request_hash=request_hash,
         feature_hash=dataset.feature_hash,
+        feature_list_hash=dataset.feature_hash,
         feature_manifest_hash=dataset.feature_manifest_hash,
         universe_hash=dataset.universe_hash,
         label_hash=dataset.label_hash,
@@ -120,6 +121,7 @@ def validate_artifact(
     if (
         dataset.horizon != manifest.horizon
         or dataset.feature_hash != manifest.feature_hash
+        or manifest.feature_list_hash != manifest.feature_hash
         or manifest.holding_period != manifest.horizon
         or manifest.execution_rule != "next_open"
         or (expected is not None and manifest != expected)

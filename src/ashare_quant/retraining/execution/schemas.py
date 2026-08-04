@@ -55,6 +55,7 @@ class ChallengerArtifactManifest(BaseModel):
     training_run_id: str
     training_request_hash: str
     feature_hash: str
+    feature_list_hash: str
     feature_manifest_hash: str
     universe_hash: str
     label_hash: str
@@ -79,6 +80,7 @@ class CandidateRegistration(BaseModel):
         "retraining_candidate_registration"
     )
     model_id: str
+    candidate_registration_id: str
     status: Literal["candidate"] = "candidate"
     training_type: Literal["challenger_refresh"] = "challenger_refresh"
     training_run_id: str

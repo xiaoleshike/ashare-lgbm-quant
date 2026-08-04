@@ -95,6 +95,7 @@ from ashare_quant.research.agent import ResearchAgentService
 from ashare_quant.retraining import RetrainingTriggerService
 from ashare_quant.retraining.execution import GovernedRetrainingExecutionService
 from ashare_quant.retraining.readiness import RetrainingExecutionReadinessValidator
+from ashare_quant.retraining.validation import RetrainingValidationService
 from ashare_quant.strategy import CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
 from ashare_quant.universe.validation import UniverseValidationResult
@@ -823,8 +824,12 @@ def add_retraining_parser(
     create.add_argument("--model-id", required=True)
     create.add_argument("--as-of", required=True, help="Monitoring date in YYYYMMDD.")
     commands.add_parser("status", help="List immutable training-request history.")
-    validate = commands.add_parser("validate", help="Validate one request and active policy.")
-    validate.add_argument("--request-id", required=True)
+    validate = commands.add_parser(
+        "validate", help="Validate one request or one retrained Challenger."
+    )
+    validation_identity = validate.add_mutually_exclusive_group(required=True)
+    validation_identity.add_argument("--request-id")
+    validation_identity.add_argument("--model-id")
     readiness = commands.add_parser(
         "readiness", help="Validate governance before any retraining execution."
     )
@@ -845,6 +850,10 @@ def add_retraining_parser(
         "recovery", help="Mark an interrupted execution and clean unpublished staging."
     )
     recovery.add_argument("--run-id", required=True)
+    validation_status = commands.add_parser(
+        "validation-status", help="Inspect immutable retrained-Challenger validation evidence."
+    )
+    validation_status.add_argument("--run-id", required=True)
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -2752,6 +2761,25 @@ def run_retraining_command(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     config_path = Path(effective_config_path(args.config))
     try:
+        if args.retraining_command == "validation-status" or (
+            args.retraining_command == "validate" and args.model_id is not None
+        ):
+            validation = RetrainingValidationService(
+                settings=settings,
+                config_path=config_path,
+            )
+            if args.retraining_command == "validation-status":
+                print(json.dumps(validation.status(args.run_id), sort_keys=True))
+                return 0
+            validation_result = validation.validate(args.model_id)
+            print(
+                f"retraining_validation: status={validation_result.status} "
+                f"run_id={validation_result.run_id} model_id={validation_result.model_id} "
+                f"promotion_ready={validation_result.promotion_ready} "
+                f"output={validation_result.output_dir} "
+                f"idempotent={validation_result.idempotent}"
+            )
+            return 0
         if args.retraining_command in {"execute", "execution-status", "recovery"}:
             execution = GovernedRetrainingExecutionService(
                 settings=settings,
@@ -2848,15 +2876,17 @@ def run_retraining_command(args: argparse.Namespace) -> int:
             print(json.dumps({"requests": rows}, sort_keys=True, default=str))
             return 0
         if args.retraining_command == "validate":
-            validation_result = service.validate(args.request_id)
-            stream = sys.stdout if validation_result.valid else sys.stderr
+            assert args.request_id is not None
+            request_validation_result = service.validate(args.request_id)
+            stream = sys.stdout if request_validation_result.valid else sys.stderr
             print(
-                f"retraining_validation: request_id={validation_result.request_id} "
-                f"valid={validation_result.valid} status={validation_result.status} "
-                f"error={validation_result.error}",
+                f"retraining_validation: request_id={request_validation_result.request_id} "
+                f"valid={request_validation_result.valid} "
+                f"status={request_validation_result.status} "
+                f"error={request_validation_result.error}",
                 file=stream,
             )
-            return 0 if validation_result.valid else 2
+            return 0 if request_validation_result.valid else 2
     except (DataValidationError, OSError, ValueError) as error:
         print(f"retraining {args.retraining_command} failed: {error}", file=sys.stderr)
         return 2
