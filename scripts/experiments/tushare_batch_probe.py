@@ -153,9 +153,7 @@ def probe_finance_period(
     offset = 0
     try:
         while True:
-            frame = client.query(
-                endpoint, period=period, limit=page_size, offset=offset
-            )
+            frame = client.query(endpoint, period=period, limit=page_size, offset=offset)
             frames.append(frame)
             if len(frame) < page_size:
                 break

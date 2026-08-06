@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
-
-import pandas as pd
 
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
@@ -21,6 +20,7 @@ from ashare_quant.orchestration.lock import production_lock
 from ashare_quant.retraining.configuration import RetrainingPolicy, load_retraining_policy
 from ashare_quant.retraining.execution import GovernedRetrainingExecutionService
 from ashare_quant.retraining.execution.schemas import CandidateRegistration, ExecutionResult
+from ashare_quant.retraining.orchestration.controls import LifecycleOperationalControls
 from ashare_quant.retraining.orchestration.lifecycle import require_transition
 from ashare_quant.retraining.orchestration.recovery import inspect_lifecycle_recovery
 from ashare_quant.retraining.orchestration.schemas import (
@@ -31,10 +31,12 @@ from ashare_quant.retraining.orchestration.schemas import (
     LifecycleSnapshot,
     LifecycleState,
     LifecycleSummary,
+    ObservationProgress,
     RecoveryInspection,
     StageResult,
 )
 from ashare_quant.retraining.orchestration.stages import (
+    latest_successful_shadow_path,
     resolve_promotion_evidence_references,
     track_prospective_observations,
 )
@@ -86,6 +88,8 @@ class RetrainingLifecycleOrchestrator:
     ) -> None:
         self.settings = settings
         self.config_path = config_path
+        self.retraining_policy_path = retraining_policy_path
+        self.promotion_policy_path = promotion_policy_path
         self.retraining_policy: RetrainingPolicy = load_retraining_policy(retraining_policy_path)
         self.promotion_policy: PromotionGatePolicy = load_promotion_gate_policy(
             promotion_policy_path
@@ -126,80 +130,150 @@ class RetrainingLifecycleOrchestrator:
         )
 
     def run(self, request_id: str, *, stop_after: StopPoint = None) -> LifecycleRunResult:
-        """Run or resume one deterministic lifecycle under its non-nested lock."""
+        """Create one frozen identity or continue the existing request lifecycle."""
 
         _validate_stop(stop_after)
         with production_lock(self.lifecycle_lock, command=f"retraining lifecycle-run {request_id}"):
+            existing = self.storage.find_by_request(request_id)
+            if existing is not None:
+                frozen = self._frozen_input(existing)
+                if stop_after == "readiness":
+                    return self._result(existing, idempotent=True)
+                return self._continue(existing, frozen, stop_after=stop_after, recheck=True)
             frozen = self._input(request_id)
+            identity_hash = self._identity_hash(frozen)
+            run_id = f"retraining_lifecycle_{identity_hash[:24]}"
             readiness = self.readiness.validate(
                 frozen.request.as_of, request_id=frozen.request.request_id
             )
-            identity_hash = canonical_payload_hash(
-                {
-                    "training_request_hash": frozen.training_request_hash,
-                    "retraining_policy_hash": frozen.retraining_policy_hash,
-                    "promotion_policy_hash": frozen.promotion_policy_hash,
-                    "lifecycle_policy_hash": frozen.lifecycle_policy_hash,
-                    "readiness_identity": readiness.report.run_id,
-                    "config_hash": config_hash(self.config_path),
-                }
-            )
-            run_id = f"retraining_lifecycle_{identity_hash[:24]}"
-            snapshot = self.storage.read(run_id)
-            if snapshot is None:
-                snapshot = self._initialize(frozen, readiness, run_id)
-                snapshot = self._publish(snapshot, frozen, identity_hash)
-            else:
-                self._require_identity(snapshot, frozen, readiness, identity_hash)
-            if readiness.report.status != "READY":
+            snapshot = self._initialize(frozen, readiness, run_id)
+            snapshot = self._publish(snapshot, frozen, identity_hash)
+            if readiness.report.status != "READY" or stop_after == "readiness":
                 return self._result(snapshot)
-            if stop_after == "readiness" or snapshot.summary.current_state == "EVIDENCE_READY":
-                return self._result(snapshot, idempotent=True)
-            snapshot = self._run_training(snapshot, frozen, identity_hash)
-            if snapshot.summary.current_state not in _TRAINING_COMPLETE_STATES:
-                return self._result(snapshot)
-            if stop_after == "training":
-                return self._result(snapshot)
-            snapshot = self._run_validation(snapshot, frozen, identity_hash)
-            if snapshot.summary.current_state not in _VALIDATION_COMPLETE_STATES:
-                return self._result(snapshot)
-            if stop_after == "validation":
-                return self._result(snapshot)
-            snapshot = self._run_shadow(snapshot, frozen, identity_hash)
-            if snapshot.summary.current_state not in {
-                "SHADOW_ENROLLED",
-                "OBSERVATION_PENDING",
-                "OBSERVATION_ACCUMULATING",
-                "OBSERVATION_SUFFICIENT",
-                "EVIDENCE_READY",
-            }:
-                return self._result(snapshot)
-            if stop_after == "shadow":
-                return self._result(snapshot)
-            snapshot = self._track_observation(snapshot, frozen, identity_hash)
-            return self._result(snapshot)
+            return self._continue(snapshot, frozen, stop_after=stop_after, recheck=False)
 
     def resume(self, lifecycle_run_id: str) -> LifecycleRunResult:
-        snapshot = self.storage.read(lifecycle_run_id)
-        if snapshot is None:
-            raise DataValidationError(f"lifecycle run does not exist: {lifecycle_run_id}")
-        result = self.run(snapshot.summary.request_id)
-        if result.lifecycle_run_id != lifecycle_run_id:
-            raise DataValidationError("lifecycle logical identity changed; resume is prohibited")
-        return result
+        """Resume the exact frozen identity without recursively calling ``run``."""
+
+        with production_lock(
+            self.lifecycle_lock, command=f"retraining lifecycle-resume {lifecycle_run_id}"
+        ):
+            snapshot = self._required_snapshot(lifecycle_run_id)
+            frozen = self._frozen_input(snapshot)
+            return self._continue(snapshot, frozen, stop_after=None, recheck=True)
+
+    def revalidate_evidence(self, lifecycle_run_id: str) -> LifecycleRunResult:
+        """Re-evaluate exact evidence under current policy without retraining."""
+
+        with production_lock(
+            self.lifecycle_lock,
+            command=f"retraining lifecycle-revalidate-evidence {lifecycle_run_id}",
+        ):
+            snapshot = self._required_snapshot(lifecycle_run_id)
+            frozen = self._frozen_input(snapshot)
+            identity_hash = self._manifest_identity(snapshot)
+            if snapshot.summary.mature_sessions < snapshot.summary.required_sessions:
+                snapshot = self._policy_event(
+                    snapshot,
+                    ready=False,
+                    warnings=("prospective observations remain insufficient",),
+                )
+            else:
+                snapshot = self._evidence_readiness(snapshot, explicit_revalidation=True)
+            snapshot = self._publish(snapshot, frozen, identity_hash)
+            return self._result(snapshot)
 
     def status(self, lifecycle_run_id: str) -> dict[str, Any]:
         snapshot = self.storage.read(lifecycle_run_id)
         if snapshot is None:
             return {"lifecycle_run_id": lifecycle_run_id, "status": "MISSING"}
+        current_policy_hash = self.promotion_policy.policy_hash
+        evaluated = snapshot.summary.evaluated_promotion_policy_hash
+        manifest = snapshot.manifest
+        frozen_promotion = manifest.promotion_policy_hash if manifest else None
+        frozen_retraining = manifest.retraining_policy_hash if manifest else None
+        frozen_lifecycle = manifest.lifecycle_policy_hash if manifest else None
+        promotion_drift = current_policy_hash != frozen_promotion
         return {
             **snapshot.summary.model_dump(mode="json"),
             "status": "COMPLETE_SNAPSHOT",
+            "frozen_promotion_policy_hash": (
+                snapshot.summary.frozen_promotion_policy_hash or frozen_promotion
+            ),
+            "frozen_retraining_policy_hash": frozen_retraining,
+            "current_retraining_policy_hash": self.retraining_policy.policy_hash,
+            "frozen_lifecycle_policy_hash": frozen_lifecycle,
+            "current_lifecycle_policy_hash": self.retraining_policy.lifecycle_policy_hash,
+            "frozen_config_hash": manifest.config_hash if manifest else None,
+            "current_config_hash": config_hash(self.config_path),
+            "current_promotion_policy_hash": current_policy_hash,
+            "evaluated_promotion_policy_hash": evaluated,
+            "policy_drift": promotion_drift,
+            "evidence_stale": bool(evaluated and evaluated != current_policy_hash),
+            "latest_successful_shadow_date": snapshot.summary.shadow_as_of,
+            "latest_observation_cutoff": snapshot.summary.observation_cutoff,
             "output": str(self.storage.output_dir(lifecycle_run_id)),
         }
 
     def recovery(self, lifecycle_run_id: str) -> RecoveryInspection:
         return inspect_lifecycle_recovery(self.storage, lifecycle_run_id)
+
+    def operational_controls(self) -> LifecycleOperationalControls:
+        """Return shared fail-closed controls used by execution and dry-run."""
+
+        return LifecycleOperationalControls(
+            storage=self.storage,
+            timezone=self.settings.production.timezone,
+            max_daily_training_runs=self.retraining_policy.lifecycle.max_daily_training_runs,
+            cooldown_days=self.retraining_policy.lifecycle.cooldown_days,
+            now=self.now(),
+        )
+
+    def proposed_identity(self, request_id: str) -> tuple[str, LifecycleInput]:
+        """Calculate creation identity without running readiness or any model service."""
+
+        existing = self.storage.find_by_request(request_id)
+        frozen = self._frozen_input(existing) if existing else self._input(request_id)
+        identity = (
+            self._manifest_identity(existing)
+            if existing is not None
+            else self._identity_hash(frozen)
+        )
+        return f"retraining_lifecycle_{identity[:24]}", frozen
+
+    def _continue(
+        self,
+        snapshot: LifecycleSnapshot,
+        frozen: LifecycleInput,
+        *,
+        stop_after: StopPoint,
+        recheck: bool,
+    ) -> LifecycleRunResult:
+        identity_hash = self._manifest_identity(snapshot)
+        self._require_identity(snapshot, frozen, identity_hash)
+        self._validate_referenced_sources(snapshot)
+        snapshot = self._upgrade_legacy_shadow(snapshot, frozen, identity_hash)
+        if recheck and not any(event.state == "TRAINING" for event in snapshot.events):
+            snapshot = self._recheck_readiness(snapshot, frozen, identity_hash)
+        if stop_after == "readiness" or snapshot.summary.current_state == "READINESS_FAILED":
+            return self._result(snapshot, idempotent=not recheck)
+        snapshot = self._run_training(snapshot, frozen, identity_hash)
+        if snapshot.summary.current_state not in _TRAINING_COMPLETE_STATES:
+            return self._result(snapshot)
+        if stop_after == "training":
+            return self._result(snapshot)
+        snapshot = self._run_validation(snapshot, frozen, identity_hash)
+        if snapshot.summary.current_state not in _VALIDATION_COMPLETE_STATES:
+            return self._result(snapshot)
+        if stop_after == "validation":
+            return self._result(snapshot)
+        snapshot = self._run_shadow(snapshot, frozen, identity_hash)
+        if snapshot.summary.current_state not in _SHADOW_OBSERVABLE_STATES:
+            return self._result(snapshot)
+        if stop_after == "shadow":
+            return self._result(snapshot)
+        snapshot = self._track_observation(snapshot, frozen, identity_hash)
+        return self._result(snapshot)
 
     def _input(self, request_id: str) -> LifecycleInput:
         return validate_lifecycle_input(
@@ -208,6 +282,42 @@ class RetrainingLifecycleOrchestrator:
             storage=self.request_storage,
             retraining_policy=self.retraining_policy,
             promotion_policy=self.promotion_policy,
+            require_current_policy=True,
+        )
+
+    def _frozen_input(self, snapshot: LifecycleSnapshot) -> LifecycleInput:
+        manifest = snapshot.manifest
+        if manifest is None:
+            raise DataValidationError("lifecycle manifest is required for frozen resume")
+        try:
+            current = validate_lifecycle_input(
+                request_id=snapshot.summary.request_id,
+                reports_root=self.settings.paths.reports,
+                storage=self.request_storage,
+                retraining_policy=self.retraining_policy,
+                promotion_policy=self.promotion_policy,
+                require_current_policy=False,
+            )
+        except DataValidationError:
+            # Test fixtures may replace ``_input`` without publishing a request bundle.
+            current = self._input(snapshot.summary.request_id)
+        return replace(
+            current,
+            retraining_policy_hash=manifest.retraining_policy_hash,
+            lifecycle_policy_hash=manifest.lifecycle_policy_hash,
+            promotion_policy_hash=manifest.promotion_policy_hash,
+            frozen_config_hash=manifest.config_hash,
+        )
+
+    def _identity_hash(self, frozen: LifecycleInput) -> str:
+        return canonical_payload_hash(
+            {
+                "training_request_hash": frozen.training_request_hash,
+                "retraining_policy_hash": frozen.retraining_policy_hash,
+                "promotion_policy_hash": frozen.promotion_policy_hash,
+                "lifecycle_policy_hash": frozen.lifecycle_policy_hash,
+                "config_hash": frozen.frozen_config_hash,
+            }
         )
 
     def _initialize(
@@ -238,7 +348,6 @@ class RetrainingLifecycleOrchestrator:
                 details={"readiness_run_id": readiness.report.run_id},
             ),
         )
-        state = events[-1].state
         summary = LifecycleSummary(
             lifecycle_run_id=run_id,
             request_id=frozen.request.request_id,
@@ -246,42 +355,111 @@ class RetrainingLifecycleOrchestrator:
             parent_model_id=target.model_id,
             horizon=target.horizon,
             trigger_reasons=tuple(frozen.request.trigger_reason),
-            current_state=state,
+            current_state=events[-1].state,
             readiness_run_id=readiness.report.run_id,
             required_sessions=self.retraining_policy.lifecycle.required_sessions(target.horizon),
+            frozen_retraining_policy_hash=frozen.retraining_policy_hash,
+            frozen_lifecycle_policy_hash=frozen.lifecycle_policy_hash,
+            frozen_promotion_policy_hash=frozen.promotion_policy_hash,
+            current_promotion_policy_hash=self.promotion_policy.policy_hash,
+            policy_drift=self.promotion_policy.policy_hash != frozen.promotion_policy_hash,
+            operational_date=self.operational_controls().operational_date.isoformat(),
             created_at=created,
             updated_at=created,
         )
         readiness_path = readiness.output_dir / "manifest.json"
-        stages = {
-            "readiness": StageResult(
-                stage="readiness",
-                status="success" if readiness.report.status == "READY" else "failed",
-                artifact_paths=(str(readiness_path),),
-                artifact_hashes={"readiness": file_sha256(readiness_path)},
-                metrics={"run_id": readiness.report.run_id},
-                error=(
-                    None
-                    if readiness.report.status == "READY"
-                    else "; ".join(
-                        item.message
-                        for item in readiness.report.check_details
-                        if item.status != "PASS"
-                    )
-                ),
-            )
-        }
-        return LifecycleSnapshot(summary, events, stages)
+        stage = StageResult(
+            stage="readiness",
+            status="success" if readiness.report.status == "READY" else "failed",
+            artifact_paths=(str(readiness_path),),
+            artifact_hashes={"readiness": file_sha256(readiness_path)},
+            metrics={"run_id": readiness.report.run_id},
+            error=(
+                None
+                if readiness.report.status == "READY"
+                else "; ".join(
+                    item.message for item in readiness.report.check_details if item.status != "PASS"
+                )
+            ),
+        )
+        return LifecycleSnapshot(summary, events, {"readiness": stage})
+
+    def _recheck_readiness(
+        self, snapshot: LifecycleSnapshot, frozen: LifecycleInput, identity_hash: str
+    ) -> LifecycleSnapshot:
+        readiness = self.readiness.validate(
+            frozen.request.as_of, request_id=frozen.request.request_id
+        )
+        stage = StageResult(
+            stage="readiness_recheck",
+            status="success" if readiness.report.status == "READY" else "failed",
+            artifact_paths=(str(readiness.output_dir / "manifest.json"),),
+            artifact_hashes={
+                f"readiness:{readiness.report.run_id}": file_sha256(
+                    readiness.output_dir / "manifest.json"
+                )
+            },
+            metrics={"run_id": readiness.report.run_id},
+        )
+        snapshot = self._with_stage(snapshot, stage, merge_hashes=True)
+        if snapshot.summary.current_state in {
+            "READINESS_FAILED",
+            "READINESS_READY",
+            "TRAINING_COOLDOWN_BLOCKED",
+            "TRAINING_BUDGET_BLOCKED",
+        }:
+            snapshot = self._transition(snapshot, "READINESS_CHECKING", "readiness recheck")
+        if readiness.report.status != "READY":
+            snapshot = self._transition(snapshot, "READINESS_FAILED", "readiness recheck failed")
+        else:
+            snapshot = self._transition(snapshot, "READINESS_READY", "readiness recheck passed")
+        return self._publish(snapshot, frozen, identity_hash)
 
     def _run_training(
         self, snapshot: LifecycleSnapshot, frozen: LifecycleInput, identity_hash: str
     ) -> LifecycleSnapshot:
         if snapshot.summary.current_state in _TRAINING_COMPLETE_STATES:
             return snapshot
-        if snapshot.summary.current_state not in {"READINESS_READY", "TRAINING_FAILED"}:
+        if snapshot.summary.current_state not in {
+            "READINESS_READY",
+            "TRAINING_FAILED",
+            "TRAINING_COOLDOWN_BLOCKED",
+            "TRAINING_BUDGET_BLOCKED",
+        }:
             return snapshot
-        self._enforce_daily_training_limit(snapshot)
-        snapshot = self._transition(snapshot, "TRAINING", "training execution started")
+        controls = self.operational_controls()
+        if not any(event.state == "TRAINING" for event in snapshot.events):
+            cooldown = controls.cooldown(
+                lifecycle_run_id=snapshot.summary.lifecycle_run_id,
+                parent_model_id=snapshot.summary.parent_model_id,
+                horizon=snapshot.summary.horizon,
+            )
+            if not cooldown.allowed:
+                snapshot = self._transition(
+                    snapshot,
+                    "TRAINING_COOLDOWN_BLOCKED",
+                    "lifecycle training cooldown is active",
+                    details=_dataclass_dict(cooldown),
+                    operational_date=cooldown.operational_date,
+                )
+                return self._publish(snapshot, frozen, identity_hash)
+        budget = controls.budget()
+        if not budget.allowed:
+            snapshot = self._transition(
+                snapshot,
+                "TRAINING_BUDGET_BLOCKED",
+                "daily training-attempt budget is exhausted",
+                details=_dataclass_dict(budget),
+                operational_date=budget.operational_date,
+            )
+            return self._publish(snapshot, frozen, identity_hash)
+        snapshot = self._transition(
+            snapshot,
+            "TRAINING",
+            "training execution started",
+            details={"budget_decision": _dataclass_dict(budget)},
+            operational_date=budget.operational_date,
+        )
         snapshot = self._publish(snapshot, frozen, identity_hash)
         try:
             result = self.execution.execute(frozen.request.request_id)
@@ -321,10 +499,7 @@ class RetrainingLifecycleOrchestrator:
                 snapshot,
                 "TRAINING_COMPLETED",
                 "candidate artifact and registration completed",
-                {
-                    "training_run_id": result.training_run_id,
-                    "model_id": result.model_id,
-                },
+                {"training_run_id": result.training_run_id, "model_id": result.model_id},
                 training_run_id=result.training_run_id,
                 model_id=result.model_id,
             )
@@ -332,7 +507,7 @@ class RetrainingLifecycleOrchestrator:
             snapshot = self._with_stage(
                 snapshot,
                 StageResult(
-                    stage="training",
+                    stage=f"training_attempt:{len(snapshot.events)}",
                     status="failed",
                     error=f"{type(error).__name__}: {error}",
                 ),
@@ -389,7 +564,7 @@ class RetrainingLifecycleOrchestrator:
             snapshot = self._with_stage(
                 snapshot,
                 StageResult(
-                    stage="validation",
+                    stage=f"validation_attempt:{len(snapshot.events)}",
                     status="failed",
                     error=f"{type(error).__name__}: {error}",
                 ),
@@ -406,18 +581,17 @@ class RetrainingLifecycleOrchestrator:
     ) -> LifecycleSnapshot:
         assert snapshot.summary.model_id is not None
         model_id = snapshot.summary.model_id
-        initial = snapshot.summary.current_state in {"VALIDATION_COMPLETED", "SHADOW_FAILED"}
+        initial = not _has_successful_shadow(snapshot)
+        if initial and snapshot.summary.current_state not in {
+            "VALIDATION_COMPLETED",
+            "SHADOW_FAILED",
+        }:
+            return snapshot
+        if not initial and snapshot.summary.current_state not in _SHADOW_OBSERVABLE_STATES:
+            return snapshot
         if initial:
             snapshot = self._transition(snapshot, "SHADOW_ENROLLING", "shadow enrollment started")
             snapshot = self._publish(snapshot, frozen, identity_hash)
-        elif snapshot.summary.current_state not in {
-            "SHADOW_ENROLLED",
-            "OBSERVATION_PENDING",
-            "OBSERVATION_ACCUMULATING",
-            "OBSERVATION_SUFFICIENT",
-            "EVIDENCE_READY",
-        }:
-            return snapshot
         try:
             result = self.shadow.predict(
                 model_id,
@@ -425,25 +599,25 @@ class RetrainingLifecycleOrchestrator:
             )
             manifest_path = result.output_dir / "manifest.json"
             manifest = _json(manifest_path)
-            if (
-                manifest.get("model_origin") != "retrained_challenger"
-                or manifest.get("training_run_id") != snapshot.summary.training_run_id
-                or manifest.get("validation_run_id") != snapshot.summary.validation_run_id
-                or manifest.get("access_policy") != "prospective_production"
-            ):
-                raise DataValidationError("retrained shadow lineage is conflicting")
+            self._validate_shadow_manifest(snapshot, frozen, result, manifest)
+            if not initial and result.shadow_run_id in snapshot.summary.successful_shadow_run_ids:
+                return snapshot
+            stage_name = "shadow_enrollment" if initial else "shadow_refresh"
             stage = StageResult(
-                stage="shadow",
+                stage=stage_name,
                 status="success",
                 artifact_paths=(str(manifest_path),),
-                artifact_hashes={f"shadow:{result.as_of}": file_sha256(manifest_path)},
+                artifact_hashes={f"shadow:{result.shadow_run_id}": file_sha256(manifest_path)},
                 metrics={
-                    "shadow_run_id": result.shadow_run_id,
+                    "shadow_run_ids": [result.shadow_run_id],
                     "production_run_id": manifest.get("production_run_id"),
                     "as_of": result.as_of,
                 },
             )
-            snapshot = self._with_stage(snapshot, stage, merge_hashes=True)
+            snapshot = self._with_stage(snapshot, stage, merge_hashes=True, merge_metrics=True)
+            shadow_ids = tuple(
+                dict.fromkeys((*snapshot.summary.successful_shadow_run_ids, result.shadow_run_id))
+            )
             if initial:
                 snapshot = self._transition(
                     snapshot,
@@ -453,44 +627,52 @@ class RetrainingLifecycleOrchestrator:
                     shadow_run_id=result.shadow_run_id,
                     production_run_id=str(manifest.get("production_run_id", "")),
                     shadow_as_of=result.as_of,
+                    successful_shadow_run_ids=shadow_ids,
                 )
-                snapshot = self._publish(snapshot, frozen, identity_hash)
-            elif result.shadow_run_id != snapshot.summary.shadow_run_id:
-                snapshot = self._replace_summary(
+            else:
+                snapshot = self._transition(
                     snapshot,
+                    snapshot.summary.current_state,
+                    "daily retrained Shadow refresh succeeded",
+                    {"shadow_run_id": result.shadow_run_id, "as_of": result.as_of},
                     shadow_run_id=result.shadow_run_id,
                     production_run_id=str(manifest.get("production_run_id", "")),
                     shadow_as_of=result.as_of,
+                    successful_shadow_run_ids=shadow_ids,
                 )
-                snapshot = self._publish(snapshot, frozen, identity_hash)
         except Exception as error:
-            if not initial:
-                stage = StageResult(
-                    stage="shadow",
-                    status="failed",
-                    warnings=("daily shadow refresh failed; prior enrollment remains valid",),
-                    error=f"{type(error).__name__}: {error}",
-                )
-                return self._publish(self._with_stage(snapshot, stage), frozen, identity_hash)
+            stage_name = "shadow_enrollment_attempt" if initial else "shadow_refresh_attempt"
             snapshot = self._with_stage(
                 snapshot,
                 StageResult(
-                    stage="shadow",
+                    stage=f"{stage_name}:{len(snapshot.events)}",
                     status="failed",
+                    warnings=(
+                        ()
+                        if initial
+                        else ("daily Shadow refresh failed; successful enrollment is preserved",)
+                    ),
                     error=f"{type(error).__name__}: {error}",
                 ),
             )
-            snapshot = self._transition(
-                snapshot, "SHADOW_FAILED", f"shadow failed: {type(error).__name__}: {error}"
-            )
-            snapshot = self._publish(snapshot, frozen, identity_hash)
-        return snapshot
+            if initial:
+                snapshot = self._transition(
+                    snapshot,
+                    "SHADOW_FAILED",
+                    f"shadow enrollment failed: {type(error).__name__}: {error}",
+                )
+            else:
+                snapshot = self._transition(
+                    snapshot,
+                    snapshot.summary.current_state,
+                    "daily Shadow refresh failed; enrollment remains valid",
+                    {"error": f"{type(error).__name__}: {error}"},
+                )
+        return self._publish(snapshot, frozen, identity_hash)
 
     def _track_observation(
         self, snapshot: LifecycleSnapshot, frozen: LifecycleInput, identity_hash: str
     ) -> LifecycleSnapshot:
-        if snapshot.summary.current_state == "EVIDENCE_READY":
-            return snapshot
         if snapshot.summary.current_state == "SHADOW_ENROLLED":
             snapshot = self._transition(
                 snapshot, "OBSERVATION_PENDING", "waiting for mature prospective observations"
@@ -506,7 +688,21 @@ class RetrainingLifecycleOrchestrator:
             training_run_id=snapshot.summary.training_run_id,
             validation_run_id=snapshot.summary.validation_run_id,
             required_sessions=snapshot.summary.required_sessions,
+            accepted_shadow_run_ids=snapshot.summary.successful_shadow_run_ids,
         )
+        previous = snapshot.stage_results.get("observation")
+        if previous is not None:
+            removed = sorted(set(previous.artifact_hashes) - set(progress.source_hashes))
+            changed = sorted(
+                key
+                for key, digest in previous.artifact_hashes.items()
+                if progress.source_hashes.get(key) not in {None, digest}
+            )
+            if removed or changed:
+                raise DataValidationError(
+                    "observation evidence changed or disappeared; "
+                    f"removed={removed} changed={changed}"
+                )
         stage = StageResult(
             stage="observation",
             status="success" if progress.mature_sessions else "pending",
@@ -516,81 +712,194 @@ class RetrainingLifecycleOrchestrator:
                 "mature_sessions": progress.mature_sessions,
                 "required_sessions": progress.required_sessions,
                 "shadow_run_ids": list(progress.shadow_run_ids),
+                "first_signal_date": progress.first_signal_date,
+                "latest_signal_date": progress.latest_signal_date,
+                "observation_cutoff": progress.observation_cutoff,
+                "aggregate_hash": progress.aggregate_hash,
             },
         )
-        changed = (
-            progress.status != snapshot.summary.observation_status
-            or progress.mature_sessions != snapshot.summary.mature_sessions
-            or stage != snapshot.stage_results.get("observation")
+        changed_progress = previous != stage or any(
+            (
+                snapshot.summary.mature_sessions != progress.mature_sessions,
+                snapshot.summary.first_observation_date != progress.first_signal_date,
+                snapshot.summary.latest_observation_date != progress.latest_signal_date,
+                snapshot.summary.observation_cutoff != progress.observation_cutoff,
+                snapshot.summary.observation_evidence_hash != progress.aggregate_hash,
+            )
         )
+        if not changed_progress:
+            return self._apply_policy_drift_if_needed(snapshot, frozen, identity_hash)
+        added = sorted(
+            set(progress.source_hashes) - set(previous.artifact_hashes if previous else {})
+        )
+        details = {
+            "previous_mature_sessions": snapshot.summary.mature_sessions,
+            "current_mature_sessions": progress.mature_sessions,
+            "required_sessions": progress.required_sessions,
+            "first_signal_date": progress.first_signal_date,
+            "latest_signal_date": progress.latest_signal_date,
+            "observation_cutoff": progress.observation_cutoff,
+            "added_source_artifacts": added,
+            "removed_source_artifacts": [],
+            "previous_aggregate_hash": snapshot.summary.observation_evidence_hash,
+            "current_aggregate_hash": progress.aggregate_hash,
+            "accepted_shadow_run_ids": list(progress.shadow_run_ids),
+        }
         snapshot = self._with_stage(snapshot, stage)
-        if progress.status != snapshot.summary.current_state:
+        target: LifecycleState = cast(LifecycleState, progress.status)
+        if snapshot.summary.current_state in {"EVIDENCE_READY", "POLICY_REVIEW_REQUIRED"}:
+            target = snapshot.summary.current_state
+        snapshot = self._transition(
+            snapshot,
+            target,
+            f"prospective observation progress={progress.mature_sessions}",
+            details,
+            observation_status=progress.status,
+            mature_sessions=progress.mature_sessions,
+            first_observation_date=progress.first_signal_date,
+            latest_observation_date=progress.latest_signal_date,
+            observation_cutoff=progress.observation_cutoff,
+            observation_evidence_hash=progress.aggregate_hash,
+        )
+        if progress.status == "OBSERVATION_SUFFICIENT":
+            snapshot = self._evidence_readiness(snapshot, explicit_revalidation=False)
+        return self._publish(snapshot, frozen, identity_hash)
+
+    def _apply_policy_drift_if_needed(
+        self, snapshot: LifecycleSnapshot, frozen: LifecycleInput, identity_hash: str
+    ) -> LifecycleSnapshot:
+        drift = self.promotion_policy.policy_hash != frozen.promotion_policy_hash
+        stale = bool(
+            snapshot.summary.evaluated_promotion_policy_hash
+            and snapshot.summary.evaluated_promotion_policy_hash
+            != self.promotion_policy.policy_hash
+        )
+        if not drift and not stale:
+            return snapshot
+        if snapshot.summary.current_state in {"OBSERVATION_SUFFICIENT", "EVIDENCE_READY"}:
             snapshot = self._transition(
                 snapshot,
-                cast(LifecycleState, progress.status),
-                f"prospective mature sessions={progress.mature_sessions}",
-                {"required_sessions": progress.required_sessions},
-                observation_status=progress.status,
-                mature_sessions=progress.mature_sessions,
+                "POLICY_REVIEW_REQUIRED",
+                "current Promotion Policy differs from lifecycle evidence policy",
+                {
+                    "frozen_policy_hash": frozen.promotion_policy_hash,
+                    "current_policy_hash": self.promotion_policy.policy_hash,
+                },
+                promotion_evidence_status="POLICY_REVIEW_REQUIRED",
+                current_promotion_policy_hash=self.promotion_policy.policy_hash,
+                policy_drift=drift,
+                evidence_stale=True,
             )
-        else:
-            snapshot = self._replace_summary(
-                snapshot,
-                observation_status=progress.status,
-                mature_sessions=progress.mature_sessions,
-            )
-        if progress.status == "OBSERVATION_SUFFICIENT":
-            snapshot = self._evidence_readiness(snapshot)
-        if changed or snapshot.summary.current_state == "EVIDENCE_READY":
-            snapshot = self._publish(snapshot, frozen, identity_hash)
+            return self._publish(snapshot, frozen, identity_hash)
         return snapshot
 
-    def _evidence_readiness(self, snapshot: LifecycleSnapshot) -> LifecycleSnapshot:
+    def _evidence_readiness(
+        self, snapshot: LifecycleSnapshot, *, explicit_revalidation: bool
+    ) -> LifecycleSnapshot:
+        frozen_hash = snapshot.summary.frozen_promotion_policy_hash or (
+            snapshot.manifest.promotion_policy_hash if snapshot.manifest else ""
+        )
+        current_hash = self.promotion_policy.policy_hash
+        if current_hash != frozen_hash and not explicit_revalidation:
+            return self._policy_event(snapshot, ready=False, warnings=("Promotion Policy drift",))
         training = snapshot.stage_results["training"]
         validation = snapshot.stage_results["validation"]
-        shadow = snapshot.stage_results["shadow"]
         observation = snapshot.stage_results["observation"]
-        from ashare_quant.retraining.orchestration.schemas import ObservationProgress
-
+        shadow_path = latest_successful_shadow_path(snapshot.stage_results)
         progress = ObservationProgress(
             status="OBSERVATION_SUFFICIENT",
             mature_sessions=snapshot.summary.mature_sessions,
             required_sessions=snapshot.summary.required_sessions,
             source_artifacts={
-                f"observation:{index}": path
-                for index, path in enumerate(observation.artifact_paths)
+                key: path
+                for key, path in zip(
+                    sorted(observation.artifact_hashes), observation.artifact_paths, strict=True
+                )
             },
             source_hashes=observation.artifact_hashes,
             shadow_run_ids=tuple(
                 str(value) for value in observation.metrics.get("shadow_run_ids", [])
             ),
+            first_signal_date=snapshot.summary.first_observation_date,
+            latest_signal_date=snapshot.summary.latest_observation_date,
+            observation_cutoff=snapshot.summary.observation_cutoff,
+            aggregate_hash=snapshot.summary.observation_evidence_hash,
         )
-        ready, paths, hashes, warnings = resolve_promotion_evidence_references(
+        ready, paths, hashes, warnings, references = resolve_promotion_evidence_references(
             reports_root=self.settings.paths.reports,
+            lifecycle_run_id=snapshot.summary.lifecycle_run_id,
+            request_id=snapshot.summary.request_id,
             model_id=str(snapshot.summary.model_id),
+            parent_model_id=snapshot.summary.parent_model_id,
+            horizon=snapshot.summary.horizon,
+            training_run_id=str(snapshot.summary.training_run_id),
+            validation_run_id=str(snapshot.summary.validation_run_id),
             execution_path=Path(training.artifact_paths[0]),
             validation_path=Path(validation.artifact_paths[0]),
-            shadow_path=Path(shadow.artifact_paths[-1]),
+            shadow_path=shadow_path,
             observation=progress,
             policy=self.promotion_policy,
         )
-        stage = StageResult(
-            stage="promotion_evidence",
+        evaluation_stage = StageResult(
+            stage=f"promotion_evidence_evaluation:{current_hash[:16]}",
             status="success" if ready else "pending",
             artifact_paths=tuple(paths.values()),
             artifact_hashes=hashes,
-            metrics={"status": "READY_FOR_PREPARATION" if ready else "NOT_READY"},
+            metrics={
+                "status": "READY_FOR_PREPARATION" if ready else "NOT_READY",
+                "evaluated_promotion_policy_hash": current_hash,
+                "references": [item.model_dump(mode="json") for item in references],
+                "observation_cutoff": snapshot.summary.observation_cutoff,
+            },
             warnings=warnings,
         )
-        snapshot = self._with_stage(snapshot, stage)
+        snapshot = self._with_stage(snapshot, evaluation_stage)
+        if ready:
+            snapshot = self._with_stage(
+                snapshot,
+                evaluation_stage.model_copy(update={"stage": "promotion_evidence"}),
+                merge_hashes=True,
+                merge_metrics=True,
+            )
+        return self._policy_event(snapshot, ready=ready, warnings=warnings)
+
+    def _policy_event(
+        self, snapshot: LifecycleSnapshot, *, ready: bool, warnings: tuple[str, ...]
+    ) -> LifecycleSnapshot:
+        current_hash = self.promotion_policy.policy_hash
+        frozen_hash = snapshot.summary.frozen_promotion_policy_hash or (
+            snapshot.manifest.promotion_policy_hash if snapshot.manifest else current_hash
+        )
         if ready:
             return self._transition(
                 snapshot,
                 "EVIDENCE_READY",
-                "immutable evidence inputs are ready for separate preparation",
+                "exact immutable evidence is ready for separate preparation",
+                {"evaluated_policy_hash": current_hash},
                 promotion_evidence_status="READY_FOR_PREPARATION",
+                evaluated_promotion_policy_hash=current_hash,
+                current_promotion_policy_hash=current_hash,
+                policy_drift=current_hash != frozen_hash,
+                evidence_stale=False,
             )
-        return self._replace_summary(snapshot, promotion_evidence_status="NOT_READY")
+        target: LifecycleState = (
+            "POLICY_REVIEW_REQUIRED"
+            if current_hash != frozen_hash
+            else snapshot.summary.current_state
+        )
+        return self._transition(
+            snapshot,
+            target,
+            "promotion evidence is not ready under evaluated policy",
+            {"warnings": list(warnings), "evaluated_policy_hash": current_hash},
+            promotion_evidence_status=(
+                "POLICY_REVIEW_REQUIRED" if current_hash != frozen_hash else "NOT_READY"
+            ),
+            evaluated_promotion_policy_hash=current_hash,
+            current_promotion_policy_hash=current_hash,
+            policy_drift=current_hash != frozen_hash,
+            evidence_stale=bool(current_hash != frozen_hash),
+        )
 
     def _transition(
         self,
@@ -607,32 +916,42 @@ class RetrainingLifecycleOrchestrator:
             state=state,
             created_at=timestamp,
             message=message,
-            details=details or {},
+            details=json.loads(json.dumps(details or {}, sort_keys=True)),
         )
         summary = snapshot.summary.model_copy(
             update={"current_state": state, "updated_at": timestamp, **summary_updates}
         )
         return LifecycleSnapshot(summary, (*snapshot.events, event), snapshot.stage_results)
 
-    def _replace_summary(self, snapshot: LifecycleSnapshot, **updates: object) -> LifecycleSnapshot:
-        return LifecycleSnapshot(
-            snapshot.summary.model_copy(update={"updated_at": self._timestamp(), **updates}),
-            snapshot.events,
-            snapshot.stage_results,
-        )
-
     def _with_stage(
-        self, snapshot: LifecycleSnapshot, stage: StageResult, *, merge_hashes: bool = False
+        self,
+        snapshot: LifecycleSnapshot,
+        stage: StageResult,
+        *,
+        merge_hashes: bool = False,
+        merge_metrics: bool = False,
     ) -> LifecycleSnapshot:
         stages = dict(snapshot.stage_results)
         previous = stages.get(stage.stage)
-        if merge_hashes and previous is not None:
+        if previous is not None and (merge_hashes or merge_metrics):
+            metrics = dict(previous.metrics)
+            metrics.update(stage.metrics)
+            if merge_metrics and "shadow_run_ids" in previous.metrics:
+                metrics["shadow_run_ids"] = list(
+                    dict.fromkeys(
+                        [
+                            *cast(list[str], previous.metrics["shadow_run_ids"]),
+                            *cast(list[str], stage.metrics.get("shadow_run_ids", [])),
+                        ]
+                    )
+                )
             stage = stage.model_copy(
                 update={
                     "artifact_paths": tuple(
                         dict.fromkeys((*previous.artifact_paths, *stage.artifact_paths))
                     ),
                     "artifact_hashes": {**previous.artifact_hashes, **stage.artifact_hashes},
+                    "metrics": metrics,
                 }
             )
         stages[stage.stage] = stage
@@ -656,27 +975,38 @@ class RetrainingLifecycleOrchestrator:
                 {f"{stage_name}:{name}": digest for name, digest in stage.artifact_hashes.items()}
             )
         git = current_git_info()
+        summary = snapshot.summary
         manifest = LifecycleManifest(
             lifecycle_identity_hash=identity_hash,
-            lifecycle_run_id=snapshot.summary.lifecycle_run_id,
-            request_id=snapshot.summary.request_id,
-            model_id=snapshot.summary.model_id,
-            parent_model_id=snapshot.summary.parent_model_id,
-            horizon=snapshot.summary.horizon,
-            current_state=snapshot.summary.current_state,
-            readiness_run_id=snapshot.summary.readiness_run_id,
-            training_run_id=snapshot.summary.training_run_id,
-            validation_run_id=snapshot.summary.validation_run_id,
-            shadow_run_id=snapshot.summary.shadow_run_id,
-            production_run_id=snapshot.summary.production_run_id,
-            shadow_as_of=snapshot.summary.shadow_as_of,
-            observation_status=snapshot.summary.observation_status,
-            mature_sessions=snapshot.summary.mature_sessions,
-            required_sessions=snapshot.summary.required_sessions,
-            promotion_evidence_status=snapshot.summary.promotion_evidence_status,
+            lifecycle_run_id=summary.lifecycle_run_id,
+            request_id=summary.request_id,
+            model_id=summary.model_id,
+            parent_model_id=summary.parent_model_id,
+            horizon=summary.horizon,
+            current_state=summary.current_state,
+            readiness_run_id=summary.readiness_run_id,
+            training_run_id=summary.training_run_id,
+            validation_run_id=summary.validation_run_id,
+            shadow_run_id=summary.shadow_run_id,
+            production_run_id=summary.production_run_id,
+            shadow_as_of=summary.shadow_as_of,
+            successful_shadow_run_ids=summary.successful_shadow_run_ids,
+            first_observation_date=summary.first_observation_date,
+            latest_observation_date=summary.latest_observation_date,
+            observation_cutoff=summary.observation_cutoff,
+            observation_evidence_hash=summary.observation_evidence_hash,
+            observation_status=summary.observation_status,
+            mature_sessions=summary.mature_sessions,
+            required_sessions=summary.required_sessions,
+            promotion_evidence_status=summary.promotion_evidence_status,
             retraining_policy_hash=frozen.retraining_policy_hash,
             lifecycle_policy_hash=frozen.lifecycle_policy_hash,
             promotion_policy_hash=frozen.promotion_policy_hash,
+            evaluated_promotion_policy_hash=summary.evaluated_promotion_policy_hash,
+            current_promotion_policy_hash=self.promotion_policy.policy_hash,
+            policy_drift=self.promotion_policy.policy_hash != frozen.promotion_policy_hash,
+            evidence_stale=summary.evidence_stale,
+            operational_date=summary.operational_date,
             evidence_hash=frozen.request.evidence_hash,
             training_request_hash=frozen.training_request_hash,
             source_artifacts=source_paths,
@@ -687,44 +1017,125 @@ class RetrainingLifecycleOrchestrator:
             report_sha256="0" * 64,
             git_commit=git["commit"],
             git_dirty=bool(git["dirty"]),
-            config_hash=config_hash(self.config_path),
+            config_hash=frozen.frozen_config_hash,
         )
         return self.storage.publish(snapshot, manifest)
 
     def _require_identity(
-        self,
-        snapshot: LifecycleSnapshot,
-        frozen: LifecycleInput,
-        readiness: ReadinessResult,
-        identity_hash: str,
+        self, snapshot: LifecycleSnapshot, frozen: LifecycleInput, identity_hash: str
     ) -> None:
         manifest = snapshot.manifest
         if manifest is None or (
             manifest.lifecycle_identity_hash != identity_hash
             or manifest.request_id != frozen.request.request_id
-            or manifest.readiness_run_id != readiness.report.run_id
             or manifest.training_request_hash != frozen.training_request_hash
+            or manifest.retraining_policy_hash != frozen.retraining_policy_hash
+            or manifest.lifecycle_policy_hash != frozen.lifecycle_policy_hash
+            or manifest.promotion_policy_hash != frozen.promotion_policy_hash
         ):
             raise DataValidationError("existing lifecycle has conflicting immutable lineage")
 
-    def _enforce_daily_training_limit(self, snapshot: LifecycleSnapshot) -> None:
-        if any(event.state == "TRAINING" for event in snapshot.events):
-            return
-        today = self.now().astimezone(UTC).date().isoformat()
-        count = 0
-        for path in self.storage.root.glob("*/lifecycle_events.parquet"):
-            try:
-                frame = pd.read_parquet(path, columns=["state", "created_at"])
-            except (OSError, ValueError):
+    def _validate_referenced_sources(self, snapshot: LifecycleSnapshot) -> None:
+        for name, stage in snapshot.stage_results.items():
+            if stage.status != "success":
                 continue
-            count += int(
+            expected = set(stage.artifact_hashes.values())
+            for raw in stage.artifact_paths:
+                path = Path(raw)
+                if not path.is_file():
+                    raise DataValidationError(f"lifecycle source disappeared: {name}: {path}")
+                if file_sha256(path) not in expected:
+                    raise DataValidationError(f"lifecycle source hash changed: {name}: {path}")
+
+    def _validate_shadow_manifest(
+        self,
+        snapshot: LifecycleSnapshot,
+        frozen: LifecycleInput,
+        result: RetrainedShadowResult,
+        manifest: dict[str, Any],
+    ) -> None:
+        expected = {
+            "model_id": snapshot.summary.model_id,
+            "model_origin": "retrained_challenger",
+            "training_request_id": frozen.request.request_id,
+            "training_run_id": snapshot.summary.training_run_id,
+            "validation_run_id": snapshot.summary.validation_run_id,
+            "access_policy": "prospective_production",
+            "shadow_run_id": result.shadow_run_id,
+        }
+        mismatch = [key for key, value in expected.items() if manifest.get(key) != value]
+        models = manifest.get("models")
+        model = (
+            next(
                 (
-                    frame["state"].astype(str).eq("TRAINING")
-                    & frame["created_at"].astype(str).str.startswith(today)
-                ).sum()
+                    item
+                    for item in models
+                    if isinstance(item, dict) and item.get("model_id") == snapshot.summary.model_id
+                ),
+                None,
             )
-        if count >= self.retraining_policy.lifecycle.max_daily_training_runs:
-            raise DataValidationError("maximum daily governed training runs reached")
+            if isinstance(models, list)
+            else None
+        )
+        if model is not None and model.get("native_horizon") != snapshot.summary.horizon:
+            mismatch.append("horizon")
+        if mismatch:
+            raise DataValidationError(f"retrained Shadow lineage is conflicting: {mismatch}")
+
+    def _upgrade_legacy_shadow(
+        self, snapshot: LifecycleSnapshot, frozen: LifecycleInput, identity_hash: str
+    ) -> LifecycleSnapshot:
+        if snapshot.summary.successful_shadow_run_ids or not _has_successful_shadow(snapshot):
+            return snapshot
+        legacy = snapshot.stage_results.get("shadow")
+        if legacy is None or legacy.status != "success" or not legacy.artifact_paths:
+            raise DataValidationError("legacy lifecycle lacks verifiable successful Shadow lineage")
+        shadow_ids: list[str] = []
+        latest_as_of: str | None = None
+        latest_production: str | None = None
+        for raw in legacy.artifact_paths:
+            payload = _json(Path(raw))
+            expected = {
+                "model_id": snapshot.summary.model_id,
+                "model_origin": "retrained_challenger",
+                "training_request_id": frozen.request.request_id,
+                "training_run_id": snapshot.summary.training_run_id,
+                "validation_run_id": snapshot.summary.validation_run_id,
+                "access_policy": "prospective_production",
+            }
+            if any(payload.get(key) != value for key, value in expected.items()):
+                raise DataValidationError("ambiguous legacy Shadow lineage requires recovery")
+            shadow_id = payload.get("shadow_run_id")
+            if not isinstance(shadow_id, str) or not shadow_id:
+                raise DataValidationError("legacy Shadow manifest lacks shadow_run_id")
+            shadow_ids.append(shadow_id)
+            latest_as_of = str(payload.get("as_of") or latest_as_of or "") or None
+            latest_production = (
+                str(payload.get("production_run_id") or latest_production or "") or None
+            )
+        snapshot = self._transition(
+            snapshot,
+            snapshot.summary.current_state,
+            "verified legacy successful Shadow enrollment",
+            {"shadow_run_ids": sorted(set(shadow_ids))},
+            successful_shadow_run_ids=tuple(sorted(set(shadow_ids))),
+            shadow_run_id=shadow_ids[-1],
+            shadow_as_of=latest_as_of or snapshot.summary.shadow_as_of,
+            production_run_id=latest_production or snapshot.summary.production_run_id,
+        )
+        return self._publish(snapshot, frozen, identity_hash)
+
+    def _required_snapshot(self, lifecycle_run_id: str) -> LifecycleSnapshot:
+        snapshot = self.storage.read(lifecycle_run_id)
+        if snapshot is None:
+            raise DataValidationError(f"lifecycle run does not exist: {lifecycle_run_id}")
+        return snapshot
+
+    @staticmethod
+    def _manifest_identity(snapshot: LifecycleSnapshot) -> str:
+        if snapshot.manifest is None:
+            raise DataValidationError("lifecycle manifest identity is missing")
+        return snapshot.manifest.lifecycle_identity_hash
 
     def _result(
         self, snapshot: LifecycleSnapshot, *, idempotent: bool = False
@@ -740,6 +1151,19 @@ class RetrainingLifecycleOrchestrator:
 
     def _timestamp(self) -> str:
         return self.now().astimezone(UTC).isoformat()
+
+
+def _has_successful_shadow(snapshot: LifecycleSnapshot) -> bool:
+    return any(
+        stage.status == "success"
+        for name, stage in snapshot.stage_results.items()
+        if name in {"shadow", "shadow_enrollment", "shadow_refresh"}
+    )
+
+
+def _dataclass_dict(value: object) -> dict[str, Any]:
+    slots = getattr(type(value), "__slots__", ())
+    return {str(name): getattr(value, name) for name in slots}
 
 
 def _validate_stop(value: StopPoint) -> None:
@@ -769,6 +1193,7 @@ _TRAINING_COMPLETE_STATES: frozenset[str] = frozenset(
         "OBSERVATION_PENDING",
         "OBSERVATION_ACCUMULATING",
         "OBSERVATION_SUFFICIENT",
+        "POLICY_REVIEW_REQUIRED",
         "EVIDENCE_READY",
     }
 )
@@ -781,6 +1206,17 @@ _VALIDATION_COMPLETE_STATES: frozenset[str] = frozenset(
         "OBSERVATION_PENDING",
         "OBSERVATION_ACCUMULATING",
         "OBSERVATION_SUFFICIENT",
+        "POLICY_REVIEW_REQUIRED",
+        "EVIDENCE_READY",
+    }
+)
+_SHADOW_OBSERVABLE_STATES: frozenset[str] = frozenset(
+    {
+        "SHADOW_ENROLLED",
+        "OBSERVATION_PENDING",
+        "OBSERVATION_ACCUMULATING",
+        "OBSERVATION_SUFFICIENT",
+        "POLICY_REVIEW_REQUIRED",
         "EVIDENCE_READY",
     }
 )

@@ -95,6 +95,7 @@ from ashare_quant.research.agent import ResearchAgentService
 from ashare_quant.retraining import RetrainingTriggerService
 from ashare_quant.retraining.execution import GovernedRetrainingExecutionService
 from ashare_quant.retraining.orchestration import RetrainingLifecycleOrchestrator
+from ashare_quant.retraining.orchestration.dry_run import LifecycleDryRunService
 from ashare_quant.retraining.readiness import RetrainingExecutionReadinessValidator
 from ashare_quant.retraining.shadow import RetrainedChallengerShadowService
 from ashare_quant.retraining.validation import RetrainingValidationService
@@ -396,6 +397,9 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "prepare", help="Discover and freeze immutable candidate promotion evidence."
     )
     promotion_prepare.add_argument("--model-id", required=True)
+    promotion_prepare.add_argument(
+        "--lifecycle-run-id", help="Use exact retrained lifecycle evidence only."
+    )
     for argument in (
         "challenger-evaluation",
         "executable-validation",
@@ -885,6 +889,16 @@ def add_retraining_parser(
         "lifecycle-recovery", help="Inspect lifecycle recovery state without repair."
     )
     lifecycle_recovery.add_argument("--run-id", required=True)
+    lifecycle_revalidate = commands.add_parser(
+        "lifecycle-revalidate-evidence",
+        help="Revalidate exact lifecycle evidence under the current Promotion Policy.",
+    )
+    lifecycle_revalidate.add_argument("--run-id", required=True)
+    lifecycle_dry_run = commands.add_parser(
+        "lifecycle-dry-run", help="Inspect one lifecycle plan without training or mutation."
+    )
+    lifecycle_dry_run.add_argument("--request-id", required=True)
+    lifecycle_dry_run.add_argument("--as-of", help="Optional readiness date in YYYYMMDD.")
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -1345,7 +1359,7 @@ def run_models_command(args: argparse.Namespace) -> int:
                 prepared = PromotionEvidenceResolver(
                     models_root=output_root,
                     reports_root=reports_root,
-                ).prepare(args.model_id)
+                ).prepare(args.model_id, lifecycle_run_id=args.lifecycle_run_id)
                 print(
                     f"promotion_prepared: request_id={prepared.request_id} "
                     f"candidate={prepared.candidate_model_id} "
@@ -2797,6 +2811,8 @@ def run_retraining_command(args: argparse.Namespace) -> int:
             "lifecycle-status",
             "lifecycle-resume",
             "lifecycle-recovery",
+            "lifecycle-revalidate-evidence",
+            "lifecycle-dry-run",
         }:
             lifecycle = RetrainingLifecycleOrchestrator(
                 settings=settings,
@@ -2824,6 +2840,21 @@ def run_retraining_command(args: argparse.Namespace) -> int:
                     )
                 )
                 return 0 if recovery.status == "CLEAN" else 1
+            if args.retraining_command == "lifecycle-dry-run":
+                dry_run = LifecycleDryRunService(lifecycle).run(args.request_id, as_of=args.as_of)
+                print(
+                    f"retraining_lifecycle_dry_run: dry_run_id={dry_run.dry_run_id} "
+                    f"status={dry_run.status} output={dry_run.output_dir} "
+                    f"idempotent={dry_run.idempotent}"
+                )
+                return 0 if dry_run.status == "READY_TO_EXECUTE" else 1
+            if args.retraining_command == "lifecycle-revalidate-evidence":
+                result = lifecycle.revalidate_evidence(args.run_id)
+                print(
+                    f"retraining_lifecycle_evidence: run_id={result.lifecycle_run_id} "
+                    f"state={result.current_state} output={result.output_dir}"
+                )
+                return 0 if result.current_state == "EVIDENCE_READY" else 1
             result = (
                 lifecycle.resume(args.run_id)
                 if args.retraining_command == "lifecycle-resume"

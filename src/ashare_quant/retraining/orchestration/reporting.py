@@ -19,8 +19,15 @@ def render_lifecycle_report(snapshot: LifecycleSnapshot) -> str:
         f"- Observation: {summary.observation_status}",
         f"- Mature sessions: {summary.mature_sessions}/{summary.required_sessions}",
         f"- Promotion evidence: {summary.promotion_evidence_status}",
+        f"- Successful Shadow runs: {len(summary.successful_shadow_run_ids)}",
+        f"- Observation cutoff: {summary.observation_cutoff or 'none'}",
+        f"- Frozen Promotion Policy: {summary.frozen_promotion_policy_hash or 'legacy'}",
+        f"- Evaluated Promotion Policy: {summary.evaluated_promotion_policy_hash or 'none'}",
+        f"- Policy drift: {summary.policy_drift}",
         "",
-        "EVIDENCE_READY only permits evidence preparation. It is not promotion approval.",
+        "EVIDENCE_READY means exact immutable evidence can be prepared under the recorded "
+        "evaluated Promotion Policy. It is not Gate PASS, approval, Champion replacement, "
+        "or deployment.",
         "",
         "## Events",
         "",

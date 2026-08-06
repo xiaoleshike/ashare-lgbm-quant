@@ -13,14 +13,26 @@ import pytest
 from ashare_quant.cli import main
 from ashare_quant.config.settings import AppSettings, PathSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.models.promotion.gate_rules import PromotionGatePolicy
 from ashare_quant.models.shadow.storage import file_sha256
+from ashare_quant.orchestration.lock import detect_production_lock_owner
 from ashare_quant.retraining.execution.schemas import CandidateRegistration, ExecutionResult
+from ashare_quant.retraining.orchestration.controls import LifecycleOperationalControls
+from ashare_quant.retraining.orchestration.dry_run import LifecycleDryRunService
 from ashare_quant.retraining.orchestration.lifecycle import require_transition
 from ashare_quant.retraining.orchestration.schemas import (
+    LifecycleEvent,
     LifecycleInput,
+    LifecycleSnapshot,
+    LifecycleSummary,
     ObservationProgress,
 )
 from ashare_quant.retraining.orchestration.service import RetrainingLifecycleOrchestrator
+from ashare_quant.retraining.orchestration.stages import (
+    latest_successful_shadow_path,
+    resolve_promotion_evidence_references,
+)
+from ashare_quant.retraining.orchestration.storage import LifecycleStorage
 from ashare_quant.retraining.readiness.schemas import (
     ReadinessCheck,
     ReadinessResult,
@@ -76,6 +88,7 @@ def test_full_lifecycle_reuses_services_and_stops_at_observation_pending(
         "SHADOW_ENROLLING",
         "SHADOW_ENROLLED",
         "OBSERVATION_PENDING",
+        "OBSERVATION_PENDING",
     ]
     assert snapshot.summary.parent_model_id == PARENT_ID
     assert snapshot.summary.training_run_id == "training-run-1"
@@ -97,7 +110,7 @@ def test_stop_after_and_resume_preserve_identity(
 
     assert resumed.lifecycle_run_id == first.lifecycle_run_id
     assert resumed.current_state == "OBSERVATION_PENDING"
-    assert calls == ["readiness", "training", "readiness", "validation", "shadow"]
+    assert calls == ["readiness", "training", "validation", "shadow"]
 
 
 def test_readiness_failure_prevents_training(
@@ -153,6 +166,7 @@ def test_observation_threshold_excludes_other_origins_and_unavailable(
         training_run_id="training-run-1",
         validation_run_id="validation-run-1",
         required_sessions=3,
+        accepted_shadow_run_ids=("shadow-run-1",),
     )
 
     assert first.current_state == "OBSERVATION_PENDING"
@@ -194,7 +208,7 @@ def test_sufficient_observation_only_marks_evidence_ready_when_sources_exist(
     atomic_write_json(tmp_path / "observation-manifest.json", {"status": "success"})
     monkeypatch.setattr(
         "ashare_quant.retraining.orchestration.service.resolve_promotion_evidence_references",
-        lambda **kwargs: (True, {}, {}, ()),
+        lambda **kwargs: (True, {}, {}, (), ()),
     )
 
     result = service.run(REQUEST_ID)
@@ -292,6 +306,391 @@ def test_lifecycle_never_calls_promotion_registry_trading_or_candidates(
     assert result.current_state == "OBSERVATION_PENDING"
 
 
+def test_failed_shadow_refresh_preserves_successful_enrollment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = lifecycle_service(tmp_path, monkeypatch)
+    first = service.run(REQUEST_ID)
+    before = service.storage.read(first.lifecycle_run_id)
+    assert before is not None
+    assert before.stage_results["shadow_enrollment"].status == "success"
+    assert isinstance(service.shadow, FakeShadow)
+    service.shadow.failure = "shadow"
+
+    resumed = service.resume(first.lifecycle_run_id)
+    after = service.storage.read(first.lifecycle_run_id)
+
+    assert resumed.current_state == "OBSERVATION_PENDING"
+    assert after is not None
+    assert after.stage_results["shadow_enrollment"] == before.stage_results["shadow_enrollment"]
+    assert after.summary.successful_shadow_run_ids == ("shadow-run-1",)
+    assert latest_successful_shadow_path(after.stage_results).is_file()
+    assert any("Shadow refresh failed" in event.message for event in after.events)
+    assert any(name.startswith("shadow_refresh_attempt:") for name in after.stage_results)
+
+
+def test_policy_drift_keeps_identity_and_explicit_revalidation_never_trains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls = lifecycle_service(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "ashare_quant.retraining.orchestration.service.track_prospective_observations",
+        lambda **kwargs: ObservationProgress(
+            "OBSERVATION_SUFFICIENT",
+            60,
+            60,
+            {"observation": str(tmp_path / "observation-manifest.json")},
+            {"observation": file_sha256(tmp_path / "observation-manifest.json")},
+            ("shadow-run-1",),
+            "20260101",
+            "20260331",
+            "20260331",
+            "a" * 64,
+        ),
+    )
+    atomic_write_json(tmp_path / "observation-manifest.json", {"status": "success"})
+    monkeypatch.setattr(
+        "ashare_quant.retraining.orchestration.service.resolve_promotion_evidence_references",
+        lambda **kwargs: (True, {}, {}, (), ()),
+    )
+    first = service.run(REQUEST_ID)
+    assert first.current_state == "EVIDENCE_READY"
+    training_calls = calls.count("training")
+    service.promotion_policy = service.promotion_policy.model_copy(
+        update={"policy_version": "changed"}
+    )
+
+    resumed = service.resume(first.lifecycle_run_id)
+    assert resumed.lifecycle_run_id == first.lifecycle_run_id
+    assert resumed.current_state == "POLICY_REVIEW_REQUIRED"
+    assert calls.count("training") == training_calls
+
+    revalidated = service.revalidate_evidence(first.lifecycle_run_id)
+    status = service.status(first.lifecycle_run_id)
+    assert revalidated.current_state == "EVIDENCE_READY"
+    assert status["evaluated_promotion_policy_hash"] == service.promotion_policy.policy_hash
+    assert status["policy_drift"] is True
+    assert status["evidence_stale"] is False
+    assert calls.count("training") == training_calls
+
+
+def test_observation_progress_appends_only_when_identity_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = lifecycle_service(tmp_path, monkeypatch)
+    sessions = {"value": 10}
+
+    def progress(**kwargs: object) -> ObservationProgress:
+        count = sessions["value"]
+        return ObservationProgress(
+            "OBSERVATION_ACCUMULATING",
+            count,
+            60,
+            {},
+            {},
+            ("shadow-run-1",),
+            "20260101",
+            f"202601{count:02d}",
+            f"202601{count:02d}",
+            str(count).zfill(64),
+        )
+
+    monkeypatch.setattr(
+        "ashare_quant.retraining.orchestration.service.track_prospective_observations",
+        progress,
+    )
+    first = service.run(REQUEST_ID)
+    snapshot_10 = service.storage.read(first.lifecycle_run_id)
+    assert snapshot_10 is not None
+    sessions["value"] = 11
+    service.resume(first.lifecycle_run_id)
+    snapshot_11 = service.storage.read(first.lifecycle_run_id)
+    assert snapshot_11 is not None
+    assert len(snapshot_11.events) == len(snapshot_10.events) + 1
+    assert snapshot_11.events[-1].details["previous_mature_sessions"] == 10
+    assert snapshot_11.events[-1].details["current_mature_sessions"] == 11
+    service.resume(first.lifecycle_run_id)
+    unchanged = service.storage.read(first.lifecycle_run_id)
+    assert unchanged is not None
+    assert unchanged.events == snapshot_11.events
+
+
+def test_budget_uses_shanghai_date_and_counts_failed_attempts(tmp_path: Path) -> None:
+    storage = LifecycleStorage(tmp_path / "reports")
+    snapshot = control_snapshot(
+        "prior",
+        parent=PARENT_ID,
+        horizon=10,
+        timestamps=("2026-08-01T16:10:00+00:00", "2026-08-01T16:20:00+00:00"),
+    )
+    controls = LifecycleOperationalControls(
+        storage=storage,
+        timezone="Asia/Shanghai",
+        max_daily_training_runs=2,
+        cooldown_days=30,
+        now=datetime.fromisoformat("2026-08-01T16:30:00+00:00"),
+    )
+    controls._snapshots = lambda: (snapshot,)  # type: ignore[method-assign]
+
+    decision = controls.budget()
+
+    assert decision.operational_date == "2026-08-02"
+    assert decision.observed_attempts_before == 2
+    assert decision.allowed is False
+
+
+def test_cooldown_is_parent_and_horizon_specific(tmp_path: Path) -> None:
+    storage = LifecycleStorage(tmp_path / "reports")
+    previous = control_snapshot(
+        "prior",
+        parent=PARENT_ID,
+        horizon=10,
+        timestamps=("2026-07-25T02:00:00+00:00",),
+    )
+    controls = LifecycleOperationalControls(
+        storage=storage,
+        timezone="Asia/Shanghai",
+        max_daily_training_runs=5,
+        cooldown_days=30,
+        now=datetime.fromisoformat("2026-08-01T02:00:00+00:00"),
+    )
+    controls._snapshots = lambda: (previous,)  # type: ignore[method-assign]
+
+    blocked = controls.cooldown(lifecycle_run_id="new", parent_model_id=PARENT_ID, horizon=10)
+    other_horizon = controls.cooldown(lifecycle_run_id="new", parent_model_id=PARENT_ID, horizon=20)
+    same_run = controls.cooldown(lifecycle_run_id="prior", parent_model_id=PARENT_ID, horizon=10)
+
+    assert blocked.allowed is False
+    assert blocked.cooldown_expiry_date == "2026-08-24"
+    assert other_horizon.allowed is True
+    assert same_run.allowed is True
+
+
+def test_corrupted_budget_history_fails_closed(tmp_path: Path) -> None:
+    storage = LifecycleStorage(tmp_path / "reports")
+    (storage.root / "broken").mkdir(parents=True)
+    controls = LifecycleOperationalControls(
+        storage=storage,
+        timezone="Asia/Shanghai",
+        max_daily_training_runs=1,
+        cooldown_days=30,
+        now=NOW,
+    )
+
+    with pytest.raises(DataValidationError, match="recovery required"):
+        controls.budget()
+
+
+def test_lifecycle_dry_run_is_deterministic_and_does_not_execute_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls = lifecycle_service(tmp_path, monkeypatch)
+    request_path = service.request_storage.requests_root / REQUEST_ID / "training_request.json"
+    atomic_write_json(request_path, {"request_id": REQUEST_ID})
+    dry_run = LifecycleDryRunService(service)
+
+    first = dry_run.run(REQUEST_ID)
+    second = dry_run.run(REQUEST_ID)
+
+    assert first.status == "READY_TO_EXECUTE"
+    assert second.dry_run_id == first.dry_run_id
+    assert second.idempotent is True
+    assert calls == ["readiness", "readiness"]
+    assert not (tmp_path / "models/challengers" / MODEL_ID).exists()
+    manifest = _json(first.output_dir / "manifest.json")
+    assert manifest["manifest_written_last"] is True
+
+
+def test_lifecycle_dry_run_reports_failed_readiness_as_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls = lifecycle_service(tmp_path, monkeypatch, readiness_status="FAILED")
+    request_path = service.request_storage.requests_root / REQUEST_ID / "training_request.json"
+    atomic_write_json(request_path, {"request_id": REQUEST_ID})
+
+    result = LifecycleDryRunService(service).run(REQUEST_ID)
+
+    assert result.status == "BLOCKED"
+    assert calls == ["readiness"]
+    assert not (tmp_path / "models/challengers" / MODEL_ID).exists()
+
+
+def test_resume_uses_frozen_identity_without_calling_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = lifecycle_service(tmp_path, monkeypatch)
+    first = service.run(REQUEST_ID, stop_after="training")
+    (tmp_path / "config/default.yaml").write_text("environment: changed\n", encoding="utf-8")
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("resume recursively called lifecycle-run")
+
+    monkeypatch.setattr(service, "run", forbidden)
+    resumed = service.resume(first.lifecycle_run_id)
+
+    assert resumed.lifecycle_run_id == first.lifecycle_run_id
+    assert resumed.current_state == "OBSERVATION_PENDING"
+
+
+def test_changed_or_removed_observation_evidence_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = lifecycle_service(tmp_path, monkeypatch)
+    source = tmp_path / "observation.json"
+    atomic_write_json(source, {"version": 1})
+    current = {
+        "progress": ObservationProgress(
+            "OBSERVATION_ACCUMULATING",
+            10,
+            60,
+            {"observation": str(source)},
+            {"observation": file_sha256(source)},
+            ("shadow-run-1",),
+            "20260101",
+            "20260110",
+            "20260110",
+            "a" * 64,
+        )
+    }
+    monkeypatch.setattr(
+        "ashare_quant.retraining.orchestration.service.track_prospective_observations",
+        lambda **kwargs: current["progress"],
+    )
+    first = service.run(REQUEST_ID)
+    atomic_write_json(source, {"version": 2})
+
+    with pytest.raises(DataValidationError, match="source hash changed"):
+        service.resume(first.lifecycle_run_id)
+
+
+def test_exact_evidence_rejects_unrelated_paper_portfolio(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    execution = tmp_path / "execution.json"
+    validation = tmp_path / "validation.json"
+    observation = reports / "performance_observation/20260731/manifest.json"
+    shadow = reports / f"shadow_predictions/20260731/retrained/{MODEL_ID}/manifest.json"
+    performance = reports / "model_monitor/20260731/performance/manifest.json"
+    alerts = reports / "model_monitor/20260731/alerts/manifest.json"
+    monitor = reports / "model_monitor/20260731/manifest.json"
+    for path, payload in (
+        (execution, {"training_run_id": "training-run-1"}),
+        (validation, {"validation_run_id": "validation-run-1"}),
+        (observation, {"observation_as_of": "20260731"}),
+    ):
+        atomic_write_json(path, payload)
+    atomic_write_json(
+        shadow,
+        {
+            "model_id": MODEL_ID,
+            "model_origin": "retrained_challenger",
+            "training_request_id": REQUEST_ID,
+            "training_run_id": "training-run-1",
+            "validation_run_id": "validation-run-1",
+            "production_run_id": "production-run-1",
+            "shadow_run_id": "shadow-run-1",
+            "access_policy": "prospective_production",
+            "models": [{"model_id": MODEL_ID, "native_horizon": 10}],
+        },
+    )
+    atomic_write_json(
+        performance,
+        {
+            "artifact_name": "performance_monitor",
+            "as_of": "20260731",
+            "models": [
+                {
+                    "model_id": MODEL_ID,
+                    "model_origin": "retrained_challenger",
+                    "horizon": 10,
+                    "training_run_id": "training-run-1",
+                    "validation_run_id": "validation-run-1",
+                }
+            ],
+        },
+    )
+    atomic_write_json(
+        alerts,
+        {
+            "as_of": "20260731",
+            "source_metrics": [
+                {"path": "performance/manifest.json", "hash": file_sha256(performance)}
+            ],
+        },
+    )
+    atomic_write_json(
+        monitor,
+        {
+            "artifact_name": "production_monitor_manifest",
+            "as_of": "20260731",
+            "monitor_metric_file_hashes": {"performance_manifest": file_sha256(performance)},
+        },
+    )
+    atomic_write_json(
+        reports / "paper_trading_daily/20260731/manifest.json",
+        {"model_id": "unrelated-champion", "horizon": 10},
+    )
+    progress = ObservationProgress(
+        "OBSERVATION_SUFFICIENT",
+        60,
+        60,
+        {"performance_observation:20260731": str(observation)},
+        {"performance_observation:20260731": file_sha256(observation)},
+        ("shadow-run-1",),
+        "20260501",
+        "20260731",
+        "20260731",
+        "o" * 64,
+    )
+
+    ready, _, _, warnings, references = resolve_promotion_evidence_references(
+        reports_root=reports,
+        lifecycle_run_id="lifecycle-1",
+        request_id=REQUEST_ID,
+        model_id=MODEL_ID,
+        parent_model_id=PARENT_ID,
+        horizon=10,
+        training_run_id="training-run-1",
+        validation_run_id="validation-run-1",
+        execution_path=execution,
+        validation_path=validation,
+        shadow_path=shadow,
+        observation=progress,
+        policy=PromotionGatePolicy(require={"paper_trading": True}),
+    )
+
+    assert ready is False
+    assert "missing policy-required retrained Challenger paper-trading evidence" in warnings
+    assert all(reference.lifecycle_run_id == "lifecycle-1" for reference in references)
+
+
+def control_snapshot(
+    run_id: str, *, parent: str, horizon: int, timestamps: tuple[str, ...]
+) -> LifecycleSnapshot:
+    events = tuple(
+        LifecycleEvent(
+            sequence=index,
+            state="TRAINING",
+            created_at=value,
+            message="attempt",
+        )
+        for index, value in enumerate(timestamps, start=1)
+    )
+    summary = LifecycleSummary(
+        lifecycle_run_id=run_id,
+        request_id=f"request-{run_id}",
+        model_id=None,
+        parent_model_id=parent,
+        horizon=horizon,  # type: ignore[arg-type]
+        trigger_reasons=("manual_request",),
+        current_state="TRAINING",
+        readiness_run_id="readiness",
+        required_sessions=60,
+        created_at=timestamps[0],
+        updated_at=timestamps[-1],
+    )
+    return LifecycleSnapshot(summary, events, {})
+
+
 def lifecycle_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -366,6 +765,9 @@ class FakeExecution:
 
     def execute(self, request_id: str) -> ExecutionResult:
         self.calls.append("training")
+        assert (
+            detect_production_lock_owner(self.root / "runs/.retraining-lifecycle.lock") is not None
+        )
         if self.failure == "training":
             raise RuntimeError("training fixture failure")
         artifact = self.root / "models/challengers" / MODEL_ID
@@ -430,11 +832,16 @@ class FakeShadow:
         atomic_write_json(
             output / "manifest.json",
             {
+                "model_id": model_id,
                 "model_origin": "retrained_challenger",
+                "training_request_id": REQUEST_ID,
                 "training_run_id": "training-run-1",
                 "validation_run_id": "validation-run-1",
                 "access_policy": "prospective_production",
                 "production_run_id": "production-run-1",
+                "shadow_run_id": "shadow-run-1",
+                "generated_at": NOW.isoformat(),
+                "models": [{"model_id": model_id, "native_horizon": 10}],
             },
         )
         return RetrainedShadowResult(model_id, date, "shadow-run-1", 10, output)

@@ -17,11 +17,17 @@ from ashare_quant.models.promotion.schemas import (
 from ashare_quant.models.shadow.storage import canonical_payload_hash, file_sha256
 
 _EVIDENCE_SPECS = {
-    "challenger_evaluation": ("challenger_evaluation_manifest",),
-    "executable_validation": ("executable_oos_portfolio_validation_manifest",),
+    "challenger_evaluation": (
+        "challenger_evaluation_manifest",
+        "retraining_offline_validation",
+    ),
+    "executable_validation": (
+        "executable_oos_portfolio_validation_manifest",
+        "retraining_executable_validation",
+    ),
     "shadow_prediction": ("shadow_prediction_bundle",),
     "performance_observation": ("performance_observation",),
-    "monitoring_summary": ("production_monitor_summary",),
+    "monitoring_summary": ("production_monitor_summary", "performance_monitor"),
     "alerts": ("alert_engine",),
 }
 
@@ -141,10 +147,15 @@ def _validate_model_lineage(
     candidate_model_id: str,
     champion_model_id: str,
 ) -> None:
+    retrained = payload.get("artifact_name") in {
+        "retraining_offline_validation",
+        "retraining_executable_validation",
+    }
     if evidence_type in {"challenger_evaluation", "executable_validation"}:
         if payload.get("challenger_model_id") != candidate_model_id:
-            raise DataValidationError(f"{evidence_type} does not identify candidate model")
-        if payload.get("champion_model_id") != champion_model_id:
+            if not retrained or payload.get("model_id") != candidate_model_id:
+                raise DataValidationError(f"{evidence_type} does not identify candidate model")
+        if not retrained and payload.get("champion_model_id") != champion_model_id:
             raise DataValidationError(f"{evidence_type} does not identify current champion")
     if evidence_type == "shadow_prediction":
         models = payload.get("models")
@@ -163,8 +174,12 @@ def _validate_model_lineage(
 
 def _evidence_date(evidence_type: str, payload: dict[str, Any], path: Path) -> str:
     key_candidates = {
-        "challenger_evaluation": ("maximum_prediction_date", "evaluation_end", "created_date"),
-        "executable_validation": ("maximum_signal_date", "end_date"),
+        "challenger_evaluation": (
+            "maximum_prediction_date",
+            "evaluation_end",
+            "created_date",
+        ),
+        "executable_validation": ("maximum_signal_date", "end_date", "evaluation_end"),
         "shadow_prediction": ("as_of",),
         "performance_observation": ("observation_as_of", "as_of"),
         "monitoring_summary": ("as_of",),

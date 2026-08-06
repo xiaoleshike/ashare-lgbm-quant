@@ -17,6 +17,20 @@ make typecheck
 Set `TUSHARE_TOKEN` in the process environment before running data-ingestion workflows.
 Phase 0 does not download market data or train models.
 
+## Development verification
+
+CI runs for pushes to `main`, pull requests targeting `main`, and manual dispatch. It uses Python
+3.12 and the editable `.[dev]` installation. CI requires no Tushare token, paid API, production
+market data, or environment file; tests use fixtures and temporary directories.
+
+```bash
+pytest
+ruff check .
+ruff format --check .
+mypy src
+git diff --check
+```
+
 ## Data ingestion
 
 Phase 1 adds Tushare raw data ingestion and partitioned Parquet storage.

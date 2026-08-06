@@ -97,6 +97,73 @@ Run `lifecycle-resume` after a new production session to publish the model's lat
 Shadow sidecar and refresh observation progress. The lifecycle remains separate from the hard
 daily Production Pipeline.
 
+## Evidence Hardening
+
+Initial `shadow_enrollment` and later `shadow_refresh` attempts are separate. After enrollment
+succeeds, a failed refresh is an append-only operational warning and cannot erase the enrollment
+manifest, its hash, or earlier successful `shadow_run_id` values. `SHADOW_FAILED` applies only
+before the first successful enrollment.
+
+Observation progress appends an event whenever mature-session coverage, cutoff, accepted Shadow
+identities, source artifacts, or the aggregate evidence hash changes. Removed or mutated historical
+observation artifacts fail closed.
+
+Promotion evidence must match the exact request, parent, model, horizon, training run, validation
+run, accepted Shadow runs, and observation/monitoring cutoff. An unrelated Paper Trading portfolio
+never satisfies a required Paper Trading gate. Without a dedicated retrained portfolio, evidence
+remains `NOT_READY`.
+
+## Frozen Identity and Policy Review
+
+The lifecycle ID freezes the training-request hash, creation-time retraining/lifecycle/Promotion
+Policy hashes, and creation-time config hash. Readiness run IDs, current config, timestamps, and
+daily Shadow/Observation identities do not change it. `lifecycle-resume` loads that identity
+directly instead of recursively invoking `lifecycle-run`.
+
+If the current Promotion Policy differs from the frozen or last evaluated policy, status becomes
+`POLICY_REVIEW_REQUIRED`. Revalidate exact evidence without retraining:
+
+```bash
+ashare-quant --config config/default.yaml retraining lifecycle-revalidate-evidence \
+  --run-id LIFECYCLE_RUN_ID
+```
+
+`EVIDENCE_READY` means only that exact immutable evidence can be prepared under the recorded
+evaluated Promotion Policy. It does not mean Promotion Gate PASS, human approval, Champion
+replacement, or automatic deployment.
+
+## Operational Controls
+
+Training-attempt budgets use `production.timezone`, defaulting to `Asia/Shanghai`. Every transition
+into `TRAINING`, including failed and retried attempts, consumes the budget. Unreadable or
+incomplete lifecycle history blocks training. `lifecycle.cooldown_days` blocks the first training
+attempt of another lifecycle for the same parent model and horizon. It does not block same-run
+resume, Shadow refresh, observation tracking, evidence revalidation, or recovery. Request cooldown
+prevents repeated trigger requests; lifecycle cooldown prevents repeated model fits.
+
+Lock order is lifecycle orchestration lock first, then lower-level production/execution locks. A
+lower-level service must never acquire the lifecycle lock. `max_parallel_runs` remains one.
+
+## Controlled Dry Run
+
+```bash
+ashare-quant --config config/default.yaml retraining lifecycle-dry-run \
+  --request-id REQUEST_ID
+```
+
+The dry run checks request integrity, readiness, policy, lock availability, cooldown, and daily
+budget. It never trains, validates a model, scores Shadow predictions, reads observations, creates
+Promotion evidence, or changes production state.
+
+For a future operator-authorized historical rehearsal:
+
+1. Select a historical trading date with complete immutable production artifacts.
+2. Confirm no production or training process is active.
+3. Run `lifecycle-dry-run` and inspect every warning.
+4. Stop if any warning is unexplained.
+5. After separate authorization, run `lifecycle-run --stop-after readiness` only.
+6. Do not proceed to real training without explicit authorization.
+
 ## Failure Recovery
 
 1. Run `lifecycle-status` and `lifecycle-recovery`.

@@ -35,6 +35,11 @@ ashare-quant --config config/default.yaml retraining execute \
   --request-id REQUEST_ID
 ```
 
+Before execution, use `retraining lifecycle-dry-run --request-id REQUEST_ID`. It checks current
+readiness, the Asia/Shanghai daily training-attempt budget, and lifecycle cooldown without invoking
+LightGBM or creating a candidate. Request cooldown controls trigger creation; lifecycle cooldown
+separately controls repeated training starts for the same parent model and horizon.
+
 Inspect lifecycle status:
 
 ```bash

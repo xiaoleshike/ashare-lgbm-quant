@@ -78,6 +78,28 @@ separate evidence preparation and never changes Champion automatically. See
 `docs/retrained_challenger_lifecycle.md` for the full state and recovery contract.
 ```
 
+Before execution, run the no-training rehearsal:
+
+```bash
+ashare-quant --config config/default.yaml retraining lifecycle-dry-run \
+  --request-id REQUEST_ID
+```
+
+Training budgets and lifecycle cooldown dates use the configured production timezone, normally
+Asia/Shanghai. Failed model fits still consume a daily attempt. Corrupt lifecycle history blocks
+training. Shadow refresh failures after successful enrollment preserve all successful evidence.
+
+When status reports `POLICY_REVIEW_REQUIRED`, revalidate exact evidence before creating a
+Promotion Request:
+
+```bash
+ashare-quant --config config/default.yaml retraining lifecycle-revalidate-evidence \
+  --run-id LIFECYCLE_RUN_ID
+```
+
+Only exact model, horizon, training, validation, Shadow, observation, monitoring, alert, and any
+policy-required Paper Trading lineage is accepted.
+
 Discover and freeze current evidence:
 
 ```bash

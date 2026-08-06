@@ -20,6 +20,7 @@ def validate_lifecycle_input(
     storage: RetrainingRequestStorage,
     retraining_policy: RetrainingPolicy,
     promotion_policy: PromotionGatePolicy,
+    require_current_policy: bool = True,
 ) -> LifecycleInput:
     """Require a complete immutable request without consuming or changing it."""
 
@@ -38,16 +39,17 @@ def validate_lifecycle_input(
     validate_recorded_evidence(reports_root, request.evidence)
     if evidence_hash(request.evidence) != request.evidence_hash:
         raise DataValidationError("lifecycle request evidence hash mismatch")
-    if request.policy_hash != retraining_policy.policy_hash:
+    if require_current_policy and request.policy_hash != retraining_policy.policy_hash:
         raise DataValidationError("lifecycle retraining policy differs from frozen request")
-    if request.promotion_policy_hash != promotion_policy.policy_hash:
+    if require_current_policy and request.promotion_policy_hash != promotion_policy.policy_hash:
         raise DataValidationError("lifecycle promotion policy differs from frozen request")
     if not retraining_policy.lifecycle.enabled:
         raise DataValidationError("retraining lifecycle orchestration is disabled")
     return LifecycleInput(
         request=request,
         training_request_hash=request_hash,
-        retraining_policy_hash=retraining_policy.policy_hash,
+        retraining_policy_hash=request.policy_hash,
         lifecycle_policy_hash=retraining_policy.lifecycle_policy_hash,
-        promotion_policy_hash=promotion_policy.policy_hash,
+        promotion_policy_hash=request.promotion_policy_hash or promotion_policy.policy_hash,
+        frozen_config_hash=manifest.config_hash,
     )

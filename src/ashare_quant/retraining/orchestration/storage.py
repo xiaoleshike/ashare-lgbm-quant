@@ -34,6 +34,22 @@ class LifecycleStorage:
     def output_dir(self, run_id: str) -> Path:
         return self.root / run_id
 
+    def find_by_request(self, request_id: str) -> LifecycleSnapshot | None:
+        """Return the one immutable lifecycle bound to a request, failing on ambiguity."""
+
+        if not self.root.is_dir():
+            return None
+        matches: list[LifecycleSnapshot] = []
+        for directory in sorted(path for path in self.root.iterdir() if path.is_dir()):
+            if directory.name == ".tmp":
+                continue
+            snapshot = self.read(directory.name)
+            if snapshot is not None and snapshot.summary.request_id == request_id:
+                matches.append(snapshot)
+        if len(matches) > 1:
+            raise DataValidationError(f"request has conflicting lifecycle identities: {request_id}")
+        return matches[0] if matches else None
+
     def read(self, run_id: str) -> LifecycleSnapshot | None:
         output = self.output_dir(run_id)
         if not output.exists():
@@ -95,6 +111,7 @@ class LifecycleStorage:
                 raise DataValidationError("lifecycle identity cannot overwrite existing run")
             if snapshot.events[: len(previous.events)] != previous.events:
                 raise DataValidationError("lifecycle event history is not append-only")
+            _require_successful_stage_evidence_preserved(previous, snapshot)
         staging = Path(tempfile.mkdtemp(dir=self.staging_root, prefix="lifecycle_"))
         backup = self.staging_root / f".{snapshot.summary.lifecycle_run_id}.backup"
         try:
@@ -206,3 +223,22 @@ def _validate_staged_snapshot(
     }
     if any(getattr(manifest, key) != value for key, value in expected.items()):
         raise DataValidationError("staged lifecycle manifest hash mismatch")
+
+
+def _require_successful_stage_evidence_preserved(
+    previous: LifecycleSnapshot, current: LifecycleSnapshot
+) -> None:
+    """Fail closed if an immutable successful stage reference disappears or mutates."""
+
+    for name, old_stage in previous.stage_results.items():
+        if old_stage.status != "success":
+            continue
+        new_stage = current.stage_results.get(name)
+        if new_stage is None:
+            raise DataValidationError(f"successful lifecycle stage disappeared: {name}")
+        missing_paths = sorted(set(old_stage.artifact_paths) - set(new_stage.artifact_paths))
+        if missing_paths:
+            raise DataValidationError(f"successful stage artifact references removed: {name}")
+        for key, digest in old_stage.artifact_hashes.items():
+            if new_stage.artifact_hashes.get(key) != digest:
+                raise DataValidationError(f"successful stage artifact hash changed: {name}:{key}")
