@@ -174,5 +174,11 @@ Use `retraining qualification-start` for preflight, dry-run, and readiness. Real
 Shadow are disabled by default. Each privileged stage requires an unchanged static policy, an
 enabled runtime capability, a short-lived single-use `qualification-authorize` artifact, and a
 separate `qualification-advance` command. Capability switches do not change qualification identity
-and never replace authorization. Never skip checkpoints or treat `QUALIFIED` as Promotion approval. See
-`docs/controlled_operational_qualification.md` for the complete procedure and recovery commands.
+and never replace authorization. An exact repeated `ACTIVE` authorization request is idempotent and
+does not extend its expiry. Expired, revoked, consumed, and stale records may be reviewed again with
+the same operator and reason, producing a new immutable authorization. A different request cannot
+replace an existing active authorization: inspect it, revoke it explicitly, confirm `REVOKED`, then
+issue the replacement. Failed training or Shadow attempts consume their authorization, so a retry
+requires both the explicit pending retry state and a new authorization. Never skip checkpoints or
+treat `QUALIFIED` as Promotion approval. See `docs/controlled_operational_qualification.md` for the
+complete procedure and recovery commands.

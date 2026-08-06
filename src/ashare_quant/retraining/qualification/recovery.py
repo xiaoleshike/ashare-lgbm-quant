@@ -108,6 +108,12 @@ def _inspect_authorizations(
         issues.append(str(error))
         return
     active_by_stage: dict[str, int] = {"training": 0, "shadow": 0}
+    authorization_events = {
+        str(event.details["authorization_id"]): event
+        for event in events
+        if isinstance(event.details.get("authorization_id"), str)
+        and "authorization_sha256" in event.details
+    }
     for authorization, _, digest in authorizations:
         if authorization.qualification_run_id != run_id:
             issues.append(
@@ -142,9 +148,11 @@ def _inspect_authorizations(
             expiry = datetime.fromisoformat(authorization.expires_at)
             if expiry.tzinfo is None:
                 issues.append(f"naive authorization expiration: {authorization.authorization_id}")
-            elif now.astimezone(UTC) >= expiry.astimezone(UTC):
-                issues.append(f"expired authorization: {authorization.authorization_id}")
-            else:
+            elif (
+                now.astimezone(UTC) < expiry.astimezone(UTC)
+                and matching
+                and matching[0] == events[-1]
+            ):
                 active_by_stage[authorization.stage] += 1
         for claim, _, _ in claims:
             if claim.authorization_sha256 != digest or claim.stage != authorization.stage:
@@ -165,6 +173,51 @@ def _inspect_authorizations(
             ):
                 issues.append(
                     f"invalid authorization completion binding: {receipts[0][0].receipt_id}"
+                )
+    for stage in ("training", "shadow"):
+        stage_records = [item for item in authorizations if item[0].stage == stage]
+        for authorization, _, _ in stage_records:
+            event = authorization_events.get(authorization.authorization_id)
+            if event is None:
+                continue
+            later = [
+                other
+                for other, _, _ in stage_records
+                if (
+                    authorization_events.get(other.authorization_id) is not None
+                    and authorization_events[other.authorization_id].sequence > event.sequence
+                )
+            ]
+            if not later:
+                continue
+            try:
+                revocations = storage.revocations(run_id, authorization.authorization_id)
+                claims = storage.claims(run_id, authorization.authorization_id)
+                expiry = datetime.fromisoformat(authorization.expires_at)
+                replacement_time = min(
+                    datetime.fromisoformat(authorization_events[item.authorization_id].created_at)
+                    for item in later
+                )
+            except (DataValidationError, OSError, ValueError) as error:
+                issues.append(str(error))
+                continue
+            next_event = next(
+                (item for item in events if item.sequence == event.sequence + 1),
+                None,
+            )
+            if (
+                not revocations
+                and not claims
+                and expiry.tzinfo is not None
+                and replacement_time.tzinfo is not None
+                and replacement_time.astimezone(UTC) < expiry.astimezone(UTC)
+                and next_event is not None
+                and next_event.details.get("authorization_id")
+                in {item.authorization_id for item in later}
+            ):
+                issues.append(
+                    "active authorization implicitly superseded without revocation: "
+                    f"{authorization.authorization_id}"
                 )
     for stage, count in active_by_stage.items():
         if count > 1:

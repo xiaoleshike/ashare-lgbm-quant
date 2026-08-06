@@ -18,6 +18,9 @@ from ashare_quant.monitoring.performance_observation.storage import (
     publish_observation_artifact,
 )
 from ashare_quant.retraining.orchestration.dry_run import LifecycleDryRunResult
+from ashare_quant.retraining.qualification.authorization import (
+    QualificationAuthorizationConflictError,
+)
 from ashare_quant.retraining.qualification.authorization_schemas import AuthorizationStage
 from ashare_quant.retraining.qualification.lifecycle import require_qualification_transition
 from ashare_quant.retraining.qualification.schemas import QualificationCheck
@@ -729,6 +732,368 @@ def test_authorization_expiration_must_be_aware_and_within_policy_maximum(
             reason="overlong expiry",
             expires_at=(NOW + timedelta(minutes=241)).isoformat(),
         )
+
+
+def test_expired_authorization_can_be_reissued_with_same_review_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    first = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+        expires_at=(NOW + timedelta(minutes=1)).isoformat(),
+    )
+    first_payload = (first.output_dir / "authorization.json").read_bytes()
+    before = service.storage.read(started.qualification_run_id)
+    assert before is not None
+    service.now = lambda: NOW + timedelta(minutes=2)
+    service.authorization.now = service.now
+
+    second = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+    )
+
+    after = service.storage.read(started.qualification_run_id)
+    assert after is not None
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert second.authorization_id != first.authorization_id
+    assert second.idempotent is False
+    assert status.status == "ACTIVE"
+    assert status.authorization_id == second.authorization_id
+    assert first.authorization_id in status.expired_authorization_ids
+    assert len(after.events) == len(before.events) + 1
+    assert (first.output_dir / "authorization.json").read_bytes() == first_payload
+
+
+def test_revoked_authorization_can_be_reissued_with_same_review_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    first = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+    )
+    first_payload = (first.output_dir / "authorization.json").read_bytes()
+    service.revoke_authorization(
+        started.qualification_run_id,
+        authorization_id=first.authorization_id,
+        revoked_by="operator-b",
+        reason="replacement requested",
+    )
+
+    second = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+    )
+
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert second.authorization_id != first.authorization_id
+    assert status.status == "ACTIVE"
+    assert status.authorization_id == second.authorization_id
+    assert first.authorization_id in status.revoked_authorization_ids
+    assert (first.output_dir / "authorization.json").read_bytes() == first_payload
+
+
+def test_authorization_status_uses_documented_historical_priority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    expired = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="expiring review",
+        expires_at=(NOW + timedelta(minutes=1)).isoformat(),
+    )
+    service.now = lambda: NOW + timedelta(minutes=2)
+    service.authorization.now = service.now
+    revoked = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-b",
+        reason="withdrawn review",
+    )
+    service.revoke_authorization(
+        started.qualification_run_id,
+        authorization_id=revoked.authorization_id,
+        revoked_by="operator-b",
+        reason="withdraw review",
+    )
+
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+
+    assert status.status == "REVOKED"
+    assert status.authorization_id == revoked.authorization_id
+    assert expired.authorization_id in status.expired_authorization_ids
+    assert revoked.authorization_id in status.revoked_authorization_ids
+
+
+def test_consumed_authorization_can_be_reissued_after_explicit_retry_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(
+        tmp_path, monkeypatch, real_training=True, failure="training"
+    )
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    first_id = authorize_stage(service, started.qualification_run_id, "training")
+    assert service.advance(started.qualification_run_id, target="training").state == (
+        "TRAINING_FAILED"
+    )
+    assert service.advance(started.qualification_run_id, target="training").state == (
+        "TRAINING_PENDING_APPROVAL"
+    )
+
+    second = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="fixture-operator",
+        reason="fixture training authorization",
+    )
+
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert second.authorization_id != first_id
+    assert status.status == "ACTIVE"
+    assert first_id in status.consumed_authorization_ids
+    assert calls == ["readiness", "training"]
+
+
+def test_consumed_shadow_authorization_can_be_reissued_after_retry_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(
+        tmp_path,
+        monkeypatch,
+        real_training=True,
+        real_shadow=True,
+        failure="shadow",
+    )
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorize_stage(service, started.qualification_run_id, "training")
+    service.advance(started.qualification_run_id, target="training")
+    service.advance(started.qualification_run_id, target="validation")
+    first_id = authorize_stage(service, started.qualification_run_id, "shadow")
+    assert service.advance(started.qualification_run_id, target="shadow").state == "SHADOW_FAILED"
+    assert service.advance(started.qualification_run_id, target="shadow").state == (
+        "SHADOW_PENDING_APPROVAL"
+    )
+
+    second = service.authorize(
+        started.qualification_run_id,
+        stage="shadow",
+        approved_by="fixture-operator",
+        reason="fixture shadow authorization",
+    )
+
+    status = service.authorization_status(started.qualification_run_id, stage="shadow")[0]
+    assert second.authorization_id != first_id
+    assert status.status == "ACTIVE"
+    assert first_id in status.consumed_authorization_ids
+    assert calls == ["readiness", "training", "validation", "shadow"]
+
+
+def test_stale_authorization_can_be_reissued_for_current_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    first = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+    )
+    snapshot = service.storage.read(started.qualification_run_id)
+    assert snapshot is not None
+    snapshot = service._transition(
+        snapshot,
+        "TRAINING_PENDING_APPROVAL",
+        "operator reviewed updated immutable context",
+    )
+    service._publish(
+        snapshot,
+        service._frozen_from_summary(snapshot),
+        service._manifest_identity(snapshot),
+    )
+    stale = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert stale.status == "STALE"
+
+    second = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+    )
+
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert second.authorization_id != first.authorization_id
+    assert status.status == "ACTIVE"
+    assert first.authorization_id in status.stale_authorization_ids
+
+
+@pytest.mark.parametrize(
+    ("approved_by", "reason", "expires_at"),
+    [
+        ("operator-b", "controlled attempt", None),
+        ("operator-a", "changed rationale", None),
+        ("operator-a", "controlled attempt", (NOW + timedelta(minutes=30)).isoformat()),
+    ],
+)
+def test_active_authorization_conflict_requires_explicit_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_by: str,
+    reason: str,
+    expires_at: str | None,
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    first = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+    )
+    before = service.storage.read(started.qualification_run_id)
+    assert before is not None
+    authorization_root = first.output_dir.parent
+
+    with pytest.raises(
+        QualificationAuthorizationConflictError,
+        match=f"Revoke authorization {first.authorization_id}",
+    ):
+        service.authorize(
+            started.qualification_run_id,
+            stage="training",
+            approved_by=approved_by,
+            reason=reason,
+            expires_at=expires_at,
+        )
+
+    after = service.storage.read(started.qualification_run_id)
+    assert after is not None
+    assert after.events == before.events
+    assert [path.name for path in authorization_root.iterdir()] == [first.authorization_id]
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert status.status == "ACTIVE"
+    assert status.authorization_id == first.authorization_id
+
+
+def test_active_authorization_replacement_requires_revocation_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    first = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="initial review",
+    )
+    with pytest.raises(QualificationAuthorizationConflictError):
+        service.authorize(
+            started.qualification_run_id,
+            stage="training",
+            approved_by="operator-b",
+            reason="replacement review",
+        )
+    service.revoke_authorization(
+        started.qualification_run_id,
+        authorization_id=first.authorization_id,
+        revoked_by="operator-a",
+        reason="transfer review responsibility",
+    )
+
+    replacement = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-b",
+        reason="replacement review",
+    )
+
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert replacement.authorization_id != first.authorization_id
+    assert status.status == "ACTIVE"
+    assert status.authorization_id == replacement.authorization_id
+    assert first.authorization_id in status.revoked_authorization_ids
+
+
+def test_exact_active_explicit_expiry_is_idempotent_without_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    expiry = (NOW + timedelta(minutes=30)).isoformat()
+    first = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+        expires_at=expiry,
+    )
+    original = (first.output_dir / "authorization.json").read_bytes()
+    snapshot = service.storage.read(started.qualification_run_id)
+    assert snapshot is not None
+    second = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+        expires_at=expiry,
+    )
+
+    current = service.storage.read(started.qualification_run_id)
+    assert current is not None
+    assert second.authorization_id == first.authorization_id
+    assert second.idempotent is True
+    assert current.events == snapshot.events
+    assert (first.output_dir / "authorization.json").read_bytes() == original
+
+
+def test_corrupt_authorization_storage_blocks_reissuance_without_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    first = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+    )
+    manifest_path = first.output_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["payload_sha256"] = "0" * 64
+    atomic_write_json(manifest_path, manifest)
+    before = service.storage.read(started.qualification_run_id)
+    assert before is not None
+
+    with pytest.raises(DataValidationError, match="hash mismatch"):
+        service.authorize(
+            started.qualification_run_id,
+            stage="training",
+            approved_by="operator-a",
+            reason="controlled attempt",
+        )
+
+    after = service.storage.read(started.qualification_run_id)
+    assert after is not None
+    assert after.events == before.events
+    assert len(tuple(first.output_dir.parent.iterdir())) == 1
+    recovery = service.recovery(started.qualification_run_id)
+    assert recovery.status == "ACTION_REQUIRED"
+    assert any("hash mismatch" in issue for issue in recovery.issues)
 
 
 def test_consumed_authorization_cannot_be_revoked_or_reused(

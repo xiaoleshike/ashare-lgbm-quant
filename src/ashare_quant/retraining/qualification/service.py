@@ -223,6 +223,15 @@ class OperationalQualificationService:
             "revoked_authorization_ids": sorted(
                 set(training.revoked_authorization_ids) | set(shadow.revoked_authorization_ids)
             ),
+            "expired_authorization_ids": sorted(
+                set(training.expired_authorization_ids) | set(shadow.expired_authorization_ids)
+            ),
+            "stale_authorization_ids": sorted(
+                set(training.stale_authorization_ids) | set(shadow.stale_authorization_ids)
+            ),
+            "invalid_authorization_ids": sorted(
+                set(training.invalid_authorization_ids) | set(shadow.invalid_authorization_ids)
+            ),
             "legacy_authorization_compatible": (
                 snapshot.summary.static_qualification_policy_hash is not None
             ),
@@ -244,7 +253,11 @@ class OperationalQualificationService:
             return result
         issues = list(result.issues)
         for stage in ("training", "shadow"):
-            status = self.authorization.evaluate(snapshot, stage=stage)
+            try:
+                status = self.authorization.evaluate(snapshot, stage=stage)
+            except (DataValidationError, OSError, ValueError) as error:
+                issues.append(f"{stage} authorization storage invalid: {error}")
+                continue
             if status.status in {"INVALID", "STALE", "LEGACY_UNSUPPORTED"}:
                 issues.append(f"{stage} authorization {status.status}: {status.message}")
         if not issues:
@@ -273,7 +286,8 @@ class OperationalQualificationService:
             snapshot = self._required(run_id)
             if snapshot.summary.static_qualification_policy_hash is None:
                 raise QualificationAuthorizationBlockedError(
-                    "LEGACY_AUTHORIZATION_MIGRATION_REQUIRED"
+                    "LEGACY_AUTHORIZATION_MIGRATION_REQUIRED",
+                    "start a new qualification before issuing authorization",
                 )
             self._require_static_policy(snapshot)
             self._validate_source_inventory(snapshot, allow_policy_drift=False)

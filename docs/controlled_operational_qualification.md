@@ -95,6 +95,18 @@ ashare-quant --config config/default.yaml retraining qualification-authorization
 The default validity is 60 minutes and the configured maximum is 240 minutes. Expired, revoked,
 stale, or consumed authorizations cannot execute.
 
+Authorization creation uses exact active idempotency. Repeating the same request while its exact
+snapshot-bound authorization is still `ACTIVE` returns the same `authorization_id` without writing
+another event or extending `issued_at` or `expires_at`. An expired, revoked, consumed, or stale
+authorization is retained as history but does not block a new review using the same `approved_by`
+and reason; the current snapshot and new validity window produce a new authorization identity.
+
+Only one `ACTIVE` authorization may exist for a stage and reviewed snapshot. A different approver,
+reason, or explicit expiry returns `ACTIVE_AUTHORIZATION_CONFLICT`; it does not supersede the active
+record. Inspect and explicitly revoke that authorization before issuing its replacement. Corrupt or
+ambiguous authorization, revocation, or consumption storage fails closed and requires recovery
+inspection.
+
 ### 3. Enable and Run Training
 
 After explicit review, set `allow_real_training: true` and run:
@@ -108,6 +120,8 @@ Expected state: `VALIDATION_PENDING_APPROVAL`. Verify dataset and fold identitie
 hashes, candidate registration, final-test exclusion, and qualification fields. Failed attempts and
 retries consume the Asia/Shanghai daily training-attempt budget. Entering `TRAINING` also consumes
 the authorization even when training fails; retry requires a new authorization.
+After the lifecycle explicitly returns to `TRAINING_PENDING_APPROVAL`, issue that new authorization;
+the consumed authorization and failed-attempt receipts remain immutable.
 
 ### 4. Run Validation
 
@@ -160,6 +174,10 @@ ashare-quant --config config/default.yaml retraining qualification-revoke-author
   --revoked-by OPERATOR_ID --reason "Authorization withdrawn"
 ```
 
+To replace an active authorization, first inspect status, revoke the active ID, confirm it is
+`REVOKED`, and then run `qualification-authorize` again. The replacement binds to the post-revocation
+snapshot. There is no force, replace, supersede, or authorization-reuse option.
+
 ```bash
 ashare-quant --config config/default.yaml retraining qualification-status \
   --run-id QUALIFICATION_RUN_ID
@@ -169,8 +187,10 @@ ashare-quant --config config/default.yaml retraining qualification-cancel \
   --run-id QUALIFICATION_RUN_ID --reason "OPERATOR_REASON"
 ```
 
-Recovery is read-only and reports corrupt hashes, stale bindings, duplicate claims, claims without
-terminal receipts, expiry, revocation, static-policy drift, and legacy identity ambiguity.
+Recovery is read-only and reports corrupt hashes, stale bindings, multiple active records, implicit
+supersession, duplicate claims, claims without terminal receipts, invalid revocation/consumption
+lineage, static-policy drift, and legacy identity ambiguity. Historical expiry or revocation alone
+is not corruption.
 Cancellation appends a terminal event and deletes nothing.
 
 ## Preflight and Safety

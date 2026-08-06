@@ -153,6 +153,10 @@ class QualificationAuthorizationStatus(BaseModel):
     authorization_sha256: str | None = None
     consumed_authorization_ids: tuple[str, ...] = ()
     revoked_authorization_ids: tuple[str, ...] = ()
+    expired_authorization_ids: tuple[str, ...] = ()
+    stale_authorization_ids: tuple[str, ...] = ()
+    invalid_authorization_ids: tuple[str, ...] = ()
+    legacy_unsupported_authorization_ids: tuple[str, ...] = ()
     message: str
 
 

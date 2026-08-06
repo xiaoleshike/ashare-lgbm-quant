@@ -30,6 +30,14 @@ from ashare_quant.retraining.qualification.schemas import QualificationSnapshot
 class QualificationAuthorizationBlockedError(DataValidationError):
     """A valid command that cannot authorize the qualification's current state."""
 
+    def __init__(self, reason_code: str, message: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(f"{reason_code}: {message}")
+
+
+class QualificationAuthorizationConflictError(QualificationAuthorizationBlockedError):
+    """An active authorization must be revoked before replacement."""
+
 
 class QualificationAuthorizationService:
     """Issue and evaluate immutable single-attempt stage authorizations."""
@@ -61,27 +69,44 @@ class QualificationAuthorizationService:
         required_state = _required_state(stage)
         if snapshot.summary.current_state != required_state:
             raise QualificationAuthorizationBlockedError(
-                f"{stage} authorization requires state {required_state}"
+                "AUTHORIZATION_STATE_NOT_PENDING",
+                f"{stage} authorization requires state {required_state}",
             )
         if snapshot.manifest is None or snapshot.summary.static_qualification_policy_hash is None:
-            raise QualificationAuthorizationBlockedError("LEGACY_AUTHORIZATION_MIGRATION_REQUIRED")
+            raise QualificationAuthorizationBlockedError(
+                "LEGACY_AUTHORIZATION_MIGRATION_REQUIRED",
+                "start a new qualification before issuing authorization",
+            )
         if stage == "shadow":
             self._require_shadow_lineage(snapshot)
         issued = self._now()
-        expiry = self._expiry(issued, expires_at)
-        for existing, output, _ in self.storage.authorizations(
-            snapshot.summary.qualification_run_id, stage
-        ):
-            if (
-                existing.approved_by == approved_by
-                and existing.reason == reason
-                and (expires_at is None or existing.expires_at == expiry.isoformat())
-            ):
-                status = self.evaluate(snapshot, stage=stage)
-                if status.authorization_id == existing.authorization_id:
-                    return AuthorizationResult(
-                        existing.authorization_id, stage, status.status, output, True
-                    )
+        explicit_expiry = self._expiry(issued, expires_at) if expires_at is not None else None
+        records = self._evaluated_records(snapshot, stage)
+        invalid = [item for item in records if item[3] in {"INVALID", "LEGACY_UNSUPPORTED"}]
+        if invalid:
+            identities = ",".join(item[0].authorization_id for item in invalid)
+            raise DataValidationError(
+                f"AUTHORIZATION_STORAGE_INVALID: recovery required for {identities}"
+            )
+        active = [item for item in records if item[3] == "ACTIVE"]
+        if len(active) > 1:
+            raise DataValidationError(
+                "AUTHORIZATION_STORAGE_INVALID: multiple active authorizations conflict"
+            )
+        if active:
+            existing, output, _, _, _ = active[0]
+            expiry_matches = (
+                explicit_expiry is None or existing.expires_at == explicit_expiry.isoformat()
+            )
+            if existing.approved_by == approved_by and existing.reason == reason and expiry_matches:
+                return AuthorizationResult(existing.authorization_id, stage, "ACTIVE", output, True)
+            raise QualificationAuthorizationConflictError(
+                "ACTIVE_AUTHORIZATION_CONFLICT",
+                f"stage={stage} existing_authorization_id={existing.authorization_id} "
+                f"approved_by={existing.approved_by} expires_at={existing.expires_at}. "
+                f"Revoke authorization {existing.authorization_id} before issuing a replacement.",
+            )
+        expiry = explicit_expiry or self._expiry(issued, None)
         authorization = self._authorization(
             snapshot,
             stage=stage,
@@ -154,56 +179,76 @@ class QualificationAuthorizationService:
                 status="LEGACY_UNSUPPORTED",
                 message="LEGACY_AUTHORIZATION_MIGRATION_REQUIRED",
             )
-        records = self.storage.authorizations(snapshot.summary.qualification_run_id, stage)
-        consumed = tuple(
-            authorization.authorization_id
-            for authorization, _, _ in records
-            if self.storage.claims(
-                snapshot.summary.qualification_run_id, authorization.authorization_id
+        candidates = self._evaluated_records(snapshot, stage)
+        identities = {
+            state: tuple(
+                authorization.authorization_id
+                for authorization, _, _, current, _ in candidates
+                if current == state
             )
-        )
-        revoked = tuple(
-            authorization.authorization_id
-            for authorization, _, _ in records
-            if self.storage.revocations(
-                snapshot.summary.qualification_run_id, authorization.authorization_id
+            for state in (
+                "CONSUMED",
+                "REVOKED",
+                "EXPIRED",
+                "STALE",
+                "INVALID",
+                "LEGACY_UNSUPPORTED",
             )
-        )
-        candidates = []
-        for authorization, _, digest in records:
-            status, message = self._authorization_state(snapshot, authorization, digest)
-            candidates.append((authorization, digest, status, message))
-        active = [item for item in candidates if item[2] == "ACTIVE"]
+        }
+        active = [item for item in candidates if item[3] == "ACTIVE"]
         if len(active) > 1:
             return QualificationAuthorizationStatus(
                 stage=stage,
                 status="INVALID",
-                consumed_authorization_ids=consumed,
-                revoked_authorization_ids=revoked,
+                consumed_authorization_ids=identities["CONSUMED"],
+                revoked_authorization_ids=identities["REVOKED"],
+                expired_authorization_ids=identities["EXPIRED"],
+                stale_authorization_ids=identities["STALE"],
+                invalid_authorization_ids=identities["INVALID"],
+                legacy_unsupported_authorization_ids=identities["LEGACY_UNSUPPORTED"],
                 message="multiple active authorizations conflict",
             )
         if active:
-            authorization, digest, _, message = active[0]
+            authorization, _, digest, _, message = active[0]
             return QualificationAuthorizationStatus(
                 stage=stage,
                 status="ACTIVE",
                 authorization_id=authorization.authorization_id,
                 expires_at=authorization.expires_at,
                 authorization_sha256=digest,
-                consumed_authorization_ids=consumed,
-                revoked_authorization_ids=revoked,
+                consumed_authorization_ids=identities["CONSUMED"],
+                revoked_authorization_ids=identities["REVOKED"],
+                expired_authorization_ids=identities["EXPIRED"],
+                stale_authorization_ids=identities["STALE"],
+                invalid_authorization_ids=identities["INVALID"],
+                legacy_unsupported_authorization_ids=identities["LEGACY_UNSUPPORTED"],
                 message=message,
             )
         if candidates:
-            authorization, digest, status, message = candidates[-1]
+            priority: tuple[AuthorizationState, ...] = (
+                "INVALID",
+                "LEGACY_UNSUPPORTED",
+                "STALE",
+                "REVOKED",
+                "CONSUMED",
+                "EXPIRED",
+            )
+            selected = next(
+                item for state in priority for item in reversed(candidates) if item[3] == state
+            )
+            authorization, _, digest, status, message = selected
             return QualificationAuthorizationStatus(
                 stage=stage,
                 status=status,
                 authorization_id=authorization.authorization_id,
                 expires_at=authorization.expires_at,
                 authorization_sha256=digest,
-                consumed_authorization_ids=consumed,
-                revoked_authorization_ids=revoked,
+                consumed_authorization_ids=identities["CONSUMED"],
+                revoked_authorization_ids=identities["REVOKED"],
+                expired_authorization_ids=identities["EXPIRED"],
+                stale_authorization_ids=identities["STALE"],
+                invalid_authorization_ids=identities["INVALID"],
+                legacy_unsupported_authorization_ids=identities["LEGACY_UNSUPPORTED"],
                 message=message,
             )
         return QualificationAuthorizationStatus(
@@ -211,6 +256,105 @@ class QualificationAuthorizationService:
             status="REQUIRED",
             message=f"{stage} authorization is required",
         )
+
+    def _evaluated_records(
+        self,
+        snapshot: QualificationSnapshot,
+        stage: AuthorizationStage,
+    ) -> tuple[tuple[QualificationAuthorization, Path, str, AuthorizationState, str], ...]:
+        run_id = snapshot.summary.qualification_run_id
+        evaluated: list[tuple[QualificationAuthorization, Path, str, AuthorizationState, str]] = []
+        for authorization, output, digest in self.storage.authorizations(run_id, stage):
+            invalid = self._lineage_error(snapshot, authorization, digest)
+            if invalid is not None:
+                evaluated.append((authorization, output, digest, "INVALID", invalid))
+                continue
+            state, message = self._authorization_state(snapshot, authorization, digest)
+            evaluated.append((authorization, output, digest, state, message))
+        return tuple(evaluated)
+
+    def _lineage_error(
+        self,
+        snapshot: QualificationSnapshot,
+        authorization: QualificationAuthorization,
+        digest: str,
+    ) -> str | None:
+        run_id = snapshot.summary.qualification_run_id
+        if authorization.qualification_run_id != run_id:
+            return "authorization qualification lineage mismatch"
+        if authorization.static_qualification_policy_hash != (
+            snapshot.summary.static_qualification_policy_hash
+        ):
+            return "authorization static policy lineage mismatch"
+        authorization_events = [
+            event
+            for event in snapshot.events
+            if event.details.get("authorization_id") == authorization.authorization_id
+            and event.details.get("authorization_sha256") == digest
+            and event.details.get("reviewed_manifest_sha256")
+            == authorization.qualification_snapshot_manifest_sha256
+        ]
+        if len(authorization_events) != 1:
+            return "authorization audit event lineage mismatch"
+        revocations = self.storage.revocations(run_id, authorization.authorization_id)
+        if len(revocations) > 1:
+            return "authorization has duplicate revocations"
+        for revocation, _, _ in revocations:
+            if (
+                revocation.authorization_id != authorization.authorization_id
+                or revocation.authorization_sha256 != digest
+                or revocation.qualification_run_id != run_id
+                or revocation.stage != authorization.stage
+            ):
+                return "authorization revocation lineage mismatch"
+            matching_events = [
+                event
+                for event in snapshot.events
+                if event.details.get("authorization_id") == authorization.authorization_id
+                and event.details.get("revocation_id") == revocation.revocation_id
+                and event.details.get("stage") == authorization.stage
+            ]
+            if len(matching_events) != 1:
+                return "authorization revocation audit event lineage mismatch"
+        claims = self.storage.claims(run_id, authorization.authorization_id)
+        if len(claims) > 1:
+            return "authorization has duplicate consumption claims"
+        for claim, _, _ in claims:
+            if (
+                claim.authorization_id != authorization.authorization_id
+                or claim.authorization_sha256 != digest
+                or claim.qualification_run_id != run_id
+                or claim.stage != authorization.stage
+                or claim.static_policy_hash != authorization.static_qualification_policy_hash
+            ):
+                return "authorization consumption lineage mismatch"
+            receipts = self.storage.receipts(
+                run_id, authorization.authorization_id, claim.consumption_id
+            )
+            if not receipts:
+                return "authorization consumption claim lacks terminal receipt"
+            if len(receipts) > 1:
+                return "authorization consumption has duplicate receipts"
+            for receipt, _, _ in receipts:
+                if (
+                    receipt.authorization_id != authorization.authorization_id
+                    or receipt.qualification_run_id != run_id
+                    or receipt.stage != authorization.stage
+                    or receipt.consumption_id != claim.consumption_id
+                ):
+                    return "authorization receipt lineage mismatch"
+            matching_events = [
+                event
+                for event in snapshot.events
+                if event.sequence == claim.stage_event_sequence
+                and event.state
+                == ("TRAINING" if authorization.stage == "training" else "SHADOW_ENROLLING")
+            ]
+            if len(matching_events) != 1:
+                return "authorization consumption audit event lineage mismatch"
+        if revocations and claims:
+            return "authorization is both revoked and consumed"
+        return None
 
     def claim(
         self,
@@ -416,9 +560,19 @@ class QualificationAuthorizationService:
             "expires_at": expiry.isoformat(),
             "static_policy_hash": self.policy.static_policy_hash,
             "phase": self.policy.phase,
+            "model_id": snapshot.summary.model_id,
+            "training_run_id": snapshot.summary.training_run_id,
+            "validation_run_id": snapshot.summary.validation_run_id,
         }
-        identity = canonical_payload_hash(logical)
         model_hashes = self._shadow_hashes(snapshot) if stage == "shadow" else (None, None, None)
+        logical.update(
+            {
+                "model_artifact_manifest_sha256": model_hashes[0],
+                "candidate_registration_sha256": model_hashes[1],
+                "validation_manifest_sha256": model_hashes[2],
+            }
+        )
+        identity = canonical_payload_hash(logical)
         return QualificationAuthorization(
             authorization_id=f"authorization_{identity[:24]}",
             qualification_run_id=snapshot.summary.qualification_run_id,
@@ -464,10 +618,14 @@ class QualificationAuthorizationService:
             else _aware(expires_at)
         )
         if expiry <= issued:
-            raise DataValidationError("authorization expiration must be in the future")
+            raise DataValidationError(
+                "AUTHORIZATION_EXPIRY_INVALID: authorization expiration must be in the future"
+            )
         maximum = issued + timedelta(minutes=self.policy.authorization.maximum_validity_minutes)
         if expiry > maximum:
-            raise DataValidationError("authorization expiration exceeds policy maximum")
+            raise DataValidationError(
+                "AUTHORIZATION_EXPIRY_INVALID: authorization expiration exceeds policy maximum"
+            )
         return expiry
 
     def _shadow_hashes(self, snapshot: QualificationSnapshot) -> tuple[str, str, str]:
@@ -517,7 +675,11 @@ def _aware(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
-        raise DataValidationError(f"invalid authorization timestamp: {value}") from error
+        raise DataValidationError(
+            f"AUTHORIZATION_EXPIRY_INVALID: invalid authorization timestamp: {value}"
+        ) from error
     if parsed.tzinfo is None:
-        raise DataValidationError("authorization timestamp must include a timezone")
+        raise DataValidationError(
+            "AUTHORIZATION_EXPIRY_INVALID: authorization timestamp must include a timezone"
+        )
     return parsed.astimezone(UTC)
