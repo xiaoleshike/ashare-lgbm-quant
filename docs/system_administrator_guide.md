@@ -171,6 +171,8 @@ authority.
 ## Controlled Operational Qualification
 
 Use `retraining qualification-start` for preflight, dry-run, and readiness. Real training and
-Shadow are disabled by default and require policy changes plus separate `qualification-advance`
-commands. Never skip checkpoints or treat `QUALIFIED` as Promotion approval. See
+Shadow are disabled by default. Each privileged stage requires an unchanged static policy, an
+enabled runtime capability, a short-lived single-use `qualification-authorize` artifact, and a
+separate `qualification-advance` command. Capability switches do not change qualification identity
+and never replace authorization. Never skip checkpoints or treat `QUALIFIED` as Promotion approval. See
 `docs/controlled_operational_qualification.md` for the complete procedure and recovery commands.

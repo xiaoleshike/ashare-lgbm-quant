@@ -30,6 +30,18 @@ CLI intent cannot override a disabled stage. Resource thresholds are optional; w
 preflight warns instead of inventing a hard threshold. Qualification policy has a separate hash and
 does not alter Training Request, trigger-policy, lifecycle-policy, or Promotion Policy identities.
 
+Phase 2.8.2G.1 separates three controls:
+
+1. The static policy is the frozen safety contract and participates in qualification identity.
+2. `allow_real_training` and `allow_real_shadow` are runtime kill switches and are excluded from
+   the static identity hash.
+3. A stage authorization is one asserted operator decision for one execution attempt.
+
+Changing a runtime switch does not change `qualification_run_id`. A true switch is not an
+authorization, an authorization cannot override a false switch, and `qualification-advance` never
+creates an authorization. `approved_by` is an auditable asserted identity, not a cryptographic
+signature.
+
 ## Artifacts
 
 ```text
@@ -41,6 +53,9 @@ reports/retraining/qualification/<qualification_run_id>/
   invariant_results.json
   report.md
   manifest.json
+  authorizations/{training,shadow}/<authorization_id>/
+  authorization_revocations/<authorization_id>/<revocation_id>/
+  authorization_consumptions/<authorization_id>/<consumption_id>/
 
 reports/shadow_predictions/YYYYMMDD/qualification/<qualification_run_id>/<model_id>/
   predictions.parquet
@@ -64,7 +79,23 @@ ashare-quant --config config/default.yaml retraining qualification-start \
 Expected state: `TRAINING_PENDING_APPROVAL`. Inspect the report, source inventory, protected
 invariant baseline, dry-run, readiness manifest, and every warning.
 
-### 2. Enable and Run Training
+### 2. Authorize Training
+
+Authorization may be created while the runtime capability is disabled:
+
+```bash
+ashare-quant --config config/default.yaml retraining qualification-authorize \
+  --run-id QUALIFICATION_RUN_ID --stage training \
+  --approved-by OPERATOR_ID --reason "Controlled real training qualification"
+
+ashare-quant --config config/default.yaml retraining qualification-authorization-status \
+  --run-id QUALIFICATION_RUN_ID --stage training
+```
+
+The default validity is 60 minutes and the configured maximum is 240 minutes. Expired, revoked,
+stale, or consumed authorizations cannot execute.
+
+### 3. Enable and Run Training
 
 After explicit review, set `allow_real_training: true` and run:
 
@@ -75,9 +106,10 @@ ashare-quant --config config/default.yaml retraining qualification-advance \
 
 Expected state: `VALIDATION_PENDING_APPROVAL`. Verify dataset and fold identities, feature/label
 hashes, candidate registration, final-test exclusion, and qualification fields. Failed attempts and
-retries consume the Asia/Shanghai daily training-attempt budget.
+retries consume the Asia/Shanghai daily training-attempt budget. Entering `TRAINING` also consumes
+the authorization even when training fails; retry requires a new authorization.
 
-### 3. Run Validation
+### 4. Run Validation
 
 ```bash
 ashare-quant --config config/default.yaml retraining qualification-advance \
@@ -87,9 +119,17 @@ ashare-quant --config config/default.yaml retraining qualification-advance \
 Expected state: `SHADOW_PENDING_APPROVAL`. Inspect offline metrics, executable OOS evidence,
 leakage contracts, unresolved-position rejection, and Shadow eligibility.
 
-### 4. Enable and Run Isolated Shadow
+### 5. Authorize, Enable, and Run Isolated Shadow
 
-After review, set `allow_real_shadow: true` and run:
+After reviewing validation, authorize the exact current snapshot:
+
+```bash
+ashare-quant --config config/default.yaml retraining qualification-authorize \
+  --run-id QUALIFICATION_RUN_ID --stage shadow \
+  --approved-by OPERATOR_ID --reason "Controlled qualification Shadow enrollment"
+```
+
+Then set `allow_real_shadow: true` and run:
 
 ```bash
 ashare-quant --config config/default.yaml retraining qualification-advance \
@@ -99,7 +139,7 @@ ashare-quant --config config/default.yaml retraining qualification-advance \
 Expected state: `SHADOW_ENROLLED`. Confirm the qualification namespace, production lineage,
 prediction hash, isolation fields, and unchanged production Shadow bundle.
 
-### 5. Verify Observation Integration
+### 6. Verify Observation Integration
 
 ```bash
 ashare-quant --config config/default.yaml retraining qualification-advance \
@@ -110,7 +150,15 @@ The checkpoint does not run Observation, fabricate rows, or backfill historical 
 Immediate state is normally `OBSERVATION_PENDING`; exact mature prospective rows may produce
 `OBSERVATION_ACCUMULATING`. Either state permits `QUALIFIED` after protected invariants pass.
 
-### 6. Status, Recovery, and Cancellation
+### 7. Revocation, Status, Recovery, and Cancellation
+
+An unconsumed authorization can be revoked without deleting it:
+
+```bash
+ashare-quant --config config/default.yaml retraining qualification-revoke-authorization \
+  --run-id QUALIFICATION_RUN_ID --authorization-id AUTHORIZATION_ID \
+  --revoked-by OPERATOR_ID --reason "Authorization withdrawn"
+```
 
 ```bash
 ashare-quant --config config/default.yaml retraining qualification-status \
@@ -121,7 +169,9 @@ ashare-quant --config config/default.yaml retraining qualification-cancel \
   --run-id QUALIFICATION_RUN_ID --reason "OPERATOR_REASON"
 ```
 
-Recovery is read-only. Cancellation appends a terminal event and deletes nothing.
+Recovery is read-only and reports corrupt hashes, stale bindings, duplicate claims, claims without
+terminal receipts, expiry, revocation, static-policy drift, and legacy identity ambiguity.
+Cancellation appends a terminal event and deletes nothing.
 
 ## Preflight and Safety
 
@@ -142,7 +192,8 @@ runs/.retraining-qualification.lock
   -> runs/.production.lock
 ```
 
-Before training, policy/config drift blocks execution. After training, validation and Shadow may
+Before training and Shadow, static policy/config drift blocks execution. Runtime capability changes
+do not alter identity or completed checkpoints. After training, validation and Shadow may
 continue under the frozen qualification contract, but immutable data and completed stage evidence
 must still match.
 

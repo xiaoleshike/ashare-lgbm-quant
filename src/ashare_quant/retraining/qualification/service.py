@@ -30,6 +30,16 @@ from ashare_quant.retraining.orchestration.dry_run import (
 )
 from ashare_quant.retraining.orchestration.schemas import LifecycleInput
 from ashare_quant.retraining.orchestration.service import RetrainingLifecycleOrchestrator
+from ashare_quant.retraining.qualification.authorization import (
+    QualificationAuthorizationBlockedError,
+    QualificationAuthorizationService,
+)
+from ashare_quant.retraining.qualification.authorization_schemas import (
+    AuthorizationResult,
+    AuthorizationStage,
+    QualificationAuthorizationStatus,
+    RevocationResult,
+)
 from ashare_quant.retraining.qualification.invariants import (
     compare_protected_state,
     protected_state_inventory,
@@ -125,6 +135,11 @@ class OperationalQualificationService:
         self.shadow: ShadowRunner = shadow or cast(ShadowRunner, self.lifecycle.shadow)
         self.now = now or (lambda: datetime.now(UTC))
         self.storage = QualificationStorage(settings.paths.reports)
+        self.authorization = QualificationAuthorizationService(
+            qualification_root=self.storage.root,
+            policy=self.policy,
+            now=self.now,
+        )
         self.project_root = self.lifecycle.project_root
         self.lock_path = self.project_root / "runs" / ".retraining-qualification.lock"
 
@@ -183,14 +198,160 @@ class OperationalQualificationService:
         snapshot = self.storage.read(run_id)
         if snapshot is None:
             return {"qualification_run_id": run_id, "status": "MISSING"}
+        training = self.authorization.evaluate(snapshot, stage="training")
+        shadow = self.authorization.evaluate(snapshot, stage="shadow")
         return {
             **snapshot.summary.model_dump(mode="json"),
             "status": "VALID",
             "output": str(self.storage.output_dir(run_id)),
+            "current_static_qualification_policy_hash": self.policy.static_policy_hash,
+            "static_policy_drift": (
+                snapshot.summary.static_qualification_policy_hash != self.policy.static_policy_hash
+            ),
+            "runtime_training_enabled": self.policy.allow_real_training,
+            "runtime_shadow_enabled": self.policy.allow_real_shadow,
+            "runtime_capability_hash": self.policy.runtime_capability_hash,
+            "training_authorization_status": training.status,
+            "training_authorization_id": training.authorization_id,
+            "training_authorization_expires_at": training.expires_at,
+            "shadow_authorization_status": shadow.status,
+            "shadow_authorization_id": shadow.authorization_id,
+            "shadow_authorization_expires_at": shadow.expires_at,
+            "consumed_authorization_ids": sorted(
+                set(training.consumed_authorization_ids) | set(shadow.consumed_authorization_ids)
+            ),
+            "revoked_authorization_ids": sorted(
+                set(training.revoked_authorization_ids) | set(shadow.revoked_authorization_ids)
+            ),
+            "legacy_authorization_compatible": (
+                snapshot.summary.static_qualification_policy_hash is not None
+            ),
         }
 
     def recovery(self, run_id: str) -> QualificationRecovery:
-        return inspect_qualification_recovery(self.storage, run_id)
+        result = inspect_qualification_recovery(
+            self.storage,
+            run_id,
+            authorization_storage=self.authorization.storage,
+            current_static_policy_hash=self.policy.static_policy_hash,
+            now=self.now,
+        )
+        try:
+            snapshot = self.storage.read(run_id)
+        except (DataValidationError, OSError, ValueError):
+            return result
+        if snapshot is None:
+            return result
+        issues = list(result.issues)
+        for stage in ("training", "shadow"):
+            status = self.authorization.evaluate(snapshot, stage=stage)
+            if status.status in {"INVALID", "STALE", "LEGACY_UNSUPPORTED"}:
+                issues.append(f"{stage} authorization {status.status}: {status.message}")
+        if not issues:
+            return result
+        return QualificationRecovery(
+            run_id,
+            "ACTION_REQUIRED",
+            tuple(dict.fromkeys(issues)),
+            tuple(
+                dict.fromkeys(
+                    (*result.operator_actions, "inspect immutable authorization artifacts")
+                )
+            ),
+        )
+
+    def authorize(
+        self,
+        run_id: str,
+        *,
+        stage: AuthorizationStage,
+        approved_by: str,
+        reason: str,
+        expires_at: str | None = None,
+    ) -> AuthorizationResult:
+        with production_lock(self.lock_path, command=f"qualification-authorize {run_id} {stage}"):
+            snapshot = self._required(run_id)
+            if snapshot.summary.static_qualification_policy_hash is None:
+                raise QualificationAuthorizationBlockedError(
+                    "LEGACY_AUTHORIZATION_MIGRATION_REQUIRED"
+                )
+            self._require_static_policy(snapshot)
+            self._validate_source_inventory(snapshot, allow_policy_drift=False)
+            self._verify_invariants(snapshot, final=False)
+            result = self.authorization.create(
+                snapshot,
+                stage=stage,
+                approved_by=approved_by,
+                reason=reason,
+                expires_at=expires_at,
+            )
+            if result.idempotent:
+                return result
+            authorization, _, digest = self.authorization.storage.authorization(
+                run_id, result.authorization_id
+            )
+            frozen = self._frozen_from_summary(snapshot)
+            identity_hash = self._manifest_identity(snapshot)
+            snapshot = self._transition(
+                snapshot,
+                snapshot.summary.current_state,
+                f"{stage} authorization recorded",
+                {
+                    "authorization_id": result.authorization_id,
+                    "stage": stage,
+                    "authorization_sha256": digest,
+                    "approved_by": authorization.approved_by,
+                    "expires_at": authorization.expires_at,
+                    "reviewed_manifest_sha256": (
+                        authorization.qualification_snapshot_manifest_sha256
+                    ),
+                },
+            )
+            self._publish(snapshot, frozen, identity_hash)
+            return result
+
+    def revoke_authorization(
+        self,
+        run_id: str,
+        *,
+        authorization_id: str,
+        revoked_by: str,
+        reason: str,
+    ) -> RevocationResult:
+        with production_lock(
+            self.lock_path, command=f"qualification-revoke-authorization {run_id}"
+        ):
+            snapshot = self._required(run_id)
+            result = self.authorization.revoke(
+                snapshot,
+                authorization_id=authorization_id,
+                revoked_by=revoked_by,
+                reason=reason,
+            )
+            if not result.effective or result.idempotent:
+                return result
+            authorization, _, _ = self.authorization.storage.authorization(run_id, authorization_id)
+            frozen = self._frozen_from_summary(snapshot)
+            snapshot = self._transition(
+                snapshot,
+                snapshot.summary.current_state,
+                f"{authorization.stage} authorization revoked",
+                {
+                    "authorization_id": authorization_id,
+                    "revocation_id": result.revocation_id,
+                    "stage": authorization.stage,
+                    "revoked_by": revoked_by.strip(),
+                },
+            )
+            self._publish(snapshot, frozen, self._manifest_identity(snapshot))
+            return result
+
+    def authorization_status(
+        self, run_id: str, *, stage: AuthorizationStage | None = None
+    ) -> tuple[QualificationAuthorizationStatus, ...]:
+        snapshot = self._required_for_inspection(run_id)
+        stages: tuple[AuthorizationStage, ...] = (stage,) if stage else ("training", "shadow")
+        return tuple(self.authorization.evaluate(snapshot, stage=item) for item in stages)
 
     def cancel(self, run_id: str, *, reason: str) -> QualificationResult:
         if not reason.strip():
@@ -364,16 +525,21 @@ class OperationalQualificationService:
     ) -> QualificationSnapshot:
         if snapshot.summary.current_state == "VALIDATION_PENDING_APPROVAL":
             return snapshot
-        if snapshot.summary.current_state != "TRAINING_PENDING_APPROVAL":
-            raise DataValidationError("qualification training cannot skip prior checkpoints")
-        if not self.policy.allow_real_training:
+        if snapshot.summary.current_state == "TRAINING_FAILED":
             snapshot = self._transition(
                 snapshot,
                 "TRAINING_PENDING_APPROVAL",
-                "real training is disabled by qualification policy",
+                "failed training attempt requires a new authorization",
             )
             return self._publish(snapshot, frozen, identity_hash)
-        self._require_pretraining_policy(snapshot)
+        if snapshot.summary.current_state != "TRAINING_PENDING_APPROVAL":
+            raise DataValidationError("qualification training cannot skip prior checkpoints")
+        if not self.policy.allow_real_training:
+            return snapshot
+        self._require_static_policy(snapshot)
+        authorization_status = self.authorization.evaluate(snapshot, stage="training")
+        if authorization_status.status != "ACTIVE":
+            return snapshot
         controls = self.lifecycle.operational_controls()
         budget = controls.budget()
         cooldown = controls.cooldown(
@@ -382,16 +548,32 @@ class OperationalQualificationService:
             horizon=snapshot.summary.horizon,
         )
         if not budget.allowed or not cooldown.allowed:
-            message = (
-                "daily budget exhausted" if not budget.allowed else "lifecycle cooldown active"
-            )
-            snapshot = self._transition(snapshot, "TRAINING_PENDING_APPROVAL", message)
-            return self._publish(snapshot, frozen, identity_hash)
+            return snapshot
+        attempt_identity = canonical_payload_hash(
+            {
+                "qualification_run_id": snapshot.summary.qualification_run_id,
+                "stage": "training",
+                "authorization_id": authorization_status.authorization_id,
+                "next_event_sequence": len(snapshot.events) + 1,
+            }
+        )
+        claim, _ = self.authorization.claim(
+            snapshot,
+            stage="training",
+            attempt_identity=attempt_identity,
+            stage_event_sequence=len(snapshot.events) + 1,
+        )
         snapshot = self._transition(
             snapshot,
             "TRAINING",
             "qualification-only training started",
-            {"budget": asdict(budget), "cooldown": asdict(cooldown)},
+            {
+                "budget": asdict(budget),
+                "cooldown": asdict(cooldown),
+                "authorization_id": claim.authorization_id,
+                "consumption_id": claim.consumption_id,
+                "runtime_capability_enabled": True,
+            },
         )
         snapshot = self._publish(snapshot, frozen, identity_hash)
         context = self._qualification_context(snapshot)
@@ -435,6 +617,11 @@ class OperationalQualificationService:
                 },
                 metrics={"training_run_id": result.training_run_id, "model_id": result.model_id},
             )
+            self.authorization.receipt(
+                claim,
+                status="COMPLETED",
+                result_manifest=result.output_dir / "manifest.json",
+            )
             snapshot = replace(
                 snapshot,
                 summary=snapshot.summary.model_copy(
@@ -449,6 +636,7 @@ class OperationalQualificationService:
                 "explicit validation approval required",
             )
         except Exception as error:
+            self.authorization.receipt(claim, status="FAILED", error=str(error))
             snapshot = replace(
                 snapshot,
                 checkpoints={
@@ -525,17 +713,37 @@ class OperationalQualificationService:
     ) -> QualificationSnapshot:
         if snapshot.summary.current_state == "SHADOW_ENROLLED":
             return snapshot
-        if snapshot.summary.current_state != "SHADOW_PENDING_APPROVAL":
-            raise DataValidationError("qualification Shadow cannot skip validation")
-        if not self.policy.allow_real_shadow:
+        if snapshot.summary.current_state == "SHADOW_FAILED":
             snapshot = self._transition(
                 snapshot,
                 "SHADOW_PENDING_APPROVAL",
-                "real Shadow is disabled by qualification policy",
+                "failed Shadow attempt requires a new authorization",
             )
             return self._publish(snapshot, frozen, identity_hash)
+        if snapshot.summary.current_state != "SHADOW_PENDING_APPROVAL":
+            raise DataValidationError("qualification Shadow cannot skip validation")
+        if not self.policy.allow_real_shadow:
+            return snapshot
+        self._require_static_policy(snapshot)
+        authorization_status = self.authorization.evaluate(snapshot, stage="shadow")
+        if authorization_status.status != "ACTIVE":
+            return snapshot
         assert snapshot.summary.model_id is not None
         model_id = snapshot.summary.model_id
+        attempt_identity = canonical_payload_hash(
+            {
+                "qualification_run_id": snapshot.summary.qualification_run_id,
+                "stage": "shadow",
+                "authorization_id": authorization_status.authorization_id,
+                "next_event_sequence": len(snapshot.events) + 1,
+            }
+        )
+        claim, _ = self.authorization.claim(
+            snapshot,
+            stage="shadow",
+            attempt_identity=attempt_identity,
+            stage_event_sequence=len(snapshot.events) + 1,
+        )
         snapshot = self._transition(snapshot, "SHADOW_ENROLLING", "Shadow enrollment started")
         snapshot = self._publish(snapshot, frozen, identity_hash)
         try:
@@ -567,6 +775,11 @@ class OperationalQualificationService:
                     "production_run_id": manifest.get("production_run_id"),
                 },
             )
+            self.authorization.receipt(
+                claim,
+                status="COMPLETED",
+                result_manifest=result.output_dir / "manifest.json",
+            )
             snapshot = replace(
                 snapshot,
                 summary=snapshot.summary.model_copy(
@@ -579,6 +792,7 @@ class OperationalQualificationService:
             )
             snapshot = self._transition(snapshot, "SHADOW_ENROLLED", "Shadow enrolled")
         except Exception as error:
+            self.authorization.receipt(claim, status="FAILED", error=str(error))
             snapshot = replace(
                 snapshot,
                 checkpoints={
@@ -711,7 +925,8 @@ class OperationalQualificationService:
             frozen_lifecycle_policy_hash=frozen.lifecycle_policy_hash,
             frozen_promotion_policy_hash=frozen.promotion_policy_hash,
             frozen_config_hash=frozen.frozen_config_hash,
-            qualification_policy_hash=self.policy.policy_hash,
+            qualification_policy_hash=self.policy.static_policy_hash,
+            static_qualification_policy_hash=self.policy.static_policy_hash,
             created_at=created,
             updated_at=created,
         )
@@ -736,7 +951,7 @@ class OperationalQualificationService:
                 "lifecycle_policy_hash": frozen.lifecycle_policy_hash,
                 "promotion_policy_hash": frozen.promotion_policy_hash,
                 "config_hash": frozen.frozen_config_hash,
-                "qualification_policy_hash": self.policy.policy_hash,
+                "qualification_policy_hash": self.policy.static_policy_hash,
                 "phase": "2.8.2G",
             }
         )
@@ -753,6 +968,8 @@ class OperationalQualificationService:
             current_state=snapshot.summary.current_state,
             training_request_hash=frozen.training_request_hash,
             qualification_policy_hash=snapshot.summary.qualification_policy_hash,
+            static_qualification_policy_hash=(snapshot.summary.static_qualification_policy_hash),
+            legacy_qualification_policy_hash=(snapshot.summary.legacy_qualification_policy_hash),
             retraining_policy_hash=snapshot.summary.frozen_retraining_policy_hash,
             lifecycle_policy_hash=snapshot.summary.frozen_lifecycle_policy_hash,
             promotion_policy_hash=snapshot.summary.frozen_promotion_policy_hash,
@@ -809,7 +1026,7 @@ class OperationalQualificationService:
         if len(frozen.request.target_models) != 1:
             raise DataValidationError("qualification requires exactly one target model")
 
-    def _require_pretraining_policy(self, snapshot: QualificationSnapshot) -> None:
+    def _require_static_policy(self, snapshot: QualificationSnapshot) -> None:
         if (
             self.lifecycle.retraining_policy.policy_hash
             != snapshot.summary.frozen_retraining_policy_hash
@@ -818,7 +1035,7 @@ class OperationalQualificationService:
             or self.lifecycle.promotion_policy.policy_hash
             != snapshot.summary.frozen_promotion_policy_hash
             or config_hash(self.config_path) != snapshot.summary.frozen_config_hash
-            or self.policy.policy_hash != snapshot.summary.qualification_policy_hash
+            or self.policy.static_policy_hash != snapshot.summary.static_qualification_policy_hash
         ):
             raise DataValidationError("blocking policy or configuration drift before training")
 
@@ -882,14 +1099,24 @@ class OperationalQualificationService:
     def _validate_source_inventory(
         self, snapshot: QualificationSnapshot, *, allow_policy_drift: bool
     ) -> None:
-        mutable_after_training = {"config", "retraining_policy", "promotion_policy"}
+        mutable_after_training = {"config", "promotion_policy"}
         for name, source in snapshot.source_inventory.items():
+            if name == "retraining_policy":
+                continue
             if allow_policy_drift and name in mutable_after_training:
                 continue
             path = Path(str(source.get("path", "")))
             digest = source.get("sha256")
             if not isinstance(digest, str) or file_sha256(path) != digest:
                 raise DataValidationError(f"qualification source changed: {name}")
+        if (
+            self.lifecycle.retraining_policy.policy_hash
+            != snapshot.summary.frozen_retraining_policy_hash
+            or self.lifecycle.retraining_policy.lifecycle_policy_hash
+            != snapshot.summary.frozen_lifecycle_policy_hash
+            or self.policy.static_policy_hash != snapshot.summary.static_qualification_policy_hash
+        ):
+            raise DataValidationError("qualification static policy or lifecycle policy changed")
 
     def _frozen_from_summary(self, snapshot: QualificationSnapshot) -> LifecycleInput:
         return self.lifecycle.frozen_input_for_request(
@@ -910,6 +1137,12 @@ class OperationalQualificationService:
             raise DataValidationError(
                 f"qualification is terminal: {snapshot.summary.current_state}"
             )
+        return snapshot
+
+    def _required_for_inspection(self, run_id: str) -> QualificationSnapshot:
+        snapshot = self.storage.read(run_id)
+        if snapshot is None:
+            raise DataValidationError(f"qualification does not exist: {run_id}")
         return snapshot
 
     def _manifest_identity(self, snapshot: QualificationSnapshot) -> str:

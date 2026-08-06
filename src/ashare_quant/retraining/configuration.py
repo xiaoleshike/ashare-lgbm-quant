@@ -77,6 +77,17 @@ class RetrainingLifecyclePolicy(BaseModel):
         return value
 
 
+class QualificationAuthorizationPolicy(BaseModel):
+    """Static requirements for short-lived, single-attempt authorizations."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    required_for_training: Literal[True] = True
+    required_for_shadow: Literal[True] = True
+    default_validity_minutes: int = Field(default=60, ge=1)
+    maximum_validity_minutes: int = Field(default=240, ge=1)
+
+
 class RetrainingQualificationPolicy(BaseModel):
     """Operator-controlled safeguards for real lifecycle qualification."""
 
@@ -107,12 +118,34 @@ class RetrainingQualificationPolicy(BaseModel):
     )
     minimum_free_disk_bytes: int | None = Field(default=None, ge=0)
     minimum_available_memory_bytes: int | None = Field(default=None, ge=0)
+    authorization: QualificationAuthorizationPolicy = Field(
+        default_factory=QualificationAuthorizationPolicy
+    )
     promotion_forbidden: Literal[True] = True
     trading_forbidden: Literal[True] = True
 
     @property
     def policy_hash(self) -> str:
+        """Legacy full hash retained for inspecting pre-2.8.2G.1 artifacts."""
+
         return canonical_payload_hash(self.model_dump(mode="json"))
+
+    @property
+    def static_policy_hash(self) -> str:
+        """Identity hash excluding only operational capability switches."""
+
+        return canonical_payload_hash(
+            self.model_dump(mode="json", exclude={"allow_real_training", "allow_real_shadow"})
+        )
+
+    @property
+    def runtime_capability_hash(self) -> str:
+        return canonical_payload_hash(
+            {
+                "allow_real_training": self.allow_real_training,
+                "allow_real_shadow": self.allow_real_shadow,
+            }
+        )
 
 
 class RetrainingPolicy(BaseModel):

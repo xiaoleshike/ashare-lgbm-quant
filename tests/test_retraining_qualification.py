@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +18,7 @@ from ashare_quant.monitoring.performance_observation.storage import (
     publish_observation_artifact,
 )
 from ashare_quant.retraining.orchestration.dry_run import LifecycleDryRunResult
+from ashare_quant.retraining.qualification.authorization_schemas import AuthorizationStage
 from ashare_quant.retraining.qualification.lifecycle import require_qualification_transition
 from ashare_quant.retraining.qualification.schemas import QualificationCheck
 from ashare_quant.retraining.qualification.service import OperationalQualificationService
@@ -24,6 +26,7 @@ from ashare_quant.utils.manifest import atomic_write_json, config_hash
 from test_retraining_lifecycle import (
     AS_OF,
     MODEL_ID,
+    NOW,
     REQUEST_ID,
     lifecycle_input,
     lifecycle_service,
@@ -141,6 +144,33 @@ def qualification_service(
     return service, calls, dry_run
 
 
+def authorize_stage(
+    service: OperationalQualificationService, run_id: str, stage: AuthorizationStage
+) -> str:
+    result = service.authorize(
+        run_id,
+        stage=stage,
+        approved_by="fixture-operator",
+        reason=f"fixture {stage} authorization",
+    )
+    return result.authorization_id
+
+
+def set_capabilities(
+    service: OperationalQualificationService,
+    *,
+    training: bool | None = None,
+    shadow: bool | None = None,
+) -> None:
+    updates = {}
+    if training is not None:
+        updates["allow_real_training"] = training
+    if shadow is not None:
+        updates["allow_real_shadow"] = shadow
+    service.policy = service.policy.model_copy(update=updates)
+    service.authorization.policy = service.policy
+
+
 def test_qualification_state_machine_rejects_skipped_stages() -> None:
     require_qualification_transition("CREATED", "PREFLIGHT_CHECKING")
     with pytest.raises(DataValidationError, match="forbidden"):
@@ -211,8 +241,10 @@ def test_full_fixture_qualification_is_explicit_and_isolated(
         tmp_path, monkeypatch, real_training=True, real_shadow=True
     )
     started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorize_stage(service, started.qualification_run_id, "training")
     trained = service.advance(started.qualification_run_id, target="training")
     validated = service.advance(started.qualification_run_id, target="validation")
+    authorize_stage(service, started.qualification_run_id, "shadow")
     shadowed = service.advance(started.qualification_run_id, target="shadow")
     observed = service.advance(started.qualification_run_id, target="observation")
 
@@ -248,8 +280,10 @@ def test_observation_qualification_accepts_only_exact_manifest_valid_lineage(
         tmp_path, monkeypatch, real_training=True, real_shadow=True
     )
     started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorize_stage(service, started.qualification_run_id, "training")
     service.advance(started.qualification_run_id, target="training")
     service.advance(started.qualification_run_id, target="validation")
+    authorize_stage(service, started.qualification_run_id, "shadow")
     service.advance(started.qualification_run_id, target="shadow")
     snapshot = service.storage.read(started.qualification_run_id)
     assert snapshot is not None
@@ -326,10 +360,12 @@ def test_failed_checkpoint_blocks_downstream(
         failure=failure,
     )
     started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorize_stage(service, started.qualification_run_id, "training")
     result = service.advance(started.qualification_run_id, target="training")
     if failure != "training":
         result = service.advance(started.qualification_run_id, target="validation")
     if failure == "shadow":
+        authorize_stage(service, started.qualification_run_id, "shadow")
         result = service.advance(started.qualification_run_id, target="shadow")
     assert result.state == expected
     with pytest.raises(DataValidationError):
@@ -343,6 +379,7 @@ def test_shadow_is_disabled_by_default_after_validation(
         tmp_path, monkeypatch, real_training=True, real_shadow=False
     )
     started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorize_stage(service, started.qualification_run_id, "training")
     service.advance(started.qualification_run_id, target="training")
     service.advance(started.qualification_run_id, target="validation")
 
@@ -411,3 +448,328 @@ def test_promotion_resolver_rejects_qualification_only_model(tmp_path: Path) -> 
         PromotionEvidenceResolver(
             models_root=tmp_path / "models", reports_root=tmp_path / "reports"
         ).prepare("qualification-model")
+
+
+def test_runtime_capabilities_do_not_change_static_identity_or_run_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    static_hash = service.policy.static_policy_hash
+    full_hash = service.policy.policy_hash
+
+    set_capabilities(service, training=True, shadow=True)
+    repeated = service.start(REQUEST_ID, as_of=AS_OF)
+
+    assert repeated.qualification_run_id == started.qualification_run_id
+    assert repeated.idempotent is True
+    assert service.policy.static_policy_hash == static_hash
+    assert service.policy.policy_hash != full_hash
+    status = service.status(started.qualification_run_id)
+    assert status["runtime_training_enabled"] is True
+    assert status["runtime_shadow_enabled"] is True
+    assert status["static_policy_drift"] is False
+
+
+def test_static_safety_policy_change_still_blocks_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorize_stage(service, started.qualification_run_id, "training")
+    service.policy = service.policy.model_copy(
+        update={
+            "allow_real_training": True,
+            "allowed_stop_points": tuple(
+                point for point in service.policy.allowed_stop_points if point != "observation"
+            ),
+        }
+    )
+    service.authorization.policy = service.policy
+
+    with pytest.raises(DataValidationError, match="static policy"):
+        service.advance(started.qualification_run_id, target="training")
+    assert calls == ["readiness"]
+
+
+def test_training_requires_capability_authorization_and_explicit_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+
+    set_capabilities(service, training=True)
+    without_authorization = service.advance(started.qualification_run_id, target="training")
+    assert without_authorization.state == "TRAINING_PENDING_APPROVAL"
+    assert calls == ["readiness"]
+
+    set_capabilities(service, training=False)
+    authorization_id = authorize_stage(service, started.qualification_run_id, "training")
+    disabled = service.advance(started.qualification_run_id, target="training")
+    assert disabled.state == "TRAINING_PENDING_APPROVAL"
+    assert (
+        service.authorization_status(started.qualification_run_id, stage="training")[
+            0
+        ].authorization_id
+        == authorization_id
+    )
+
+    set_capabilities(service, training=True)
+    completed = service.advance(started.qualification_run_id, target="training")
+    assert completed.state == "VALIDATION_PENDING_APPROVAL"
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert status.status == "CONSUMED"
+    assert status.authorization_id == authorization_id
+    assert calls == ["readiness", "training"]
+
+
+def test_authorization_is_deterministic_immutable_and_manifest_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+
+    first = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+    )
+    authorization_bytes = (first.output_dir / "authorization.json").read_bytes()
+    second = service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="controlled attempt",
+    )
+
+    assert second.authorization_id == first.authorization_id
+    assert second.idempotent is True
+    assert (first.output_dir / "manifest.json").is_file()
+    assert (first.output_dir / "authorization.json").read_bytes() == authorization_bytes
+    snapshot = service.storage.read(started.qualification_run_id)
+    assert snapshot is not None
+    assert snapshot.events[-1].details["authorization_id"] == first.authorization_id
+
+
+@pytest.mark.parametrize(("approved_by", "reason"), [("", "reason"), ("operator", "  ")])
+def test_authorization_requires_explicit_nonempty_identity_and_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_by: str,
+    reason: str,
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    with pytest.raises(DataValidationError, match="non-empty"):
+        service.authorize(
+            started.qualification_run_id,
+            stage="training",
+            approved_by=approved_by,
+            reason=reason,
+        )
+
+
+def test_expired_authorization_cannot_execute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    service.authorize(
+        started.qualification_run_id,
+        stage="training",
+        approved_by="operator-a",
+        reason="short authorization",
+        expires_at=(NOW + timedelta(minutes=1)).isoformat(),
+    )
+    service.now = lambda: NOW + timedelta(minutes=1)
+    service.authorization.now = service.now
+    set_capabilities(service, training=True)
+
+    result = service.advance(started.qualification_run_id, target="training")
+
+    assert result.state == "TRAINING_PENDING_APPROVAL"
+    assert (
+        service.authorization_status(started.qualification_run_id, stage="training")[0].status
+        == "EXPIRED"
+    )
+    assert calls == ["readiness"]
+
+
+def test_revoked_authorization_is_append_only_and_cannot_execute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorization_id = authorize_stage(service, started.qualification_run_id, "training")
+    authorization, _, _ = service.authorization.storage.authorization(
+        started.qualification_run_id, authorization_id
+    )
+    original = authorization.model_dump(mode="json")
+
+    revoked = service.revoke_authorization(
+        started.qualification_run_id,
+        authorization_id=authorization_id,
+        revoked_by="operator-b",
+        reason="review withdrawn",
+    )
+    repeated = service.revoke_authorization(
+        started.qualification_run_id,
+        authorization_id=authorization_id,
+        revoked_by="operator-b",
+        reason="review withdrawn",
+    )
+    set_capabilities(service, training=True)
+    result = service.advance(started.qualification_run_id, target="training")
+
+    assert revoked.effective is True
+    assert repeated.idempotent is True
+    assert result.state == "TRAINING_PENDING_APPROVAL"
+    assert (
+        service.authorization_status(started.qualification_run_id, stage="training")[0].status
+        == "REVOKED"
+    )
+    current, _, _ = service.authorization.storage.authorization(
+        started.qualification_run_id, authorization_id
+    )
+    assert current.model_dump(mode="json") == original
+    assert calls == ["readiness"]
+
+
+def test_failed_training_consumes_authorization_and_retry_requires_new_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(
+        tmp_path, monkeypatch, real_training=True, failure="training"
+    )
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorization_id = authorize_stage(service, started.qualification_run_id, "training")
+
+    failed = service.advance(started.qualification_run_id, target="training")
+    pending = service.advance(started.qualification_run_id, target="training")
+
+    assert failed.state == "TRAINING_FAILED"
+    assert pending.state == "TRAINING_PENDING_APPROVAL"
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert status.status == "CONSUMED"
+    assert authorization_id in status.consumed_authorization_ids
+    assert calls == ["readiness", "training"]
+
+
+def test_shadow_requires_capability_authorization_and_exact_validation_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(
+        tmp_path, monkeypatch, real_training=True, real_shadow=False
+    )
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorize_stage(service, started.qualification_run_id, "training")
+    service.advance(started.qualification_run_id, target="training")
+    service.advance(started.qualification_run_id, target="validation")
+
+    set_capabilities(service, shadow=True)
+    missing = service.advance(started.qualification_run_id, target="shadow")
+    assert missing.state == "SHADOW_PENDING_APPROVAL"
+    authorization_id = authorize_stage(service, started.qualification_run_id, "shadow")
+    set_capabilities(service, shadow=False)
+    disabled = service.advance(started.qualification_run_id, target="shadow")
+    assert disabled.state == "SHADOW_PENDING_APPROVAL"
+    set_capabilities(service, shadow=True)
+    completed = service.advance(started.qualification_run_id, target="shadow")
+
+    assert completed.state == "SHADOW_ENROLLED"
+    status = service.authorization_status(started.qualification_run_id, stage="shadow")[0]
+    assert status.status == "CONSUMED"
+    assert status.authorization_id == authorization_id
+    assert calls == ["readiness", "training", "validation", "shadow"]
+
+
+def test_shadow_artifact_change_makes_authorization_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(
+        tmp_path, monkeypatch, real_training=True, real_shadow=True
+    )
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorize_stage(service, started.qualification_run_id, "training")
+    service.advance(started.qualification_run_id, target="training")
+    service.advance(started.qualification_run_id, target="validation")
+    authorize_stage(service, started.qualification_run_id, "shadow")
+    artifact_manifest = tmp_path / f"models/challengers/{MODEL_ID}/manifest.json"
+    atomic_write_json(artifact_manifest, {"mutated": True})
+
+    result = service.advance(started.qualification_run_id, target="shadow")
+
+    assert result.state == "SHADOW_PENDING_APPROVAL"
+    assert (
+        service.authorization_status(started.qualification_run_id, stage="shadow")[0].status
+        == "STALE"
+    )
+    assert calls == ["readiness", "training", "validation"]
+
+
+def test_authorization_expiration_must_be_aware_and_within_policy_maximum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    with pytest.raises(DataValidationError, match="timezone"):
+        service.authorize(
+            started.qualification_run_id,
+            stage="training",
+            approved_by="operator-a",
+            reason="naive expiry",
+            expires_at="2026-08-01T12:00:00",
+        )
+    with pytest.raises(DataValidationError, match="maximum"):
+        service.authorize(
+            started.qualification_run_id,
+            stage="training",
+            approved_by="operator-a",
+            reason="overlong expiry",
+            expires_at=(NOW + timedelta(minutes=241)).isoformat(),
+        )
+
+
+def test_consumed_authorization_cannot_be_revoked_or_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(tmp_path, monkeypatch, real_training=True)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorization_id = authorize_stage(service, started.qualification_run_id, "training")
+    first = service.advance(started.qualification_run_id, target="training")
+    repeated = service.advance(started.qualification_run_id, target="training")
+    revocation = service.revoke_authorization(
+        started.qualification_run_id,
+        authorization_id=authorization_id,
+        revoked_by="operator-b",
+        reason="too late",
+    )
+
+    assert first.state == "VALIDATION_PENDING_APPROVAL"
+    assert repeated.state == "VALIDATION_PENDING_APPROVAL"
+    assert revocation.effective is False
+    assert calls == ["readiness", "training"]
+
+
+def test_legacy_qualification_is_readable_but_not_authorizable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = qualification_service(tmp_path, monkeypatch)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    snapshot = service.storage.read(started.qualification_run_id)
+    assert snapshot is not None
+    legacy = replace(
+        snapshot,
+        summary=snapshot.summary.model_copy(update={"static_qualification_policy_hash": None}),
+    )
+    frozen = service._frozen_from_summary(snapshot)
+    service._publish(legacy, frozen, service._manifest_identity(snapshot))
+
+    with pytest.raises(DataValidationError, match="LEGACY_AUTHORIZATION_MIGRATION_REQUIRED"):
+        service.authorize(
+            started.qualification_run_id,
+            stage="training",
+            approved_by="operator-a",
+            reason="legacy attempt",
+        )

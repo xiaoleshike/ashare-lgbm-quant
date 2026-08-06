@@ -9,6 +9,11 @@ artifact, execution record, and candidate registration bind `qualification_run_i
 `qualification_only=true`. The registration remains outside `registry.json`, and CLI flags cannot
 construct this context outside the qualification service.
 
+Qualification training additionally requires the frozen static qualification policy, the current
+runtime training capability, and an exact active authorization. The authorization is atomically
+claimed before entering `TRAINING`; failed attempts remain consumed and count against the daily
+budget.
+
 ## Safety Contract
 
 Before loading training rows, execution revalidates the request, evidence,

@@ -8,6 +8,10 @@ Qualification validation reuses the same artifact, offline, executable, leakage,
 eligibility validators. It requires exact model/registration `qualification_run_id` lineage and
 publishes qualification-only evidence without creating a Promotion Request.
 
+After validation, Shadow enrollment requires a separate authorization bound to the exact validation
+snapshot. Validation itself remains explicitly advanced but does not consume a privileged-stage
+authorization.
+
 ## Workflow
 
 1. Validate the immutable model, dataset, execution, and candidate-registration

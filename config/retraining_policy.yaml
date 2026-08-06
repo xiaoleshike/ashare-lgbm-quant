@@ -38,6 +38,11 @@ retraining:
       - observation
     minimum_free_disk_bytes: null
     minimum_available_memory_bytes: null
+    authorization:
+      required_for_training: true
+      required_for_shadow: true
+      default_validity_minutes: 60
+      maximum_validity_minutes: 240
     promotion_forbidden: true
     trading_forbidden: true
   triggers:

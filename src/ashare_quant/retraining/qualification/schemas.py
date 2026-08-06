@@ -105,6 +105,8 @@ class QualificationSummary(BaseModel):
     frozen_promotion_policy_hash: str
     frozen_config_hash: str | None
     qualification_policy_hash: str
+    static_qualification_policy_hash: str | None = None
+    legacy_qualification_policy_hash: str | None = None
     created_at: str
     updated_at: str
 
@@ -123,6 +125,8 @@ class QualificationManifest(BaseModel):
     current_state: QualificationState
     training_request_hash: str
     qualification_policy_hash: str
+    static_qualification_policy_hash: str | None = None
+    legacy_qualification_policy_hash: str | None = None
     retraining_policy_hash: str
     lifecycle_policy_hash: str
     promotion_policy_hash: str

@@ -183,3 +183,8 @@ Phase 2.8.2G adds an independent, explicitly advanced qualification state machin
 lifecycle dry-run/readiness and the governed execution, validation, and retrained Shadow services.
 Qualification artifacts carry `qualification_only=true` and cannot enter Promotion or trading
 discovery. See `docs/controlled_operational_qualification.md` for the exact operator runbook.
+
+Phase 2.8.2G.1 adds immutable, expiring, single-attempt training and Shadow authorizations. Static
+safety policy remains frozen in qualification identity, while runtime capability switches are
+evaluated only as kill switches immediately before execution. Failed attempts consume authorization
+and require a new operator decision.

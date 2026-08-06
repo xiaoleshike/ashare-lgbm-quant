@@ -136,6 +136,15 @@ class QualificationStorage:
             (staging / "report.md").write_text(
                 render_qualification_report(snapshot), encoding="utf-8"
             )
+            if output.exists():
+                for name in (
+                    "authorizations",
+                    "authorization_revocations",
+                    "authorization_consumptions",
+                ):
+                    source = output / name
+                    if source.exists():
+                        shutil.copytree(source, staging / name)
             completed = manifest.model_copy(
                 update={
                     "summary_sha256": file_sha256(staging / "qualification_summary.json"),

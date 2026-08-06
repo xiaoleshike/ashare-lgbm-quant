@@ -96,6 +96,9 @@ from ashare_quant.retraining import RetrainingTriggerService
 from ashare_quant.retraining.execution import GovernedRetrainingExecutionService
 from ashare_quant.retraining.orchestration import RetrainingLifecycleOrchestrator
 from ashare_quant.retraining.orchestration.dry_run import LifecycleDryRunService
+from ashare_quant.retraining.qualification.authorization import (
+    QualificationAuthorizationBlockedError,
+)
 from ashare_quant.retraining.qualification.service import OperationalQualificationService
 from ashare_quant.retraining.readiness import RetrainingExecutionReadinessValidator
 from ashare_quant.retraining.shadow import RetrainedChallengerShadowService
@@ -913,6 +916,28 @@ def add_retraining_parser(
     qualification_advance.add_argument(
         "--to", required=True, choices=("training", "validation", "shadow", "observation")
     )
+    qualification_authorize = commands.add_parser(
+        "qualification-authorize", help="Create one immutable stage authorization."
+    )
+    qualification_authorize.add_argument("--run-id", required=True)
+    qualification_authorize.add_argument("--stage", required=True, choices=("training", "shadow"))
+    qualification_authorize.add_argument("--approved-by", required=True)
+    qualification_authorize.add_argument("--reason", required=True)
+    qualification_authorize.add_argument("--expires-at")
+    qualification_revoke = commands.add_parser(
+        "qualification-revoke-authorization",
+        help="Append an immutable authorization revocation.",
+    )
+    qualification_revoke.add_argument("--run-id", required=True)
+    qualification_revoke.add_argument("--authorization-id", required=True)
+    qualification_revoke.add_argument("--revoked-by", required=True)
+    qualification_revoke.add_argument("--reason", required=True)
+    qualification_authorization_status = commands.add_parser(
+        "qualification-authorization-status",
+        help="Inspect immutable qualification authorization state.",
+    )
+    qualification_authorization_status.add_argument("--run-id", required=True)
+    qualification_authorization_status.add_argument("--stage", choices=("training", "shadow"))
     qualification_status = commands.add_parser(
         "qualification-status", help="Inspect one immutable qualification snapshot."
     )
@@ -2859,7 +2884,58 @@ def run_retraining_command(args: argparse.Namespace) -> int:
                     f"output={qualification_result.output_dir} "
                     f"idempotent={qualification_result.idempotent}"
                 )
-                return 0 if qualification_result.state == "QUALIFIED" else 1
+                completed_states = {
+                    "training": "VALIDATION_PENDING_APPROVAL",
+                    "validation": "SHADOW_PENDING_APPROVAL",
+                    "shadow": "SHADOW_ENROLLED",
+                    "observation": "QUALIFIED",
+                }
+                return 0 if qualification_result.state == completed_states[args.to] else 1
+            if args.retraining_command == "qualification-authorize":
+                try:
+                    authorization_result = qualification.authorize(
+                        args.run_id,
+                        stage=args.stage,
+                        approved_by=args.approved_by,
+                        reason=args.reason,
+                        expires_at=args.expires_at,
+                    )
+                except QualificationAuthorizationBlockedError as error:
+                    print(f"qualification authorization blocked: {error}", file=sys.stderr)
+                    return 1
+                print(
+                    "qualification_authorization: "
+                    f"authorization_id={authorization_result.authorization_id} "
+                    f"stage={authorization_result.stage} "
+                    f"status={authorization_result.status} "
+                    f"output={authorization_result.output_dir} "
+                    f"idempotent={authorization_result.idempotent}"
+                )
+                return 0 if authorization_result.status == "ACTIVE" else 1
+            if args.retraining_command == "qualification-revoke-authorization":
+                revocation_result = qualification.revoke_authorization(
+                    args.run_id,
+                    authorization_id=args.authorization_id,
+                    revoked_by=args.revoked_by,
+                    reason=args.reason,
+                )
+                print(
+                    "qualification_authorization_revocation: "
+                    f"revocation_id={revocation_result.revocation_id} "
+                    f"authorization_id={revocation_result.authorization_id} "
+                    f"effective={revocation_result.effective} "
+                    f"output={revocation_result.output_dir}"
+                )
+                return 0 if revocation_result.effective else 1
+            if args.retraining_command == "qualification-authorization-status":
+                statuses = qualification.authorization_status(args.run_id, stage=args.stage)
+                print(
+                    json.dumps(
+                        [status.model_dump(mode="json") for status in statuses],
+                        sort_keys=True,
+                    )
+                )
+                return 0 if any(status.status == "ACTIVE" for status in statuses) else 1
             if args.retraining_command == "qualification-status":
                 status = qualification.status(args.run_id)
                 print(json.dumps(status, sort_keys=True, default=str))
