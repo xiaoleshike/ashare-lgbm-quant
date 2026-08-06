@@ -57,6 +57,26 @@ class RetrainingTriggers(BaseModel):
     critical_alert: CriticalAlertTrigger = Field(default_factory=CriticalAlertTrigger)
 
 
+class RetrainingLifecyclePolicy(BaseModel):
+    """Operational limits and prospective evidence requirements."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = True
+    max_parallel_runs: Literal[1] = 1
+    max_daily_training_runs: int = Field(default=1, ge=1)
+    cooldown_days: int = Field(default=30, ge=0)
+    minimum_prospective_sessions: ObservationRequirements = Field(
+        default_factory=ObservationRequirements
+    )
+
+    def required_sessions(self, horizon: int) -> int:
+        value = getattr(self.minimum_prospective_sessions, f"h{horizon}", None)
+        if not isinstance(value, int):
+            raise ValueError(f"unsupported lifecycle horizon: {horizon}")
+        return value
+
+
 class RetrainingPolicy(BaseModel):
     """Deterministic policy used only to create training requests."""
 
@@ -70,10 +90,16 @@ class RetrainingPolicy(BaseModel):
         default_factory=ObservationRequirements
     )
     triggers: RetrainingTriggers = Field(default_factory=RetrainingTriggers)
+    lifecycle: RetrainingLifecyclePolicy = Field(default_factory=RetrainingLifecyclePolicy)
 
     @property
     def policy_hash(self) -> str:
-        return canonical_payload_hash(self.model_dump(mode="json"))
+        # Lifecycle scheduling does not alter the trigger decision frozen in old requests.
+        return canonical_payload_hash(self.model_dump(mode="json", exclude={"lifecycle"}))
+
+    @property
+    def lifecycle_policy_hash(self) -> str:
+        return canonical_payload_hash(self.lifecycle.model_dump(mode="json"))
 
     def required_sessions(self, horizon: int) -> int:
         value = getattr(self.minimum_observation_sessions, f"h{horizon}", None)

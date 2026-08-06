@@ -8,6 +8,16 @@ retraining:
     h10: 60
     h20: 90
     h60: 120
+  lifecycle:
+    enabled: true
+    max_parallel_runs: 1
+    max_daily_training_runs: 1
+    cooldown_days: 30
+    minimum_prospective_sessions:
+      h5: 60
+      h10: 60
+      h20: 90
+      h60: 120
   triggers:
     alpha_decay:
       enabled: true

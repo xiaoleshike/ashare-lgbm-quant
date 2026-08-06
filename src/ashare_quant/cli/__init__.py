@@ -94,6 +94,7 @@ from ashare_quant.research import (
 from ashare_quant.research.agent import ResearchAgentService
 from ashare_quant.retraining import RetrainingTriggerService
 from ashare_quant.retraining.execution import GovernedRetrainingExecutionService
+from ashare_quant.retraining.orchestration import RetrainingLifecycleOrchestrator
 from ashare_quant.retraining.readiness import RetrainingExecutionReadinessValidator
 from ashare_quant.retraining.shadow import RetrainedChallengerShadowService
 from ashare_quant.retraining.validation import RetrainingValidationService
@@ -865,6 +866,25 @@ def add_retraining_parser(
     )
     shadow_status.add_argument("--model-id", required=True)
     shadow_status.add_argument("--as-of", help="Production date; defaults to latest model sidecar.")
+    lifecycle_run = commands.add_parser(
+        "lifecycle-run", help="Run one governed retrained Challenger lifecycle."
+    )
+    lifecycle_run.add_argument("--request-id", required=True)
+    lifecycle_run.add_argument(
+        "--stop-after", choices=("readiness", "training", "validation", "shadow")
+    )
+    lifecycle_status = commands.add_parser(
+        "lifecycle-status", help="Inspect one retrained Challenger lifecycle snapshot."
+    )
+    lifecycle_status.add_argument("--run-id", required=True)
+    lifecycle_resume = commands.add_parser(
+        "lifecycle-resume", help="Resume one unambiguous governed lifecycle."
+    )
+    lifecycle_resume.add_argument("--run-id", required=True)
+    lifecycle_recovery = commands.add_parser(
+        "lifecycle-recovery", help="Inspect lifecycle recovery state without repair."
+    )
+    lifecycle_recovery.add_argument("--run-id", required=True)
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -2772,6 +2792,55 @@ def run_retraining_command(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     config_path = Path(effective_config_path(args.config))
     try:
+        if args.retraining_command in {
+            "lifecycle-run",
+            "lifecycle-status",
+            "lifecycle-resume",
+            "lifecycle-recovery",
+        }:
+            lifecycle = RetrainingLifecycleOrchestrator(
+                settings=settings,
+                config_path=config_path,
+                retraining_policy_path=_retraining_policy_path(config_path),
+                promotion_policy_path=_promotion_policy_path(config_path),
+            )
+            if args.retraining_command == "lifecycle-status":
+                status = lifecycle.status(args.run_id)
+                print(json.dumps(status, sort_keys=True, default=str))
+                return 0 if status.get("status") != "MISSING" else 1
+            if args.retraining_command == "lifecycle-recovery":
+                recovery = lifecycle.recovery(args.run_id)
+                print(
+                    json.dumps(
+                        {
+                            "lifecycle_run_id": recovery.lifecycle_run_id,
+                            "status": recovery.status,
+                            "current_state": recovery.current_state,
+                            "complete": recovery.complete,
+                            "staging_paths": recovery.staging_paths,
+                            "message": recovery.message,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 0 if recovery.status == "CLEAN" else 1
+            result = (
+                lifecycle.resume(args.run_id)
+                if args.retraining_command == "lifecycle-resume"
+                else lifecycle.run(args.request_id, stop_after=args.stop_after)
+            )
+            print(
+                f"retraining_lifecycle: run_id={result.lifecycle_run_id} "
+                f"request_id={result.request_id} state={result.current_state} "
+                f"model_id={result.model_id} output={result.output_dir} "
+                f"idempotent={result.idempotent}"
+            )
+            return (
+                1
+                if result.current_state.endswith("_FAILED")
+                or result.current_state in {"FAILED", "CANCELLED"}
+                else 0
+            )
         if args.retraining_command in {"shadow", "shadow-status"}:
             shadow = RetrainedChallengerShadowService(
                 settings=settings,
@@ -2915,7 +2984,7 @@ def run_retraining_command(args: argparse.Namespace) -> int:
                 file=stream,
             )
             return 0 if request_validation_result.valid else 2
-    except (DataValidationError, OSError, ValueError) as error:
+    except (DataValidationError, OSError, ProductionLockError, ValueError) as error:
         print(f"retraining {args.retraining_command} failed: {error}", file=sys.stderr)
         return 2
     raise ValueError(f"unsupported retraining command: {args.retraining_command}")

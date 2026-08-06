@@ -56,6 +56,26 @@ The only permitted lifecycle is:
 
 ```text
 Candidate -> Evidence -> Gate -> Review -> Approve -> Apply -> Monitor
+
+### Retrained Challenger lifecycle
+
+Governed retraining requests run separately from the daily Production Pipeline:
+
+```bash
+ashare-quant --config config/default.yaml retraining lifecycle-run \
+  --request-id REQUEST_ID
+
+ashare-quant --config config/default.yaml retraining lifecycle-status \
+  --run-id LIFECYCLE_RUN_ID
+
+ashare-quant --config config/default.yaml retraining lifecycle-resume \
+  --run-id LIFECYCLE_RUN_ID
+```
+
+Use `--stop-after readiness|training|validation|shadow` for controlled checks. Inspect ambiguous
+runs with `retraining lifecycle-recovery --run-id LIFECYCLE_RUN_ID`. `EVIDENCE_READY` allows only
+separate evidence preparation and never changes Champion automatically. See
+`docs/retrained_challenger_lifecycle.md` for the full state and recovery contract.
 ```
 
 Discover and freeze current evidence:
