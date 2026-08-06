@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from ashare_quant.data.exceptions import DataValidationError
-from ashare_quant.models.shadow.schemas import MODEL_ROLES
+from ashare_quant.models.shadow.schemas import MODEL_ORIGINS, MODEL_ROLES
 from ashare_quant.models.shadow.storage import file_sha256, read_complete_manifest
 from ashare_quant.monitoring.performance_observation.schemas import SUPPORTED_HORIZONS
 from ashare_quant.orchestration.publication import validate_production_publication
@@ -46,7 +46,6 @@ def load_shadow_sources(
         manifest = read_complete_manifest(directory)
         if manifest is None:
             raise DataValidationError(f"incomplete shadow artifact cannot be observed: {directory}")
-        _validate_shadow_manifest(manifest, signal_date)
         summary = validate_production_publication(
             reports_root=reports_root,
             runs_root=runs_root,
@@ -56,12 +55,38 @@ def load_shadow_sources(
             raise DataValidationError(
                 f"shadow production_run_id differs from successful production run: {signal_date}"
             )
-        predictions_path = directory / "predictions.parquet"
-        frame = pd.read_parquet(predictions_path)
-        _validate_shadow_rows(frame, manifest, signal_date)
-        frames.append(frame)
-        manifests.append({**manifest, "source_signal_date": signal_date})
-        source_hashes[signal_date] = file_sha256(predictions_path)
+        sources = [("production", directory, manifest)]
+        retrained_root = directory / "retrained"
+        if retrained_root.is_dir():
+            for sidecar in sorted(path for path in retrained_root.iterdir() if path.is_dir()):
+                sidecar_manifest = read_complete_manifest(sidecar)
+                if sidecar_manifest is None:
+                    raise DataValidationError(
+                        f"incomplete retrained shadow artifact cannot be observed: {sidecar}"
+                    )
+                sources.append((f"retrained:{sidecar.name}", sidecar, sidecar_manifest))
+        for source_name, source_dir, source_manifest in sources:
+            _validate_shadow_manifest(source_manifest, signal_date)
+            if str(source_manifest.get("production_run_id")) != str(summary.get("run_id")):
+                raise DataValidationError(
+                    "shadow production_run_id differs from successful production run: "
+                    f"{signal_date}"
+                )
+            predictions_path = source_dir / "predictions.parquet"
+            frame = normalize_shadow_lineage(pd.read_parquet(predictions_path))
+            _validate_shadow_rows(frame, source_manifest, signal_date)
+            frames.append(frame)
+            source_key = (
+                signal_date if source_name == "production" else f"{signal_date}:{source_name}"
+            )
+            manifests.append(
+                {
+                    **source_manifest,
+                    "source_signal_date": signal_date,
+                    "source_key": source_key,
+                }
+            )
+            source_hashes[source_key] = file_sha256(predictions_path)
     if not frames:
         return pd.DataFrame(), manifests, source_hashes
     combined = pd.concat(frames, ignore_index=True)
@@ -122,6 +147,8 @@ def _validate_shadow_rows(
         raise DataValidationError("shadow prediction has unsupported model_role")
     if set(frame["access_policy"].astype(str)) != {"prospective_production"}:
         raise DataValidationError("shadow prediction access policy is not prospective")
+    if not set(frame["model_origin"].astype(str)).issubset(MODEL_ORIGINS):
+        raise DataValidationError("shadow prediction has unsupported model_origin")
     for column, manifest_key in (
         ("production_run_id", "production_run_id"),
         ("shadow_run_id", "shadow_run_id"),
@@ -136,3 +163,32 @@ def _validate_shadow_rows(
     native = pd.to_numeric(frame["native_horizon"], errors="coerce").dropna().astype(int)
     if not set(native).issubset(SUPPORTED_HORIZONS):
         raise DataValidationError("shadow predictions contain unsupported native horizon")
+
+
+def normalize_shadow_lineage(frame: DataFrame) -> DataFrame:
+    """Add explicit lineage to legacy research shadow rows without changing scores."""
+
+    result = frame.copy()
+    defaults = (
+        result["model_role"]
+        .astype(str)
+        .map(lambda role: "champion" if role == "champion" else "research_challenger")
+    )
+    if "model_origin" not in result:
+        result["model_origin"] = defaults
+    else:
+        result["model_origin"] = result["model_origin"].where(
+            result["model_origin"].notna() & result["model_origin"].astype(str).ne(""),
+            defaults,
+        )
+    for column in (
+        "parent_model_id",
+        "training_request_id",
+        "training_run_id",
+        "validation_run_id",
+    ):
+        if column not in result:
+            result[column] = ""
+        else:
+            result[column] = result[column].fillna("").astype(str)
+    return result

@@ -61,12 +61,16 @@ class PerformanceMonitoringService:
             {
                 "model_id": str(row["model_id"]),
                 "model_role": str(row["model_role"]),
+                "model_origin": str(row["model_origin"]),
                 "horizon": int(row["horizon"]),
                 "feature_hash": str(row["feature_hash"]),
                 "universe_hash": str(row["universe_hash"]),
                 "observation_hash": logical_observation_hash(
                     sources.observations.loc[
                         sources.observations["model_id"].astype(str).eq(str(row["model_id"]))
+                        & sources.observations["model_origin"]
+                        .astype(str)
+                        .eq(str(row["model_origin"]))
                         & pd.to_numeric(sources.observations["horizon"], errors="coerce").eq(
                             int(row["horizon"])
                         )
@@ -74,6 +78,14 @@ class PerformanceMonitoringService:
                 ),
                 "source_models": sources.model_lineage[str(row["model_id"])]["source_models"],
                 "fusion_method": sources.model_lineage[str(row["model_id"])]["fusion_method"],
+                "parent_model_id": sources.model_lineage[str(row["model_id"])]["parent_model_id"],
+                "training_request_id": sources.model_lineage[str(row["model_id"])][
+                    "training_request_id"
+                ],
+                "training_run_id": sources.model_lineage[str(row["model_id"])]["training_run_id"],
+                "validation_run_id": sources.model_lineage[str(row["model_id"])][
+                    "validation_run_id"
+                ],
             }
             for row in metrics.to_dict("records")
         ]

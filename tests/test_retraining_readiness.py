@@ -214,6 +214,7 @@ def test_atomic_publish_failure_leaves_no_complete_artifact(
 
 def test_cli_exit_codes_and_safety_isolation(tmp_path: Path, monkeypatch, capsys) -> None:
     readiness_fixture(tmp_path)
+    from ashare_quant import cli as cli_module
     from ashare_quant.backtest import BacktestRunner
     from ashare_quant.models.challenger import ChallengerTrainer
     from ashare_quant.models.inference import ProductionInferenceEngine
@@ -223,6 +224,13 @@ def test_cli_exit_codes_and_safety_isolation(tmp_path: Path, monkeypatch, capsys
 
     def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("forbidden stateful service called")
+
+    readiness_validator = cli_module.RetrainingExecutionReadinessValidator
+    monkeypatch.setattr(
+        cli_module,
+        "RetrainingExecutionReadinessValidator",
+        lambda **kwargs: readiness_validator(**kwargs, now=lambda: NOW),
+    )
 
     monkeypatch.setattr(BacktestRunner, "run", forbidden)
     monkeypatch.setattr(ChallengerTrainer, "train", forbidden)

@@ -18,6 +18,7 @@ from ashare_quant.models.shadow.ensemble import (
     ensemble_model_id,
 )
 from ashare_quant.models.shadow.schemas import (
+    MODEL_ORIGINS,
     MODEL_ROLES,
     ShadowContext,
     ShadowPredictionResult,
@@ -39,6 +40,7 @@ PREDICTION_COLUMNS = (
     "ts_code",
     "model_id",
     "model_role",
+    "model_origin",
     "native_horizon",
     "prediction_score",
     "rank",
@@ -50,6 +52,10 @@ PREDICTION_COLUMNS = (
     "universe_hash",
     "access_policy",
     "generated_at",
+    "parent_model_id",
+    "training_request_id",
+    "training_run_id",
+    "validation_run_id",
 )
 
 
@@ -288,6 +294,7 @@ class ShadowPredictionService:
         ].copy()
         result["model_id"] = model_id
         result["model_role"] = model_role
+        result["model_origin"] = "champion" if model_role == "champion" else "research_challenger"
         result["native_horizon"] = native_horizon
         result["production_run_id"] = context.production_run_id
         result["shadow_run_id"] = shadow_run_id
@@ -296,6 +303,10 @@ class ShadowPredictionService:
         result["universe_hash"] = context.universe_hash
         result["access_policy"] = "prospective_production"
         result["generated_at"] = context.generated_at
+        result["parent_model_id"] = ""
+        result["training_request_id"] = ""
+        result["training_run_id"] = ""
+        result["validation_run_id"] = ""
         return result
 
     @staticmethod
@@ -324,6 +335,7 @@ class ShadowPredictionService:
             {
                 "model_id": context.champion_model_id,
                 "model_role": "champion",
+                "model_origin": "champion",
                 "prediction_hash": model_hashes["champion"],
                 "feature_hash": context.feature_hash,
                 "universe_hash": context.universe_hash,
@@ -337,6 +349,7 @@ class ShadowPredictionService:
                 {
                     "model_id": context.challenger_models[horizon].model_id,
                     "model_role": f"challenger_h{horizon}",
+                    "model_origin": "research_challenger",
                     "prediction_hash": model_hashes[f"h{horizon}"],
                     "feature_hash": context.feature_hash,
                     "universe_hash": context.universe_hash,
@@ -349,6 +362,7 @@ class ShadowPredictionService:
             {
                 "model_id": ensemble_id,
                 "model_role": "multi_horizon_ensemble",
+                "model_origin": "research_challenger",
                 "prediction_hash": model_hashes["ensemble"],
                 "feature_hash": context.feature_hash,
                 "universe_hash": context.universe_hash,
@@ -411,6 +425,8 @@ def _validate_bundle(
         raise DataValidationError("shadow predictions contain future or different dates")
     if not set(frame["model_role"].astype(str)).issubset(MODEL_ROLES):
         raise DataValidationError("shadow predictions contain invalid model_role")
+    if not set(frame["model_origin"].astype(str)).issubset(MODEL_ORIGINS):
+        raise DataValidationError("shadow predictions contain invalid model_origin")
     if set(frame["production_run_id"].astype(str)) != {context.production_run_id}:
         raise DataValidationError("shadow rows lack consistent production_run_id")
     if set(frame["feature_hash"].astype(str)) != {context.feature_hash}:

@@ -24,6 +24,17 @@ from ashare_quant.utils.manifest import atomic_write_json
 
 type DataFrame = pd.DataFrame
 
+LINEAGE_COLUMNS: tuple[str, ...] = (
+    "model_origin",
+    "parent_model_id",
+    "training_request_id",
+    "training_run_id",
+    "validation_run_id",
+)
+LEGACY_OBSERVATION_COLUMNS: tuple[str, ...] = tuple(
+    column for column in OBSERVATION_COLUMNS if column not in LINEAGE_COLUMNS
+)
+
 
 def logical_observation_hash(frame: DataFrame) -> str:
     """Hash canonical observation rows in unique-key order."""
@@ -67,10 +78,19 @@ def read_observation_artifact(output_dir: Path) -> tuple[DataFrame, dict[str, An
         raise DataValidationError("invalid performance observation artifact identity")
     if file_sha256(parquet_path) != manifest.get("parquet_file_sha256"):
         raise DataValidationError("performance observation Parquet hash mismatch")
-    frame = pd.read_parquet(parquet_path)
-    _validate_frame(frame)
-    if logical_observation_hash(frame) != manifest.get("observation_hash"):
+    raw = pd.read_parquet(parquet_path)
+    legacy = not set(LINEAGE_COLUMNS).issubset(raw.columns)
+    if legacy:
+        missing = sorted(set(LEGACY_OBSERVATION_COLUMNS) - set(raw.columns))
+        if missing:
+            raise DataValidationError(f"performance observations lack columns: {missing}")
+        source_hash = _logical_hash_columns(raw, LEGACY_OBSERVATION_COLUMNS)
+    else:
+        source_hash = logical_observation_hash(raw)
+    if source_hash != manifest.get("observation_hash"):
         raise DataValidationError("performance observation logical hash mismatch")
+    frame = normalize_observation_lineage(raw)
+    _validate_frame(frame)
     return frame, manifest
 
 
@@ -164,3 +184,33 @@ def _validate_frame(frame: DataFrame) -> None:
 
 def _empty_frame() -> DataFrame:
     return pd.DataFrame(columns=list(OBSERVATION_COLUMNS))
+
+
+def normalize_observation_lineage(frame: DataFrame) -> DataFrame:
+    """Normalize legacy observations to the explicit model-origin contract."""
+
+    result = frame.copy()
+    defaults = (
+        result["model_role"]
+        .astype(str)
+        .map(lambda role: "champion" if role == "champion" else "research_challenger")
+    )
+    if "model_origin" not in result:
+        result["model_origin"] = defaults
+    else:
+        result["model_origin"] = result["model_origin"].where(
+            result["model_origin"].notna() & result["model_origin"].astype(str).ne(""),
+            defaults,
+        )
+    for column in LINEAGE_COLUMNS[1:]:
+        if column not in result:
+            result[column] = ""
+        else:
+            result[column] = result[column].fillna("").astype(str)
+    return result
+
+
+def _logical_hash_columns(frame: DataFrame, columns: tuple[str, ...]) -> str:
+    ordered = frame.loc[:, list(columns)].sort_values(list(OBSERVATION_KEY), kind="mergesort")
+    normalized = ordered.astype(object).where(ordered.notna(), None)
+    return canonical_payload_hash(normalized.to_dict("records"))

@@ -28,6 +28,7 @@ def validate_candidate_artifact(
     reports_root: Path,
     processed_root: Path,
     config_path: Path,
+    require_current_processed_hashes: bool = True,
 ) -> CandidateValidationContext:
     """Validate all immutable training and candidate-registration identities."""
 
@@ -79,7 +80,9 @@ def validate_candidate_artifact(
         "label_hash": file_sha256(processed_root / "labels_forward" / "_manifest.json"),
     }
     for field, digest in current_hashes.items():
-        if getattr(artifact, field) != digest or getattr(dataset, field) != digest:
+        if getattr(artifact, field) != getattr(dataset, field):
+            raise DataValidationError(f"VALIDATION_FAILED: candidate {field} mismatch")
+        if require_current_processed_hashes and getattr(artifact, field) != digest:
             raise DataValidationError(f"VALIDATION_FAILED: candidate {field} mismatch")
     feature_payload = _json(artifact_dir / "feature_list.json")
     raw_features = feature_payload.get("features")

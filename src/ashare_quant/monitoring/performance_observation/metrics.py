@@ -37,12 +37,13 @@ def build_performance_metrics(observations: DataFrame) -> dict[str, Any]:
 
 def _daily_metrics(frame: DataFrame) -> DataFrame:
     records: list[dict[str, object]] = []
-    group_columns = ["model_id", "model_role", "horizon", "signal_date"]
+    group_columns = ["model_id", "model_role", "model_origin", "horizon", "signal_date"]
     for key, group in frame.groupby(group_columns, sort=True):
         model_id = str(key[0])
         model_role = str(key[1])
-        horizon = int(str(key[2]))
-        signal_date = str(key[3])
+        model_origin = str(key[2])
+        horizon = int(str(key[3]))
+        signal_date = str(key[4])
         score = pd.to_numeric(group["prediction_score"], errors="coerce")
         target = pd.to_numeric(group["future_excess_ret"], errors="coerce")
         valid = score.notna() & target.notna() & np.isfinite(score) & np.isfinite(target)
@@ -54,6 +55,7 @@ def _daily_metrics(frame: DataFrame) -> DataFrame:
         record: dict[str, object] = {
             "model_id": model_id,
             "model_role": model_role,
+            "model_origin": model_origin,
             "horizon": horizon,
             "signal_date": signal_date,
             "observations": len(scored),
@@ -73,11 +75,12 @@ def _daily_metrics(frame: DataFrame) -> DataFrame:
 
 def _aggregate_metrics(frame: DataFrame, daily: DataFrame) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    keys = ["model_id", "model_role", "horizon"]
+    keys = ["model_id", "model_role", "model_origin", "horizon"]
     for key, group in daily.groupby(keys, sort=True):
         model_id = str(key[0])
         model_role = str(key[1])
-        horizon = int(str(key[2]))
+        model_origin = str(key[2])
+        horizon = int(str(key[3]))
         rank_ic = pd.to_numeric(group["rank_ic"], errors="coerce").dropna()
         pearson = pd.to_numeric(group["pearson_ic"], errors="coerce").dropna()
         rank_mean = float(rank_ic.mean()) if not rank_ic.empty else None
@@ -85,9 +88,16 @@ def _aggregate_metrics(frame: DataFrame, daily: DataFrame) -> list[dict[str, Any
         record: dict[str, Any] = {
             "model_id": model_id,
             "model_role": model_role,
+            "model_origin": model_origin,
             "horizon": horizon,
             "rows": int(
-                len(frame.loc[frame["model_id"].eq(model_id) & frame["horizon"].eq(horizon)])
+                len(
+                    frame.loc[
+                        frame["model_id"].eq(model_id)
+                        & frame["model_origin"].eq(model_origin)
+                        & frame["horizon"].eq(horizon)
+                    ]
+                )
             ),
             "sessions": len(group),
             "pearson_ic": float(pearson.mean()) if not pearson.empty else None,

@@ -7,11 +7,14 @@ from typing import Any
 import pandas as pd
 
 from ashare_quant.data.exceptions import DataValidationError
-from ashare_quant.models.shadow.schemas import MODEL_ROLES
+from ashare_quant.models.shadow.schemas import MODEL_ORIGINS, MODEL_ROLES
 from ashare_quant.monitoring.performance_observation.schemas import (
     OBSERVATION_COLUMNS,
     OBSERVATION_KEY,
     SUPPORTED_HORIZONS,
+)
+from ashare_quant.monitoring.performance_observation.storage import (
+    normalize_observation_lineage,
 )
 
 type DataFrame = pd.DataFrame
@@ -24,6 +27,7 @@ IMMATURE_STATUSES: frozenset[str] = frozenset(
 def validate_observation_frame(frame: DataFrame, as_of: str) -> None:
     """Validate schema, maturity, identity, and lineage without other data sources."""
 
+    frame = normalize_observation_lineage(frame)
     missing = sorted(set(OBSERVATION_COLUMNS) - set(frame.columns))
     if missing:
         raise DataValidationError(f"performance observations lack required columns: {missing}")
@@ -35,6 +39,8 @@ def validate_observation_frame(frame: DataFrame, as_of: str) -> None:
         raise DataValidationError("performance observation_id is duplicated")
     if not set(frame["model_role"].astype(str)).issubset(MODEL_ROLES):
         raise DataValidationError("performance observations contain unsupported model_role")
+    if not set(frame["model_origin"].astype(str)).issubset(MODEL_ORIGINS):
+        raise DataValidationError("performance observations contain unsupported model_origin")
     horizons = set(pd.to_numeric(frame["horizon"], errors="coerce").dropna().astype(int).unique())
     if not horizons or not horizons.issubset(SUPPORTED_HORIZONS):
         raise DataValidationError("performance observations contain unsupported horizon")
@@ -61,6 +67,15 @@ def validate_observation_frame(frame: DataFrame, as_of: str) -> None:
     ):
         if frame[column].fillna("").astype(str).eq("").any():
             raise DataValidationError(f"performance observations contain empty {column}")
+    retrained = frame["model_origin"].astype(str).eq("retrained_challenger")
+    for column in (
+        "parent_model_id",
+        "training_request_id",
+        "training_run_id",
+        "validation_run_id",
+    ):
+        if frame.loc[retrained, column].fillna("").astype(str).eq("").any():
+            raise DataValidationError(f"retrained observations contain empty {column}")
 
 
 def validate_model_lineage(
@@ -73,7 +88,7 @@ def validate_model_lineage(
         identity = model_lineage.get(str(model_id))
         if identity is None:
             raise DataValidationError(f"observation manifest lacks model lineage: {model_id}")
-        for column in ("model_role", "feature_hash", "universe_hash"):
+        for column in ("model_role", "model_origin", "feature_hash", "universe_hash"):
             values = set(group[column].astype(str))
             expected = str(identity.get(column, ""))
             if len(values) != 1 or values != {expected}:

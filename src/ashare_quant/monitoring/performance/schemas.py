@@ -9,6 +9,7 @@ from typing import Any
 PERFORMANCE_METRIC_COLUMNS: tuple[str, ...] = (
     "model_id",
     "model_role",
+    "model_origin",
     "horizon",
     "feature_hash",
     "universe_hash",

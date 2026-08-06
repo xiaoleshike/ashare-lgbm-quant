@@ -10,6 +10,9 @@ import pandas as pd
 
 from ashare_quant.monitoring.performance.decay import safe_decay_ratio
 from ashare_quant.monitoring.performance.schemas import PERFORMANCE_METRIC_COLUMNS
+from ashare_quant.monitoring.performance_observation.storage import (
+    normalize_observation_lineage,
+)
 
 type DataFrame = pd.DataFrame
 
@@ -20,6 +23,7 @@ def aggregate_performance(
 ) -> tuple[DataFrame, dict[str, Any], list[str]]:
     """Calculate daily, rolling, Top-N, bucket, and decay statistics."""
 
+    observations = normalize_observation_lineage(observations)
     available = observations.loc[
         observations["label_status"].astype(str).eq("available")
         & observations["future_excess_ret"].notna()
@@ -30,20 +34,26 @@ def aggregate_performance(
     warnings: list[str] = []
     if observations.empty:
         warnings.append("insufficient observations: no mature performance observations")
-    group_keys = ["model_id", "model_role", "horizon"]
+    group_keys = ["model_id", "model_role", "model_origin", "horizon"]
     for key, all_group in observations.groupby(group_keys, sort=True):
-        model_id, model_role, horizon = str(key[0]), str(key[1]), int(str(key[2]))
+        model_id = str(key[0])
+        model_role = str(key[1])
+        model_origin = str(key[2])
+        horizon = int(str(key[3]))
         group = available.loc[
             available["model_id"].astype(str).eq(model_id)
+            & available["model_origin"].astype(str).eq(model_origin)
             & pd.to_numeric(available["horizon"], errors="coerce").eq(horizon)
         ]
         group_daily = daily.loc[
             daily["model_id"].astype(str).eq(model_id)
+            & daily["model_origin"].astype(str).eq(model_origin)
             & pd.to_numeric(daily["horizon"], errors="coerce").eq(horizon)
         ].sort_values("signal_date", kind="mergesort")
         row, rolling = _aggregate_group(
             model_id=model_id,
             model_role=model_role,
+            model_origin=model_origin,
             horizon=horizon,
             all_rows=all_group,
             available_rows=group,
@@ -73,9 +83,14 @@ def aggregate_performance(
                 f"sparse observation: model={model_id} horizon={horizon} rows={len(group)}"
             )
     metrics = pd.DataFrame.from_records(metric_rows, columns=list(PERFORMANCE_METRIC_COLUMNS))
-    metrics = metrics.sort_values(["model_id", "horizon"], kind="mergesort").reset_index(drop=True)
+    metrics = metrics.sort_values(
+        ["model_id", "model_origin", "horizon"], kind="mergesort"
+    ).reset_index(drop=True)
     details = {
-        "models": sorted(model_details, key=lambda item: (item["model_id"], item["horizon"])),
+        "models": sorted(
+            model_details,
+            key=lambda item: (item["model_id"], item["model_origin"], item["horizon"]),
+        ),
         "daily_ic_rows": len(daily),
     }
     return metrics, details, sorted(set(warnings))
@@ -83,7 +98,7 @@ def aggregate_performance(
 
 def _daily_metrics(frame: DataFrame) -> DataFrame:
     records: list[dict[str, Any]] = []
-    keys = ["model_id", "model_role", "horizon", "signal_date"]
+    keys = ["model_id", "model_role", "model_origin", "horizon", "signal_date"]
     for key, group in frame.groupby(keys, sort=True):
         score = pd.to_numeric(group["prediction_score"], errors="coerce")
         target = pd.to_numeric(group["future_excess_ret"], errors="coerce")
@@ -94,8 +109,9 @@ def _daily_metrics(frame: DataFrame) -> DataFrame:
         record: dict[str, Any] = {
             "model_id": str(key[0]),
             "model_role": str(key[1]),
-            "horizon": int(str(key[2])),
-            "signal_date": str(key[3]),
+            "model_origin": str(key[2]),
+            "horizon": int(str(key[3])),
+            "signal_date": str(key[4]),
             "rows": len(scored),
             "pearson_ic": _correlation(score, target, "pearson"),
             "rank_ic": _correlation(score, target, "spearman"),
@@ -114,6 +130,7 @@ def _daily_metrics(frame: DataFrame) -> DataFrame:
         columns=[
             "model_id",
             "model_role",
+            "model_origin",
             "horizon",
             "signal_date",
             "rows",
@@ -133,6 +150,7 @@ def _aggregate_group(
     *,
     model_id: str,
     model_role: str,
+    model_origin: str,
     horizon: int,
     all_rows: DataFrame,
     available_rows: DataFrame,
@@ -146,6 +164,7 @@ def _aggregate_group(
     row: dict[str, Any] = {
         "model_id": model_id,
         "model_role": model_role,
+        "model_origin": model_origin,
         "horizon": horizon,
         "feature_hash": str(all_rows["feature_hash"].iloc[0]),
         "universe_hash": str(all_rows["universe_hash"].iloc[0]),

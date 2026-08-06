@@ -17,6 +17,7 @@ from ashare_quant.monitoring.performance.validation import (
     validate_source_manifest,
 )
 from ashare_quant.monitoring.performance_observation.storage import (
+    normalize_observation_lineage,
     read_observation_artifact,
 )
 
@@ -52,7 +53,7 @@ def load_observation_sources(reports_root: Path, as_of: str) -> ObservationSourc
                 "manifest_file_sha256": file_sha256(directory / "manifest.json"),
             }
         )
-    combined = pd.concat(frames, ignore_index=True)
+    combined = normalize_observation_lineage(pd.concat(frames, ignore_index=True))
     validate_observation_frame(combined, as_of)
     validate_model_lineage(combined, model_lineage)
     ordered = combined.sort_values(
@@ -84,10 +85,18 @@ def _merge_model_lineage(
         normalized = {
             "model_id": model_id,
             "model_role": str(raw.get("model_role", "")),
+            "model_origin": str(
+                raw.get("model_origin")
+                or ("champion" if raw.get("model_role") == "champion" else "research_challenger")
+            ),
             "feature_hash": str(raw.get("feature_hash", "")),
             "universe_hash": str(raw.get("universe_hash", "")),
             "source_models": sorted(str(value) for value in raw.get("source_models", [])),
             "fusion_method": raw.get("fusion_method"),
+            "parent_model_id": str(raw.get("parent_model_id", "")),
+            "training_request_id": str(raw.get("training_request_id", "")),
+            "training_run_id": str(raw.get("training_run_id", "")),
+            "validation_run_id": str(raw.get("validation_run_id", "")),
         }
         if not model_id or not normalized["model_role"]:
             raise DataValidationError("model_lineage record lacks identity")

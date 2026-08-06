@@ -31,6 +31,10 @@ MODEL_ROLES: frozenset[str] = frozenset(
     }
 )
 
+MODEL_ORIGINS: frozenset[str] = frozenset(
+    {"champion", "research_challenger", "retrained_challenger"}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ReadinessResult:

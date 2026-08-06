@@ -37,6 +37,7 @@ from ashare_quant.monitoring.performance_observation.storage import (
 )
 from ashare_quant.monitoring.performance_observation.validation import (
     load_shadow_sources,
+    normalize_shadow_lineage,
 )
 from ashare_quant.utils.manifest import config_hash, current_git_info, read_manifest
 
@@ -74,6 +75,7 @@ class PerformanceObservationService:
             runs_root=self.runs_root,
             observation_as_of=observation_as_of,
         )
+        shadow = normalize_shadow_lineage(shadow)
         if shadow.empty:
             raise DataValidationError("no prospective shadow predictions are available")
 
@@ -92,9 +94,9 @@ class PerformanceObservationService:
         )
         mature_signal_dates = set(candidates["signal_date"].astype(str))
         shadow_hashes = {
-            signal_date: digest
-            for signal_date, digest in shadow_hashes.items()
-            if signal_date in mature_signal_dates
+            source_key: digest
+            for source_key, digest in shadow_hashes.items()
+            if source_key.split(":", 1)[0] in mature_signal_dates
         }
         shadow_manifests = [
             manifest
@@ -288,12 +290,22 @@ def _model_lineage(shadow_manifests: list[dict[str, Any]]) -> list[dict[str, Any
             record = {
                 "model_id": model_id,
                 "model_role": str(raw.get("model_role", "")),
+                "model_origin": str(
+                    raw.get("model_origin")
+                    or (
+                        "champion" if raw.get("model_role") == "champion" else "research_challenger"
+                    )
+                ),
                 "feature_hash": str(raw.get("feature_hash") or manifest.get("feature_hash") or ""),
                 "universe_hash": str(
                     raw.get("universe_hash") or manifest.get("universe_hash") or ""
                 ),
                 "source_models": sorted(str(value) for value in raw.get("source_models", [])),
                 "fusion_method": raw.get("fusion_method"),
+                "parent_model_id": str(raw.get("parent_model_id", "")),
+                "training_request_id": str(raw.get("training_request_id", "")),
+                "training_run_id": str(raw.get("training_run_id", "")),
+                "validation_run_id": str(raw.get("validation_run_id", "")),
             }
             previous = lineage.get(model_id)
             if previous is not None and previous != record:

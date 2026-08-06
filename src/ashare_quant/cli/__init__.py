@@ -95,6 +95,7 @@ from ashare_quant.research.agent import ResearchAgentService
 from ashare_quant.retraining import RetrainingTriggerService
 from ashare_quant.retraining.execution import GovernedRetrainingExecutionService
 from ashare_quant.retraining.readiness import RetrainingExecutionReadinessValidator
+from ashare_quant.retraining.shadow import RetrainedChallengerShadowService
 from ashare_quant.retraining.validation import RetrainingValidationService
 from ashare_quant.strategy import CandidateSelector
 from ashare_quant.universe import UniverseBuilder, UniverseStore, UniverseValidator
@@ -854,6 +855,16 @@ def add_retraining_parser(
         "validation-status", help="Inspect immutable retrained-Challenger validation evidence."
     )
     validation_status.add_argument("--run-id", required=True)
+    shadow = commands.add_parser(
+        "shadow", help="Publish a validated retrained Challenger prospective shadow sidecar."
+    )
+    shadow.add_argument("--model-id", required=True)
+    shadow.add_argument("--as-of", help="Production date; defaults to latest complete shadow date.")
+    shadow_status = commands.add_parser(
+        "shadow-status", help="Inspect a retrained Challenger shadow sidecar."
+    )
+    shadow_status.add_argument("--model-id", required=True)
+    shadow_status.add_argument("--as-of", help="Production date; defaults to latest model sidecar.")
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -2761,6 +2772,23 @@ def run_retraining_command(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     config_path = Path(effective_config_path(args.config))
     try:
+        if args.retraining_command in {"shadow", "shadow-status"}:
+            shadow = RetrainedChallengerShadowService(
+                settings=settings,
+                config_path=config_path,
+            )
+            if args.retraining_command == "shadow-status":
+                shadow_status = shadow.status(args.model_id, as_of=args.as_of)
+                print(json.dumps(shadow_status, sort_keys=True))
+                return 0 if shadow_status["status"] == "complete" else 1
+            shadow_result = shadow.predict(args.model_id, as_of=args.as_of)
+            print(
+                f"retraining_shadow: model_id={shadow_result.model_id} "
+                f"as_of={shadow_result.as_of} shadow_run_id={shadow_result.shadow_run_id} "
+                f"rows={shadow_result.prediction_rows} output={shadow_result.output_dir} "
+                f"idempotent={shadow_result.idempotent}"
+            )
+            return 0
         if args.retraining_command == "validation-status" or (
             args.retraining_command == "validate" and args.model_id is not None
         ):

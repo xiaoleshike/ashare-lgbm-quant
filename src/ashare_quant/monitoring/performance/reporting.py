@@ -49,12 +49,13 @@ def render_performance_report(summary: dict[str, Any]) -> str:
         "",
         "These are maturity-gated observation statistics, not portfolio or backtest returns.",
         "",
-        "| Model | Role | Horizon | Rank IC | ICIR | Top10 Excess | Alpha Decay |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "| Model | Role | Origin | Horizon | Rank IC | ICIR | Top10 Excess | Alpha Decay |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
     ]
     for row in summary["models"]:
         lines.append(
-            f"| {row['model_id']} | {row['model_role']} | {row['horizon']} | "
+            f"| {row['model_id']} | {row['model_role']} | {row['model_origin']} | "
+            f"{row['horizon']} | "
             f"{_format(row['rank_ic'])} | {_format(row['icir'])} | "
             f"{_format(row['top10_average_excess_ret'])} | "
             f"{_format(row['alpha_decay_ratio'])} |"
