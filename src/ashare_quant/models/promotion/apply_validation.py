@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,6 +98,12 @@ def validate_apply_preconditions(
     if champion is None or champion.model_id != bundle.request.current_champion.model_id:
         raise DataValidationError("current Champion assignment changed after approval")
     artifact_root = Path(candidate.artifact_path)
+    artifact_manifest = json.loads((artifact_root / "manifest.json").read_text(encoding="utf-8"))
+    if (
+        not isinstance(artifact_manifest, dict)
+        or artifact_manifest.get("qualification_only") is True
+    ):
+        raise DataValidationError("qualification-only model cannot be applied as Champion")
     for filename, expected_hash in required_hashes.items():
         path = artifact_root / filename
         if file_sha256(path) != expected_hash:

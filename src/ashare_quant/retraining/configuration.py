@@ -77,6 +77,44 @@ class RetrainingLifecyclePolicy(BaseModel):
         return value
 
 
+class RetrainingQualificationPolicy(BaseModel):
+    """Operator-controlled safeguards for real lifecycle qualification."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = True
+    phase: Literal["2.8.2G"] = "2.8.2G"
+    require_clean_worktree: bool = False
+    require_dry_run_ready: bool = True
+    require_readiness_ready: bool = True
+    allow_real_training: bool = False
+    require_manual_stage_advance: Literal[True] = True
+    allow_real_shadow: bool = False
+    maximum_qualification_runs_per_day: int = Field(default=1, ge=1)
+    allowed_stop_points: tuple[
+        Literal[
+            "preflight", "dry-run", "readiness", "training", "validation", "shadow", "observation"
+        ],
+        ...,
+    ] = (
+        "preflight",
+        "dry-run",
+        "readiness",
+        "training",
+        "validation",
+        "shadow",
+        "observation",
+    )
+    minimum_free_disk_bytes: int | None = Field(default=None, ge=0)
+    minimum_available_memory_bytes: int | None = Field(default=None, ge=0)
+    promotion_forbidden: Literal[True] = True
+    trading_forbidden: Literal[True] = True
+
+    @property
+    def policy_hash(self) -> str:
+        return canonical_payload_hash(self.model_dump(mode="json"))
+
+
 class RetrainingPolicy(BaseModel):
     """Deterministic policy used only to create training requests."""
 
@@ -91,11 +129,16 @@ class RetrainingPolicy(BaseModel):
     )
     triggers: RetrainingTriggers = Field(default_factory=RetrainingTriggers)
     lifecycle: RetrainingLifecyclePolicy = Field(default_factory=RetrainingLifecyclePolicy)
+    qualification: RetrainingQualificationPolicy = Field(
+        default_factory=RetrainingQualificationPolicy
+    )
 
     @property
     def policy_hash(self) -> str:
         # Lifecycle scheduling does not alter the trigger decision frozen in old requests.
-        return canonical_payload_hash(self.model_dump(mode="json", exclude={"lifecycle"}))
+        return canonical_payload_hash(
+            self.model_dump(mode="json", exclude={"lifecycle", "qualification"})
+        )
 
     @property
     def lifecycle_policy_hash(self) -> str:

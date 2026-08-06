@@ -30,6 +30,13 @@ LINEAGE_COLUMNS: tuple[str, ...] = (
     "training_request_id",
     "training_run_id",
     "validation_run_id",
+    "qualification_run_id",
+    "qualification_only",
+)
+PRE_QUALIFICATION_COLUMNS: tuple[str, ...] = tuple(
+    column
+    for column in OBSERVATION_COLUMNS
+    if column not in {"qualification_run_id", "qualification_only"}
 )
 LEGACY_OBSERVATION_COLUMNS: tuple[str, ...] = tuple(
     column for column in OBSERVATION_COLUMNS if column not in LINEAGE_COLUMNS
@@ -79,12 +86,18 @@ def read_observation_artifact(output_dir: Path) -> tuple[DataFrame, dict[str, An
     if file_sha256(parquet_path) != manifest.get("parquet_file_sha256"):
         raise DataValidationError("performance observation Parquet hash mismatch")
     raw = pd.read_parquet(parquet_path)
-    legacy = not set(LINEAGE_COLUMNS).issubset(raw.columns)
+    legacy = not set(LINEAGE_COLUMNS[:-2]).issubset(raw.columns)
+    pre_qualification = not set(LINEAGE_COLUMNS[-2:]).issubset(raw.columns)
     if legacy:
         missing = sorted(set(LEGACY_OBSERVATION_COLUMNS) - set(raw.columns))
         if missing:
             raise DataValidationError(f"performance observations lack columns: {missing}")
         source_hash = _logical_hash_columns(raw, LEGACY_OBSERVATION_COLUMNS)
+    elif pre_qualification:
+        missing = sorted(set(PRE_QUALIFICATION_COLUMNS) - set(raw.columns))
+        if missing:
+            raise DataValidationError(f"performance observations lack columns: {missing}")
+        source_hash = _logical_hash_columns(raw, PRE_QUALIFICATION_COLUMNS)
     else:
         source_hash = logical_observation_hash(raw)
     if source_hash != manifest.get("observation_hash"):
@@ -202,11 +215,15 @@ def normalize_observation_lineage(frame: DataFrame) -> DataFrame:
             result["model_origin"].notna() & result["model_origin"].astype(str).ne(""),
             defaults,
         )
-    for column in LINEAGE_COLUMNS[1:]:
+    for column in LINEAGE_COLUMNS[1:-1]:
         if column not in result:
             result[column] = ""
         else:
             result[column] = result[column].fillna("").astype(str)
+    if "qualification_only" not in result:
+        result["qualification_only"] = False
+    else:
+        result["qualification_only"] = result["qualification_only"].fillna(False).astype(bool)
     return result
 
 

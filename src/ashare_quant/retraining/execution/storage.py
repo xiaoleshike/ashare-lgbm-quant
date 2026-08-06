@@ -16,6 +16,7 @@ from ashare_quant.retraining.execution.schemas import (
     CandidateRegistration,
     ExecutionResult,
     PreparedTrainingData,
+    QualificationExecutionContext,
     TrainedRanker,
 )
 from ashare_quant.utils.manifest import atomic_write_json
@@ -65,6 +66,7 @@ class RetrainingExecutionStorage:
         config_hash_value: str,
         git_commit: str | None,
         git_dirty: bool,
+        qualification: QualificationExecutionContext | None = None,
     ) -> ExecutionResult:
         common = self.reports_root / "retraining"
         staging_root = common / ".tmp"
@@ -82,6 +84,7 @@ class RetrainingExecutionStorage:
                 config_hash_value=config_hash_value,
                 git_commit=git_commit,
                 git_dirty=git_dirty,
+                qualification=qualification,
             )
             staged_registration = staging / "registration"
             staged_registration.mkdir()
@@ -103,6 +106,13 @@ class RetrainingExecutionStorage:
                 artifact_hash=artifact_manifest.artifact_hash,
                 feature_hash=artifact_manifest.feature_hash,
                 horizon=artifact_manifest.horizon,
+                qualification_run_id=(
+                    qualification.qualification_run_id if qualification else None
+                ),
+                qualification_only=qualification is not None,
+                qualification_phase=(qualification.qualification_phase if qualification else None),
+                promotion_forbidden=qualification is not None,
+                trading_forbidden=qualification is not None,
             )
             atomic_write_json(
                 staged_registration / "registration.json", registration.model_dump(mode="json")
@@ -135,6 +145,15 @@ class RetrainingExecutionStorage:
                     "training_type": "challenger_refresh",
                     "status": "COMPLETED",
                     "artifact_hash": artifact_manifest.artifact_hash,
+                    "qualification_run_id": (
+                        qualification.qualification_run_id if qualification else None
+                    ),
+                    "qualification_only": qualification is not None,
+                    "qualification_phase": (
+                        qualification.qualification_phase if qualification else None
+                    ),
+                    "promotion_forbidden": qualification is not None,
+                    "trading_forbidden": qualification is not None,
                 },
             )
             execution_hash = canonical_payload_hash(
@@ -142,6 +161,15 @@ class RetrainingExecutionStorage:
                     "dataset_manifest": file_sha256(staged_execution / "dataset_manifest.json"),
                     "execution": file_sha256(staged_execution / "execution.json"),
                     "artifact_hash": artifact_manifest.artifact_hash,
+                    "qualification_run_id": (
+                        qualification.qualification_run_id if qualification else None
+                    ),
+                    "qualification_only": qualification is not None,
+                    "qualification_phase": (
+                        qualification.qualification_phase if qualification else None
+                    ),
+                    "promotion_forbidden": qualification is not None,
+                    "trading_forbidden": qualification is not None,
                 }
             )
             atomic_write_json(

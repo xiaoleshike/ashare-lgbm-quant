@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ashare_quant.data.exceptions import DataValidationError
@@ -43,12 +44,14 @@ class LifecycleOperationalControls:
         max_daily_training_runs: int,
         cooldown_days: int,
         now: datetime,
+        qualification_root: Path | None = None,
     ) -> None:
         self.storage = storage
         self.zone = ZoneInfo(timezone)
         self.limit = max_daily_training_runs
         self.cooldown_days = cooldown_days
         self.now = now
+        self.qualification_root = qualification_root
 
     @property
     def operational_date(self) -> date:
@@ -68,6 +71,16 @@ class LifecycleOperationalControls:
                         canonical_payload_hash(event.model_dump(mode="json")),
                     )
                 )
+        for (
+            run_id,
+            parent_model_id,
+            horizon,
+            created_at,
+            event_hash,
+        ) in self._qualification_training_events():
+            del parent_model_id, horizon
+            if _event_operational_date(created_at, self.zone) == self.operational_date:
+                attempts.append((run_id, event_hash))
         return BudgetDecision(
             operational_date=self.operational_date.isoformat(),
             configured_limit=self.limit,
@@ -101,6 +114,20 @@ class LifecycleOperationalControls:
                 trained = _event_operational_date(event.created_at, self.zone)
                 if latest is None or trained > latest[0]:
                     latest = (trained, snapshot.summary.lifecycle_run_id)
+        for (
+            run_id,
+            candidate_parent,
+            candidate_horizon,
+            created_at,
+            _,
+        ) in self._qualification_training_events():
+            if run_id == lifecycle_run_id:
+                continue
+            if candidate_parent != parent_model_id or candidate_horizon != horizon:
+                continue
+            trained = _event_operational_date(created_at, self.zone)
+            if latest is None or trained > latest[0]:
+                latest = (trained, run_id)
         if latest is None:
             return CooldownDecision(self.operational_date.isoformat(), self.cooldown_days, True)
         expiry = latest[0] + timedelta(days=self.cooldown_days)
@@ -133,6 +160,44 @@ class LifecycleOperationalControls:
                 )
             snapshots.append(snapshot)
         return tuple(snapshots)
+
+    def _qualification_training_events(
+        self,
+    ) -> tuple[tuple[str, str, int, str, str], ...]:
+        if self.qualification_root is None or not self.qualification_root.is_dir():
+            return ()
+        from ashare_quant.retraining.qualification.storage import QualificationStorage
+
+        storage = QualificationStorage(self.qualification_root.parent.parent)
+        events: list[tuple[str, str, int, str, str]] = []
+        for directory in sorted(
+            path for path in self.qualification_root.iterdir() if path.is_dir()
+        ):
+            if directory.name == ".tmp":
+                continue
+            try:
+                snapshot = storage.read(directory.name)
+            except (OSError, ValueError, DataValidationError) as error:
+                raise DataValidationError(
+                    "qualification training budget history is unreadable; recovery required: "
+                    f"{directory}: {error}"
+                ) from error
+            if snapshot is None:
+                raise DataValidationError(
+                    f"qualification training budget history is incomplete: {directory}"
+                )
+            for event in snapshot.events:
+                if event.state == "TRAINING":
+                    events.append(
+                        (
+                            snapshot.summary.qualification_run_id,
+                            snapshot.summary.parent_model_id,
+                            snapshot.summary.horizon,
+                            event.created_at,
+                            canonical_payload_hash(event.model_dump(mode="json")),
+                        )
+                    )
+        return tuple(events)
 
 
 def _event_operational_date(value: str, zone: ZoneInfo) -> date:

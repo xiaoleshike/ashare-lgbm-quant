@@ -70,6 +70,12 @@ class ChallengerArtifactManifest(BaseModel):
     git_commit: str | None
     git_dirty: bool
     manifest_written_last: Literal[True] = True
+    qualification_run_id: str | None = None
+    qualification_only: bool = False
+    qualification_phase: str | None = None
+    qualification_source: str | None = None
+    promotion_forbidden: bool = False
+    trading_forbidden: bool = False
 
 
 class CandidateRegistration(BaseModel):
@@ -89,6 +95,26 @@ class CandidateRegistration(BaseModel):
     feature_hash: str
     horizon: Literal[5, 10, 20, 60]
     registry_json_modified: Literal[False] = False
+    qualification_run_id: str | None = None
+    qualification_only: bool = False
+    qualification_phase: str | None = None
+    promotion_forbidden: bool = False
+    trading_forbidden: bool = False
+
+
+class QualificationExecutionContext(BaseModel):
+    """Immutable authorization attached to qualification-only training outputs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    qualification_run_id: str
+    qualification_phase: Literal["2.8.2G"] = "2.8.2G"
+    qualification_source: Literal["controlled_operational_qualification"] = (
+        "controlled_operational_qualification"
+    )
+    qualification_only: Literal[True] = True
+    promotion_forbidden: Literal[True] = True
+    trading_forbidden: Literal[True] = True
 
 
 class LifecycleEvent(BaseModel):

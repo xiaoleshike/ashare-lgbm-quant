@@ -13,6 +13,7 @@ from ashare_quant.retraining.execution.schemas import (
     ChallengerArtifactManifest,
     DatasetManifest,
     PreparedTrainingData,
+    QualificationExecutionContext,
     TrainedRanker,
 )
 from ashare_quant.utils.manifest import atomic_write_json
@@ -29,6 +30,7 @@ def write_staged_artifact(
     config_hash_value: str,
     git_commit: str | None,
     git_dirty: bool,
+    qualification: QualificationExecutionContext | None = None,
 ) -> ChallengerArtifactManifest:
     """Write model bytes and manifest last inside an unpublished directory."""
 
@@ -82,6 +84,12 @@ def write_staged_artifact(
         fold_manifest=dataset.fold_manifest,
         git_commit=git_commit,
         git_dirty=git_dirty,
+        qualification_run_id=(qualification.qualification_run_id if qualification else None),
+        qualification_only=qualification is not None,
+        qualification_phase=(qualification.qualification_phase if qualification else None),
+        qualification_source=(qualification.qualification_source if qualification else None),
+        promotion_forbidden=qualification is not None,
+        trading_forbidden=qualification is not None,
     )
     atomic_write_json(directory / "manifest.json", manifest.model_dump(mode="json"))
     validate_artifact(directory, manifest)

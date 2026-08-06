@@ -16,7 +16,11 @@ from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.promotion.gate_rules import PromotionGatePolicy
 from ashare_quant.models.shadow.storage import file_sha256
 from ashare_quant.orchestration.lock import detect_production_lock_owner
-from ashare_quant.retraining.execution.schemas import CandidateRegistration, ExecutionResult
+from ashare_quant.retraining.execution.schemas import (
+    CandidateRegistration,
+    ExecutionResult,
+    QualificationExecutionContext,
+)
 from ashare_quant.retraining.orchestration.controls import LifecycleOperationalControls
 from ashare_quant.retraining.orchestration.dry_run import LifecycleDryRunService
 from ashare_quant.retraining.orchestration.lifecycle import require_transition
@@ -763,7 +767,12 @@ class FakeExecution:
         self.calls = calls
         self.failure = failure
 
-    def execute(self, request_id: str) -> ExecutionResult:
+    def execute(
+        self,
+        request_id: str,
+        *,
+        qualification: QualificationExecutionContext | None = None,
+    ) -> ExecutionResult:
         self.calls.append("training")
         assert (
             detect_production_lock_owner(self.root / "runs/.retraining-lifecycle.lock") is not None
@@ -773,7 +782,16 @@ class FakeExecution:
         artifact = self.root / "models/challengers" / MODEL_ID
         execution = self.root / "reports/retraining/executions/training-run-1"
         registration = self.root / "models/candidate_registrations" / MODEL_ID
-        atomic_write_json(artifact / "manifest.json", {"model_id": MODEL_ID})
+        atomic_write_json(
+            artifact / "manifest.json",
+            {
+                "model_id": MODEL_ID,
+                "qualification_run_id": (
+                    qualification.qualification_run_id if qualification else None
+                ),
+                "qualification_only": qualification is not None,
+            },
+        )
         atomic_write_json(execution / "manifest.json", {"training_run_id": "training-run-1"})
         record = CandidateRegistration(
             model_id=MODEL_ID,
@@ -783,6 +801,11 @@ class FakeExecution:
             artifact_hash="a" * 64,
             feature_hash="f" * 64,
             horizon=10,
+            qualification_run_id=(qualification.qualification_run_id if qualification else None),
+            qualification_only=qualification is not None,
+            qualification_phase=(qualification.qualification_phase if qualification else None),
+            promotion_forbidden=qualification is not None,
+            trading_forbidden=qualification is not None,
         )
         atomic_write_json(registration / "registration.json", record.model_dump(mode="json"))
         return ExecutionResult("training-run-1", MODEL_ID, "COMPLETED", execution, artifact)
@@ -794,7 +817,12 @@ class FakeValidation:
         self.calls = calls
         self.failure = failure
 
-    def validate(self, model_id: str) -> RetrainingValidationResult:
+    def validate(
+        self,
+        model_id: str,
+        *,
+        qualification: QualificationExecutionContext | None = None,
+    ) -> RetrainingValidationResult:
         self.calls.append("validation")
         if self.failure == "validation":
             raise RuntimeError("validation fixture failure")
@@ -812,6 +840,10 @@ class FakeValidation:
                 "training_run_id": "training-run-1",
                 "offline_validation_hash": file_sha256(offline),
                 "executable_validation_hash": file_sha256(executable),
+                "qualification_run_id": (
+                    qualification.qualification_run_id if qualification else None
+                ),
+                "qualification_only": qualification is not None,
             },
         )
         return RetrainingValidationResult("validation-run-1", model_id, "COMPLETED", True, output)
@@ -823,12 +855,26 @@ class FakeShadow:
         self.calls = calls
         self.failure = failure
 
-    def predict(self, model_id: str, *, as_of: str | None = None) -> RetrainedShadowResult:
+    def predict(
+        self,
+        model_id: str,
+        *,
+        as_of: str | None = None,
+        qualification: QualificationExecutionContext | None = None,
+    ) -> RetrainedShadowResult:
         self.calls.append("shadow")
         if self.failure == "shadow":
             raise RuntimeError("shadow fixture failure")
         date = as_of or AS_OF
-        output = self.root / f"reports/shadow_predictions/{date}/retrained/{model_id}"
+        output = (
+            self.root
+            / f"reports/shadow_predictions/{date}"
+            / (
+                f"qualification/{qualification.qualification_run_id}/{model_id}"
+                if qualification
+                else f"retrained/{model_id}"
+            )
+        )
         atomic_write_json(
             output / "manifest.json",
             {
@@ -842,6 +888,12 @@ class FakeShadow:
                 "shadow_run_id": "shadow-run-1",
                 "generated_at": NOW.isoformat(),
                 "models": [{"model_id": model_id, "native_horizon": 10}],
+                "qualification_run_id": (
+                    qualification.qualification_run_id if qualification else None
+                ),
+                "qualification_only": qualification is not None,
+                "promotion_forbidden": qualification is not None,
+                "trading_forbidden": qualification is not None,
             },
         )
         return RetrainedShadowResult(model_id, date, "shadow-run-1", 10, output)
@@ -956,6 +1008,8 @@ def observation_row(date: str, origin: str, status: str, model_id: str) -> dict[
         "training_request_id": REQUEST_ID if origin == "retrained_challenger" else "",
         "training_run_id": "training-run-1" if origin == "retrained_challenger" else "",
         "validation_run_id": "validation-run-1" if origin == "retrained_challenger" else "",
+        "qualification_run_id": "",
+        "qualification_only": False,
     }
     return {column: record[column] for column in OBSERVATION_COLUMNS}
 

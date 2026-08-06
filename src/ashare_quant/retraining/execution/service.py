@@ -17,6 +17,7 @@ from ashare_quant.retraining.execution.recovery import RecoveryResult, recover_i
 from ashare_quant.retraining.execution.schemas import (
     ExecutionResult,
     PreparedTrainingData,
+    QualificationExecutionContext,
     TrainedRanker,
 )
 from ashare_quant.retraining.execution.storage import RetrainingExecutionStorage
@@ -79,7 +80,12 @@ class GovernedRetrainingExecutionService:
         # Serialize the frozen data read with production artifact publication.
         self.lock_path = project_root / "runs" / ".production.lock"
 
-    def execute(self, request_id: str) -> ExecutionResult:
+    def execute(
+        self,
+        request_id: str,
+        *,
+        qualification: QualificationExecutionContext | None = None,
+    ) -> ExecutionResult:
         """Execute one deterministic challenger_refresh without touching registry.json."""
 
         with production_lock(self.lock_path, command=f"retraining execute {request_id}"):
@@ -107,6 +113,7 @@ class GovernedRetrainingExecutionService:
                 "universe_hash": context.readiness.universe_hash,
                 "config_hash": current_config_hash,
                 "git_commit": git["commit"],
+                "qualification": (qualification.model_dump(mode="json") if qualification else None),
             }
             identity_hash = canonical_payload_hash(identity)
             training_run_id = f"retraining_{identity_hash[:24]}"
@@ -145,6 +152,7 @@ class GovernedRetrainingExecutionService:
                     config_hash_value=current_config_hash,
                     git_commit=git["commit"],
                     git_dirty=bool(git["dirty"]),
+                    qualification=qualification,
                 )
                 journal.append("COMPLETED")
                 return result

@@ -12,6 +12,7 @@ from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.shadow.storage import file_sha256, read_complete_manifest
 from ashare_quant.orchestration.publication import validate_production_publication
+from ashare_quant.retraining.execution.schemas import QualificationExecutionContext
 from ashare_quant.retraining.schemas import TrainingRequest
 from ashare_quant.retraining.shadow.schemas import (
     RetrainedModelLineage,
@@ -29,6 +30,7 @@ def validate_retrained_shadow_eligibility(
     settings: AppSettings,
     config_path: Path,
     runs_root: Path,
+    qualification: QualificationExecutionContext | None = None,
 ) -> tuple[RetrainedShadowContext, pd.DataFrame]:
     """Validate immutable training/validation lineage and current production inputs."""
 
@@ -61,12 +63,25 @@ def validate_retrained_shadow_eligibility(
         config_path=config_path,
         require_current_processed_hashes=False,
     )
+    if qualification is None and candidate.artifact.qualification_only:
+        raise DataValidationError(
+            "SHADOW_NOT_ELIGIBLE: qualification-only candidate requires qualification context"
+        )
+    if qualification is not None and (
+        not candidate.artifact.qualification_only
+        or candidate.artifact.qualification_run_id != qualification.qualification_run_id
+        or candidate.registration.qualification_run_id != qualification.qualification_run_id
+    ):
+        raise DataValidationError("SHADOW_NOT_ELIGIBLE: qualification lineage mismatch")
     validation_dir, validation = _validation_manifest(settings.paths.reports, model_id)
     if (
         validation.training_run_id != candidate.artifact.training_run_id
         or validation.artifact_hash != candidate.artifact.artifact_hash
         or validation.feature_hash != candidate.artifact.feature_hash
         or validation.universe_hash != candidate.artifact.universe_hash
+        or validation.qualification_only != (qualification is not None)
+        or validation.qualification_run_id
+        != (qualification.qualification_run_id if qualification else None)
     ):
         raise DataValidationError("SHADOW_NOT_ELIGIBLE: validation lineage mismatch")
     eligibility_path = validation_dir / "shadow" / "eligibility.json"
@@ -106,7 +121,7 @@ def validate_retrained_shadow_eligibility(
     ):
         raise DataValidationError("SHADOW_NOT_ELIGIBLE: training request lineage mismatch")
     current_config = config_hash(config_path)
-    if current_config is None or artifact.config_hash != current_config:
+    if current_config is None or (artifact.config_hash != current_config and qualification is None):
         raise DataValidationError("SHADOW_NOT_ELIGIBLE: configuration hash mismatch")
     lineage = RetrainedModelLineage(
         model_id=model_id,

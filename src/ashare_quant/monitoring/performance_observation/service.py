@@ -306,6 +306,8 @@ def _model_lineage(shadow_manifests: list[dict[str, Any]]) -> list[dict[str, Any
                 "training_request_id": str(raw.get("training_request_id", "")),
                 "training_run_id": str(raw.get("training_run_id", "")),
                 "validation_run_id": str(raw.get("validation_run_id", "")),
+                "qualification_run_id": str(raw.get("qualification_run_id", "")),
+                "qualification_only": bool(raw.get("qualification_only", False)),
             }
             previous = lineage.get(model_id)
             if previous is not None and previous != record:

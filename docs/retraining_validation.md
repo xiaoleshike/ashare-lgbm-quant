@@ -4,6 +4,10 @@ Phase 2.8.2C validates a governed retraining artifact before it can be used as
 promotion evidence. Validation is read-only and does not register, promote, or
 deploy the model.
 
+Qualification validation reuses the same artifact, offline, executable, leakage, and Shadow
+eligibility validators. It requires exact model/registration `qualification_run_id` lineage and
+publishes qualification-only evidence without creating a Promotion Request.
+
 ## Workflow
 
 1. Validate the immutable model, dataset, execution, and candidate-registration

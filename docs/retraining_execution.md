@@ -4,6 +4,11 @@ Phase 2.8.2B consumes one immutable retraining request only after the matching
 execution-readiness artifact reports `READY`. It produces a new Challenger and
 does not alter the Champion or `models/registry.json`.
 
+For controlled qualification, execution accepts a typed context. The deterministic model identity,
+artifact, execution record, and candidate registration bind `qualification_run_id` and
+`qualification_only=true`. The registration remains outside `registry.json`, and CLI flags cannot
+construct this context outside the qualification service.
+
 ## Safety Contract
 
 Before loading training rows, execution revalidates the request, evidence,

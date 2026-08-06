@@ -20,6 +20,7 @@ from ashare_quant.models.shadow.storage import (
     publish_shadow_bundle,
     read_complete_manifest,
 )
+from ashare_quant.retraining.execution.schemas import QualificationExecutionContext
 from ashare_quant.retraining.shadow.schemas import (
     RetrainedShadowContext,
     RetrainedShadowResult,
@@ -47,7 +48,13 @@ class RetrainedChallengerShadowService:
         project_root = resolved.parent.parent if resolved.parent.name == "config" else Path.cwd()
         self.runs_root = project_root / "runs"
 
-    def predict(self, model_id: str, *, as_of: str | None = None) -> RetrainedShadowResult:
+    def predict(
+        self,
+        model_id: str,
+        *,
+        as_of: str | None = None,
+        qualification: QualificationExecutionContext | None = None,
+    ) -> RetrainedShadowResult:
         """Score only current as-of features after governed validation eligibility."""
 
         resolved_as_of = as_of or self._latest_production_date()
@@ -57,6 +64,7 @@ class RetrainedChallengerShadowService:
             settings=self.settings,
             config_path=self.config_path,
             runs_root=self.runs_root,
+            qualification=qualification,
         )
         identity = canonical_payload_hash(
             {
@@ -70,10 +78,15 @@ class RetrainedChallengerShadowService:
                 "validation_manifest_hash": context.validation_manifest_hash,
                 "lineage": context.lineage.model_dump(mode="json"),
                 "config_hash": config_hash(self.config_path),
+                "qualification": (qualification.model_dump(mode="json") if qualification else None),
             }
         )
         shadow_run_id = f"shadow_{resolved_as_of}_{identity[:16]}"
-        output_dir = self._output_dir(resolved_as_of, model_id)
+        output_dir = self._output_dir(
+            resolved_as_of,
+            model_id,
+            qualification_run_id=(qualification.qualification_run_id if qualification else None),
+        )
         existing = read_complete_manifest(output_dir)
         if existing is not None:
             if existing.get("shadow_run_id") != shadow_run_id:
@@ -123,6 +136,9 @@ class RetrainedChallengerShadowService:
             .sort_values(["trade_date", "model_id", "ts_code"], kind="mergesort")
             .reset_index(drop=True)
         )
+        if qualification is not None:
+            predictions["qualification_run_id"] = qualification.qualification_run_id
+            predictions["qualification_only"] = True
         prediction_hash = logical_prediction_hash(predictions)
         predictions["prediction_hash"] = prediction_hash
         manifest = self._manifest(
@@ -130,6 +146,7 @@ class RetrainedChallengerShadowService:
             shadow_run_id=shadow_run_id,
             prediction_hash=prediction_hash,
             prediction_rows=len(predictions),
+            qualification=qualification,
         )
         publish_shadow_bundle(
             output_dir=output_dir,
@@ -173,6 +190,7 @@ class RetrainedChallengerShadowService:
         shadow_run_id: str,
         prediction_hash: str,
         prediction_rows: int,
+        qualification: QualificationExecutionContext | None,
     ) -> dict[str, Any]:
         git = current_git_info()
         lineage = context.lineage.model_dump(mode="json")
@@ -187,6 +205,12 @@ class RetrainedChallengerShadowService:
             "source_models": [],
             "fusion_method": None,
             "access_policy": "prospective_production",
+            "qualification_run_id": (qualification.qualification_run_id if qualification else None),
+            "qualification_only": qualification is not None,
+            "qualification_phase": (qualification.qualification_phase if qualification else None),
+            "qualification_source": (qualification.qualification_source if qualification else None),
+            "promotion_forbidden": qualification is not None,
+            "trading_forbidden": qualification is not None,
         }
         return {
             "schema_version": 1,
@@ -207,6 +231,12 @@ class RetrainedChallengerShadowService:
             **lineage,
             "models": [model_record],
             "access_policy": "prospective_production",
+            "qualification_run_id": (qualification.qualification_run_id if qualification else None),
+            "qualification_only": qualification is not None,
+            "qualification_phase": (qualification.qualification_phase if qualification else None),
+            "qualification_source": (qualification.qualification_source if qualification else None),
+            "promotion_forbidden": qualification is not None,
+            "trading_forbidden": qualification is not None,
             "validation_manifest_hash": context.validation_manifest_hash,
             "contracts": {
                 "champion_recomputed": False,
@@ -251,8 +281,17 @@ class RetrainedChallengerShadowService:
         )
         return max(dates) if dates else None
 
-    def _output_dir(self, as_of: str, model_id: str) -> Path:
-        return self.settings.paths.reports / "shadow_predictions" / as_of / "retrained" / model_id
+    def _output_dir(
+        self,
+        as_of: str,
+        model_id: str,
+        *,
+        qualification_run_id: str | None = None,
+    ) -> Path:
+        base = self.settings.paths.reports / "shadow_predictions" / as_of
+        if qualification_run_id is not None:
+            return base / "qualification" / qualification_run_id / model_id
+        return base / "retrained" / model_id
 
 
 def _require_same_keys(champion: DataFrame, challenger: DataFrame) -> None:

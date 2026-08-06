@@ -96,6 +96,7 @@ from ashare_quant.retraining import RetrainingTriggerService
 from ashare_quant.retraining.execution import GovernedRetrainingExecutionService
 from ashare_quant.retraining.orchestration import RetrainingLifecycleOrchestrator
 from ashare_quant.retraining.orchestration.dry_run import LifecycleDryRunService
+from ashare_quant.retraining.qualification.service import OperationalQualificationService
 from ashare_quant.retraining.readiness import RetrainingExecutionReadinessValidator
 from ashare_quant.retraining.shadow import RetrainedChallengerShadowService
 from ashare_quant.retraining.validation import RetrainingValidationService
@@ -899,6 +900,32 @@ def add_retraining_parser(
     )
     lifecycle_dry_run.add_argument("--request-id", required=True)
     lifecycle_dry_run.add_argument("--as-of", help="Optional readiness date in YYYYMMDD.")
+    qualification_start = commands.add_parser(
+        "qualification-start",
+        help="Run qualification preflight, dry-run, and readiness checkpoints.",
+    )
+    qualification_start.add_argument("--request-id", required=True)
+    qualification_start.add_argument("--as-of", required=True, help="Production date in YYYYMMDD.")
+    qualification_advance = commands.add_parser(
+        "qualification-advance", help="Advance one explicit qualification checkpoint."
+    )
+    qualification_advance.add_argument("--run-id", required=True)
+    qualification_advance.add_argument(
+        "--to", required=True, choices=("training", "validation", "shadow", "observation")
+    )
+    qualification_status = commands.add_parser(
+        "qualification-status", help="Inspect one immutable qualification snapshot."
+    )
+    qualification_status.add_argument("--run-id", required=True)
+    qualification_recovery = commands.add_parser(
+        "qualification-recovery", help="Inspect qualification recovery state without repair."
+    )
+    qualification_recovery.add_argument("--run-id", required=True)
+    qualification_cancel = commands.add_parser(
+        "qualification-cancel", help="Append a terminal operator cancellation event."
+    )
+    qualification_cancel.add_argument("--run-id", required=True)
+    qualification_cancel.add_argument("--reason", required=True)
 
 
 def add_dataset_args(parser: argparse.ArgumentParser) -> None:
@@ -2806,6 +2833,59 @@ def run_retraining_command(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     config_path = Path(effective_config_path(args.config))
     try:
+        if args.retraining_command.startswith("qualification-"):
+            qualification = OperationalQualificationService(
+                settings=settings,
+                config_path=config_path,
+                retraining_policy_path=_retraining_policy_path(config_path),
+                promotion_policy_path=_promotion_policy_path(config_path),
+            )
+            if args.retraining_command == "qualification-start":
+                qualification_result = qualification.start(args.request_id, as_of=args.as_of)
+                print(
+                    "retraining_qualification: "
+                    f"run_id={qualification_result.qualification_run_id} "
+                    f"state={qualification_result.state} "
+                    f"output={qualification_result.output_dir} "
+                    f"idempotent={qualification_result.idempotent}"
+                )
+                return 0 if qualification_result.state == "QUALIFIED" else 1
+            if args.retraining_command == "qualification-advance":
+                qualification_result = qualification.advance(args.run_id, target=args.to)
+                print(
+                    "retraining_qualification: "
+                    f"run_id={qualification_result.qualification_run_id} "
+                    f"state={qualification_result.state} "
+                    f"output={qualification_result.output_dir} "
+                    f"idempotent={qualification_result.idempotent}"
+                )
+                return 0 if qualification_result.state == "QUALIFIED" else 1
+            if args.retraining_command == "qualification-status":
+                status = qualification.status(args.run_id)
+                print(json.dumps(status, sort_keys=True, default=str))
+                return 0 if status.get("status") == "VALID" else 1
+            if args.retraining_command == "qualification-recovery":
+                qualification_recovery = qualification.recovery(args.run_id)
+                print(
+                    json.dumps(
+                        {
+                            "qualification_run_id": (qualification_recovery.qualification_run_id),
+                            "status": qualification_recovery.status,
+                            "issues": qualification_recovery.issues,
+                            "operator_actions": qualification_recovery.operator_actions,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 0 if qualification_recovery.status == "CLEAN" else 1
+            qualification_result = qualification.cancel(args.run_id, reason=args.reason)
+            print(
+                "retraining_qualification: "
+                f"run_id={qualification_result.qualification_run_id} "
+                f"state={qualification_result.state} "
+                f"output={qualification_result.output_dir}"
+            )
+            return 1
         if args.retraining_command in {
             "lifecycle-run",
             "lifecycle-status",

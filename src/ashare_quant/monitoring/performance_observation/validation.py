@@ -65,6 +65,34 @@ def load_shadow_sources(
                         f"incomplete retrained shadow artifact cannot be observed: {sidecar}"
                     )
                 sources.append((f"retrained:{sidecar.name}", sidecar, sidecar_manifest))
+        qualification_root = directory / "qualification"
+        if qualification_root.is_dir():
+            for qualification in sorted(
+                path for path in qualification_root.iterdir() if path.is_dir()
+            ):
+                for sidecar in sorted(path for path in qualification.iterdir() if path.is_dir()):
+                    sidecar_manifest = read_complete_manifest(sidecar)
+                    if sidecar_manifest is None:
+                        raise DataValidationError(
+                            "incomplete qualification shadow artifact cannot be observed: "
+                            f"{sidecar}"
+                        )
+                    if (
+                        sidecar_manifest.get("qualification_only") is not True
+                        or sidecar_manifest.get("qualification_run_id") != qualification.name
+                        or sidecar_manifest.get("promotion_forbidden") is not True
+                        or sidecar_manifest.get("trading_forbidden") is not True
+                    ):
+                        raise DataValidationError(
+                            "qualification shadow artifact lacks isolation contract"
+                        )
+                    sources.append(
+                        (
+                            f"qualification:{qualification.name}:{sidecar.name}",
+                            sidecar,
+                            sidecar_manifest,
+                        )
+                    )
         for source_name, source_dir, source_manifest in sources:
             _validate_shadow_manifest(source_manifest, signal_date)
             if str(source_manifest.get("production_run_id")) != str(summary.get("run_id")):
@@ -186,9 +214,14 @@ def normalize_shadow_lineage(frame: DataFrame) -> DataFrame:
         "training_request_id",
         "training_run_id",
         "validation_run_id",
+        "qualification_run_id",
     ):
         if column not in result:
             result[column] = ""
         else:
             result[column] = result[column].fillna("").astype(str)
+    if "qualification_only" not in result:
+        result["qualification_only"] = False
+    else:
+        result["qualification_only"] = result["qualification_only"].fillna(False).astype(bool)
     return result

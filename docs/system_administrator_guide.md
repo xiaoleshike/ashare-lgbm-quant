@@ -167,3 +167,10 @@ Never manually edit `models/registry.json`, overwrite model artifacts, modify hi
 or performance observations, delete Champion history, bypass human approval, use frozen OOS reports
 as prospective production evidence, or treat the LLM Research Agent as a trading or promotion
 authority.
+
+## Controlled Operational Qualification
+
+Use `retraining qualification-start` for preflight, dry-run, and readiness. Real training and
+Shadow are disabled by default and require policy changes plus separate `qualification-advance`
+commands. Never skip checkpoints or treat `QUALIFIED` as Promotion approval. See
+`docs/controlled_operational_qualification.md` for the complete procedure and recovery commands.

@@ -10,6 +10,7 @@ from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.shadow.storage import canonical_payload_hash, file_sha256
 from ashare_quant.orchestration.lock import production_lock
+from ashare_quant.retraining.execution.schemas import QualificationExecutionContext
 from ashare_quant.retraining.validation.artifact_validation import (
     validate_candidate_artifact,
 )
@@ -79,7 +80,12 @@ class RetrainingValidationService:
         )
         self.lock_path = project_root / "runs" / ".production.lock"
 
-    def validate(self, model_id: str) -> RetrainingValidationResult:
+    def validate(
+        self,
+        model_id: str,
+        *,
+        qualification: QualificationExecutionContext | None = None,
+    ) -> RetrainingValidationResult:
         with production_lock(self.lock_path, command=f"retraining validate --model-id {model_id}"):
             context = self.context_loader(
                 model_id=model_id,
@@ -87,11 +93,24 @@ class RetrainingValidationService:
                 reports_root=self.settings.paths.reports,
                 processed_root=self.settings.paths.processed_data,
                 config_path=self.config_path,
+                allow_frozen_config=qualification is not None,
             )
             current_config = config_hash(self.config_path)
             if current_config is None:
                 raise DataValidationError("VALIDATION_FAILED: config hash is unavailable")
             git = current_git_info()
+            if qualification is None and context.artifact.qualification_only:
+                raise DataValidationError(
+                    "VALIDATION_FAILED: qualification-only artifact requires qualification context"
+                )
+            if qualification is not None and (
+                not context.artifact.qualification_only
+                or context.artifact.qualification_run_id != qualification.qualification_run_id
+                or context.registration.qualification_run_id != qualification.qualification_run_id
+            ):
+                raise DataValidationError(
+                    "VALIDATION_FAILED: qualification lineage does not match candidate"
+                )
             identity = canonical_payload_hash(
                 {
                     "model_id": model_id,
@@ -105,6 +124,9 @@ class RetrainingValidationService:
                     "evaluation_end": context.evaluation_end,
                     "config_hash": current_config,
                     "git_commit": git["commit"],
+                    "qualification": (
+                        qualification.model_dump(mode="json") if qualification else None
+                    ),
                 }
             )
             run_id = f"retraining_validation_{identity[:24]}"
@@ -144,6 +166,13 @@ class RetrainingValidationService:
                 promotion_ready=evidence.promotion_ready,
                 git_commit=git["commit"],
                 git_dirty=bool(git["dirty"]),
+                qualification_run_id=(
+                    qualification.qualification_run_id if qualification else None
+                ),
+                qualification_only=qualification is not None,
+                qualification_phase=(qualification.qualification_phase if qualification else None),
+                promotion_forbidden=qualification is not None,
+                trading_forbidden=qualification is not None,
             )
             return self.storage.publish(
                 manifest=manifest,

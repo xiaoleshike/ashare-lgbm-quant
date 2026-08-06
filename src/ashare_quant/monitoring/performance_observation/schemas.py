@@ -30,6 +30,8 @@ OBSERVATION_COLUMNS: tuple[str, ...] = (
     "training_request_id",
     "training_run_id",
     "validation_run_id",
+    "qualification_run_id",
+    "qualification_only",
 )
 
 OBSERVATION_KEY: tuple[str, ...] = ("model_id", "signal_date", "ts_code", "horizon")

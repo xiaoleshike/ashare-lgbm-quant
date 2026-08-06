@@ -29,6 +29,7 @@ def validate_candidate_artifact(
     processed_root: Path,
     config_path: Path,
     require_current_processed_hashes: bool = True,
+    allow_frozen_config: bool = False,
 ) -> CandidateValidationContext:
     """Validate all immutable training and candidate-registration identities."""
 
@@ -72,7 +73,9 @@ def validate_candidate_artifact(
             f"VALIDATION_FAILED: invalid dataset manifest: {error}"
         ) from error
     current_config = config_hash(config_path)
-    if current_config is None or artifact.config_hash != current_config:
+    if current_config is None or (
+        artifact.config_hash != current_config and not allow_frozen_config
+    ):
         raise DataValidationError("VALIDATION_FAILED: candidate config hash mismatch")
     current_hashes = {
         "feature_manifest_hash": file_sha256(processed_root / "features_daily" / "_manifest.json"),
@@ -96,7 +99,7 @@ def validate_candidate_artifact(
     evaluation_start, evaluation_end, maximum_mature = _selection_evaluation(
         reports_root=reports_root,
         dataset=dataset,
-        config_hash_value=current_config,
+        config_hash_value=artifact.config_hash if allow_frozen_config else current_config,
     )
     if artifact.validation_dates.get("end", "") >= evaluation_start:
         raise DataValidationError("VALIDATION_FAILED: evaluation is not after model validation")

@@ -227,6 +227,7 @@ class RetrainingLifecycleOrchestrator:
             max_daily_training_runs=self.retraining_policy.lifecycle.max_daily_training_runs,
             cooldown_days=self.retraining_policy.lifecycle.cooldown_days,
             now=self.now(),
+            qualification_root=(self.settings.paths.reports / "retraining" / "qualification"),
         )
 
     def proposed_identity(self, request_id: str) -> tuple[str, LifecycleInput]:
@@ -240,6 +241,33 @@ class RetrainingLifecycleOrchestrator:
             else self._identity_hash(frozen)
         )
         return f"retraining_lifecycle_{identity[:24]}", frozen
+
+    def frozen_input_for_request(
+        self,
+        request_id: str,
+        *,
+        retraining_policy_hash: str,
+        lifecycle_policy_hash: str,
+        promotion_policy_hash: str,
+        frozen_config_hash: str | None,
+    ) -> LifecycleInput:
+        """Reload immutable request data while preserving creation-time identities."""
+
+        current = validate_lifecycle_input(
+            request_id=request_id,
+            reports_root=self.settings.paths.reports,
+            storage=self.request_storage,
+            retraining_policy=self.retraining_policy,
+            promotion_policy=self.promotion_policy,
+            require_current_policy=False,
+        )
+        return replace(
+            current,
+            retraining_policy_hash=retraining_policy_hash,
+            lifecycle_policy_hash=lifecycle_policy_hash,
+            promotion_policy_hash=promotion_policy_hash,
+            frozen_config_hash=frozen_config_hash,
+        )
 
     def _continue(
         self,

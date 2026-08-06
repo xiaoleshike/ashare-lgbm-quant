@@ -176,3 +176,10 @@ For a future operator-authorized historical rehearsal:
 
 The orchestrator never approves, applies, or rolls back a model. It never modifies Champion,
 `registry.json`, Paper Trading, candidate selection, features, hyperparameters, or orders.
+
+## Controlled Operational Qualification
+
+Phase 2.8.2G adds an independent, explicitly advanced qualification state machine. It reuses
+lifecycle dry-run/readiness and the governed execution, validation, and retrained Shadow services.
+Qualification artifacts carry `qualification_only=true` and cannot enter Promotion or trading
+discovery. See `docs/controlled_operational_qualification.md` for the exact operator runbook.

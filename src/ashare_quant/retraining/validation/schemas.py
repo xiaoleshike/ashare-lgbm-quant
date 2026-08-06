@@ -118,6 +118,11 @@ class RetrainingValidationManifest(BaseModel):
     promotion_executed: Literal[False] = False
     trading_executed: Literal[False] = False
     manifest_written_last: Literal[True] = True
+    qualification_run_id: str | None = None
+    qualification_only: bool = False
+    qualification_phase: str | None = None
+    promotion_forbidden: bool = False
+    trading_forbidden: bool = False
 
 
 @dataclass(frozen=True, slots=True)

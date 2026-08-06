@@ -18,6 +18,28 @@ retraining:
       h10: 60
       h20: 90
       h60: 120
+  qualification:
+    enabled: true
+    phase: "2.8.2G"
+    require_clean_worktree: false
+    require_dry_run_ready: true
+    require_readiness_ready: true
+    allow_real_training: false
+    require_manual_stage_advance: true
+    allow_real_shadow: false
+    maximum_qualification_runs_per_day: 1
+    allowed_stop_points:
+      - preflight
+      - dry-run
+      - readiness
+      - training
+      - validation
+      - shadow
+      - observation
+    minimum_free_disk_bytes: null
+    minimum_available_memory_bytes: null
+    promotion_forbidden: true
+    trading_forbidden: true
   triggers:
     alpha_decay:
       enabled: true

@@ -39,6 +39,15 @@ class PromotionEvidenceResolver:
     ) -> EvidencePreparationResult:
         """Discover evidence, create the immutable request, and bind discovery provenance."""
 
+        artifact_manifest = self.models_root / "challengers" / model_id / "manifest.json"
+        if (
+            artifact_manifest.is_file()
+            and _load_json(artifact_manifest).get("qualification_only") is True
+        ):
+            raise DataValidationError(
+                "qualification-only model cannot enter Promotion evidence preparation"
+            )
+
         if lifecycle_run_id is None:
             lifecycle_run_id = self._retrained_lifecycle(model_id)
         if lifecycle_run_id is not None:

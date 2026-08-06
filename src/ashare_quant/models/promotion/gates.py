@@ -296,6 +296,17 @@ class PromotionGateEngine:
             manifest = _load_json(manifest_path) if manifest_path.is_file() else {}
         except DataValidationError:
             manifest = {}
+        qualification_ok = manifest.get("qualification_only") is not True
+        checks.append(
+            _check(
+                "candidate_not_qualification_only",
+                "PASS" if qualification_ok else "FAIL",
+                "candidate is eligible for governance review"
+                if qualification_ok
+                else "qualification-only candidate is isolated from Promotion",
+                evidence_hash,
+            )
+        )
         expected_universe = manifest.get("universe_hash")
         challenger_universe = payloads.get("challenger_evaluation", {}).get("universe_hash")
         shadow_universe = payloads.get("shadow_prediction", {}).get("universe_hash")
