@@ -14,6 +14,11 @@ import numpy as np
 
 from ashare_quant.config.settings import AppSettings, RankerSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.models.compute import (
+    TrainingRuntimeMetadata,
+    resolve_training_backend,
+    training_backend_parameters,
+)
 from ashare_quant.models.feature_lists import (
     feature_list_hash,
     load_recommended_features,
@@ -192,7 +197,8 @@ class RankerBaselineRunner:
                     "test_end": ranker.test_end,
                     "train_rows": len(train.frame),
                     "train_groups": len(train.groups),
-                    "fixed_parameters": ranker_parameters(ranker),
+                    "fixed_parameters": ranker_parameters(ranker, training_runtime_metadata(model)),
+                    "training_compute": training_runtime_metadata(model).model_dump(mode="json"),
                     "source_manifests": {
                         artifact: read_manifest(self.processed_root / artifact)
                         for artifact in ("features_daily", "labels_forward", "universe_daily")
@@ -204,11 +210,15 @@ class RankerBaselineRunner:
 
 
 def fit_ranker(
-    train: RankerDataset, validation: RankerDataset, settings: RankerSettings
+    train: RankerDataset,
+    validation: RankerDataset,
+    settings: RankerSettings,
+    runtime: TrainingRuntimeMetadata | None = None,
 ) -> lgb.LGBMRanker:
     """Fit one fixed lambdarank baseline without early stopping or parameter search."""
 
-    parameters = ranker_parameters(settings)
+    effective = runtime or resolve_training_backend(settings.training_backend)
+    parameters = ranker_parameters(settings, effective)
     model = lgb.LGBMRanker(**parameters)
     model.fit(
         train.features,
@@ -219,11 +229,12 @@ def fit_ranker(
         eval_at=list(settings.ndcg_at),
         feature_name=list(train.feature_names),
     )
+    model._ashare_training_compute = effective
     return model
 
 
-def ranker_parameters(settings: RankerSettings) -> dict[str, Any]:
-    """Return the complete fixed baseline parameter set recorded in manifests."""
+def ranker_semantic_parameters(settings: RankerSettings) -> dict[str, Any]:
+    """Return model-semantic parameters independent of execution backend."""
 
     return {
         "objective": "lambdarank",
@@ -238,10 +249,28 @@ def ranker_parameters(settings: RankerSettings) -> dict[str, Any]:
         "reg_alpha": settings.reg_alpha,
         "reg_lambda": settings.reg_lambda,
         "random_state": settings.random_seed,
-        "n_jobs": -1,
         "verbosity": -1,
         "label_gain": [2**grade - 1 for grade in range(settings.relevance_grades)],
     }
+
+
+def ranker_parameters(
+    settings: RankerSettings,
+    runtime: TrainingRuntimeMetadata | None = None,
+) -> dict[str, Any]:
+    """Compose fixed semantic parameters with the explicit effective backend."""
+
+    effective = runtime or resolve_training_backend(settings.training_backend)
+    return {**ranker_semantic_parameters(settings), **training_backend_parameters(effective)}
+
+
+def training_runtime_metadata(model: lgb.LGBMRanker) -> TrainingRuntimeMetadata:
+    """Return backend provenance attached by the common Ranker fit path."""
+
+    runtime = getattr(model, "_ashare_training_compute", None)
+    if not isinstance(runtime, TrainingRuntimeMetadata):
+        raise DataValidationError("trained Ranker lacks compute backend provenance")
+    return runtime
 
 
 def feature_importance(model: lgb.LGBMRanker, features: tuple[str, ...]) -> list[dict[str, object]]:

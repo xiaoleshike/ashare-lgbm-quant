@@ -7,6 +7,7 @@ from typing import Protocol
 
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.models.compute import TrainingRuntimeMetadata, resolve_training_backend
 from ashare_quant.models.promotion.gate_rules import load_promotion_gate_policy
 from ashare_quant.models.shadow.storage import canonical_payload_hash, file_sha256
 from ashare_quant.orchestration.lock import production_lock
@@ -35,7 +36,11 @@ class DatasetPreparer(Protocol):
 
 
 class RankerTrainer(Protocol):
-    def train(self, prepared: PreparedTrainingData) -> TrainedRanker: ...
+    def train(
+        self,
+        prepared: PreparedTrainingData,
+        runtime: TrainingRuntimeMetadata,
+    ) -> TrainedRanker: ...
 
 
 class GovernedRetrainingExecutionService:
@@ -104,6 +109,7 @@ class GovernedRetrainingExecutionService:
             current_config_hash = config_hash(self.config_path)
             if current_config_hash is None:
                 raise DataValidationError("configuration hash is unavailable")
+            runtime = resolve_training_backend(self.settings.ranker.training_backend)
             identity = {
                 "request_hash": context.request_hash,
                 "model_id": target.model_id,
@@ -113,6 +119,7 @@ class GovernedRetrainingExecutionService:
                 "universe_hash": context.readiness.universe_hash,
                 "config_hash": current_config_hash,
                 "git_commit": git["commit"],
+                "training_compute": runtime.identity_payload(),
                 "qualification": (qualification.model_dump(mode="json") if qualification else None),
             }
             identity_hash = canonical_payload_hash(identity)
@@ -138,7 +145,18 @@ class GovernedRetrainingExecutionService:
                 validate_prepared_training_data(prepared, context)
                 journal.append("DATA_READY")
                 journal.append("TRAINING")
-                trained = self.trainer.train(prepared)
+                trained = self.trainer.train(prepared, runtime)
+                if trained.training_compute is None:
+                    trained = TrainedRanker(
+                        trained.model,
+                        trained.metrics,
+                        trained.importance,
+                        runtime,
+                    )
+                elif trained.training_compute != runtime:
+                    raise DataValidationError(
+                        "trained Ranker compute provenance differs from execution identity"
+                    )
                 journal.append("ARTIFACT_VALIDATING")
                 if file_sha256(self.settings.paths.models / "registry.json") != registry_before:
                     raise DataValidationError("Registry changed during retraining execution")

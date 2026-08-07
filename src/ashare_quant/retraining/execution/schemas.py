@@ -9,6 +9,8 @@ from typing import Any, Literal
 import lightgbm as lgb
 from pydantic import BaseModel, ConfigDict, Field
 
+from ashare_quant.models.compute.schemas import TrainingRuntimeMetadata
+
 LifecycleStatus = Literal[
     "CREATED",
     "DATA_READY",
@@ -76,6 +78,7 @@ class ChallengerArtifactManifest(BaseModel):
     qualification_source: str | None = None
     promotion_forbidden: bool = False
     trading_forbidden: bool = False
+    training_compute: TrainingRuntimeMetadata | None = None
 
 
 class CandidateRegistration(BaseModel):
@@ -100,6 +103,8 @@ class CandidateRegistration(BaseModel):
     qualification_phase: str | None = None
     promotion_forbidden: bool = False
     trading_forbidden: bool = False
+    training_compute: TrainingRuntimeMetadata | None = None
+    training_compute_hash: str | None = None
 
 
 class QualificationExecutionContext(BaseModel):
@@ -143,6 +148,7 @@ class TrainedRanker:
     model: lgb.LGBMRanker
     metrics: dict[str, object]
     importance: list[dict[str, object]]
+    training_compute: TrainingRuntimeMetadata | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -42,6 +42,11 @@ authorization, an authorization cannot override a false switch, and `qualificati
 creates an authorization. `approved_by` is an auditable asserted identity, not a cryptographic
 signature.
 
+Training compute is an additional independent gate. Qualification status records the requested
+backend, effective backend, and probe status from the completed training checkpoint. An active
+qualification authorization and `allow_real_training=true` cannot bypass a failed CUDA probe. CPU
+and successfully probed CUDA runs may both qualify; qualification does not require CUDA.
+
 ## Artifacts
 
 ```text

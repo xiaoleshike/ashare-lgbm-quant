@@ -165,6 +165,16 @@ ranker:
   portfolio_fractions:
     - 0.05
     - 0.10
+  training_backend:
+    device_type: cpu
+    gpu_device_id: 0
+    allow_cpu_fallback: false
+    require_cuda_probe: true
+    consistency:
+      minimum_prediction_pearson: 0.999
+      minimum_prediction_spearman: 0.999
+      maximum_rank_ic_absolute_delta: 0.002
+      maximum_ndcg_absolute_delta: 0.002
   walk_forward:
     annual_sessions: 252
     minimum_training_years: 5

@@ -14,6 +14,7 @@ import yaml
 from ashare_quant.cli import main
 from ashare_quant.config.settings import AppSettings, PathSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.models.compute import TrainingRuntimeMetadata
 from ashare_quant.models.feature_lists import feature_list_hash
 from ashare_quant.models.promotion.gate_rules import load_promotion_gate_policy
 from ashare_quant.models.ranker_data import RankerDataset
@@ -333,7 +334,11 @@ class _ExecutionTrainer:
         self.write_model = write_model
         self.calls = 0
 
-    def train(self, prepared: PreparedTrainingData) -> TrainedRanker:
+    def train(
+        self,
+        prepared: PreparedTrainingData,
+        runtime: TrainingRuntimeMetadata,
+    ) -> TrainedRanker:
         del prepared
         self.calls += 1
         if self.fail:
@@ -342,6 +347,7 @@ class _ExecutionTrainer:
             _ExecutionModel(write_model=self.write_model),
             {"rank_ic": 0.01},
             [{"feature": "ret_5d", "gain": 1.0, "split": 1}],
+            runtime,
         )
 
 
@@ -368,10 +374,13 @@ def test_governed_execution_publishes_candidate_without_registry_change(tmp_path
     assert manifest["training_type"] == "challenger_refresh"
     assert manifest["horizon"] == 5
     assert manifest["training_status"] == "completed"
+    assert manifest["training_compute"]["effective_device_type"] == "cpu"
     registration = read_json(
         tmp_path / f"models/candidate_registrations/{first.model_id}/registration.json"
     )
     assert registration["status"] == "candidate"
+    assert registration["training_compute"]["effective_device_type"] == "cpu"
+    assert registration["training_compute_hash"]
     assert registration["registry_json_modified"] is False
 
 

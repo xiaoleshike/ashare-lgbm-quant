@@ -786,6 +786,18 @@ class FakeExecution:
             artifact / "manifest.json",
             {
                 "model_id": MODEL_ID,
+                "training_compute": {
+                    "requested_device_type": "cpu",
+                    "effective_device_type": "cpu",
+                    "gpu_device_id": 0,
+                    "allow_cpu_fallback": False,
+                    "fallback_used": False,
+                    "fallback_reason": None,
+                    "lightgbm_version": "fixture",
+                    "device_name": None,
+                    "probe_status": "AVAILABLE",
+                    "probe_message": "fixture CPU backend",
+                },
                 "qualification_run_id": (
                     qualification.qualification_run_id if qualification else None
                 ),

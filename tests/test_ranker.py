@@ -141,6 +141,8 @@ def test_ranker_runner_writes_two_complete_experiments(tmp_path: Path) -> None:
         assert manifest["train_start"] == "20200102"
         assert manifest["train_end"] == "20200103"
         assert manifest["feature_list_hash"]
+        assert manifest["training_compute"]["requested_device_type"] == "cpu"
+        assert manifest["training_compute"]["effective_device_type"] == "cpu"
 
 
 def test_production_trainer_uses_all_configured_dates_and_frozen_features(tmp_path: Path) -> None:
@@ -190,6 +192,7 @@ def test_production_trainer_uses_all_configured_dates_and_frozen_features(tmp_pa
     assert "test" not in metrics
     assert manifest["training_start"] == "20200102"
     assert manifest["training_end"] == "20200107"
+    assert manifest["training_compute"]["effective_device_type"] == "cpu"
     assert "validation_start" not in manifest
     assert "test_start" not in manifest
 

@@ -61,6 +61,18 @@ Candidate -> Evidence -> Gate -> Review -> Approve -> Apply -> Monitor
 
 Governed retraining requests run separately from the daily Production Pipeline:
 
+Before an intended training run, inspect the explicit LightGBM backend:
+
+```bash
+ashare-quant --config config/default.yaml models training-backend-status
+```
+
+CPU is the safe default. CUDA must be configured explicitly and pass the LightGBM smoke probe.
+Keep CPU fallback disabled for governed execution unless an audited fallback is intentionally
+acceptable. Use the isolated CPU/CUDA benchmark and consistency comparison before enabling CUDA;
+see `docs/training_compute_backend.md`. Diagnostics, inference, Shadow, Paper Trading, and
+monitoring remain CPU-only.
+
 ```bash
 ashare-quant --config config/default.yaml retraining lifecycle-run \
   --request-id REQUEST_ID

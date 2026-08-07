@@ -22,6 +22,11 @@ The fixed periods are:
 The model is fitted only on train data. Validation reports fixed-baseline results; there is no
 hyperparameter search or early stopping. Test data is loaded only after fitting and validation.
 
+Ranker training uses the explicit `ranker.training_backend` configuration. CPU is the default;
+CUDA changes only LightGBM's execution backend and preserves all semantic parameters, including the
+existing `max_bin` behavior. See `docs/training_compute_backend.md`. Diagnostics and inference stay
+on CPU.
+
 ## Run
 
 ```bash
@@ -37,8 +42,8 @@ Each experiment is atomically published under `models/<experiment-id>/` with:
 - `feature_list.json`: ordered features and SHA256 hash;
 - `metrics.json`: validation/test Rank IC, ICIR, NDCG@10/50, top 5%/10% mean future excess return,
   yearly stability, and gain/split importance;
-- `manifest.json`: Git/config identity, fixed parameters, split dates, target semantics, and source
-  artifact manifests.
+- `manifest.json`: Git/config identity, fixed parameters, split dates, target semantics, source
+  artifact manifests, and requested/effective training-compute provenance.
 
 The top-bucket returns are equal-weighted cross-sectional ranking proxies. Five-day labels overlap,
 and the report includes no costs, execution simulation, holdings, or portfolio accounting. These

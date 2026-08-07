@@ -14,6 +14,12 @@ runtime training capability, and an exact active authorization. The authorizatio
 claimed before entering `TRAINING`; failed attempts remain consumed and count against the daily
 budget.
 
+The common Ranker training backend is validated before fitting. CPU is the repository default. A
+CUDA request runs the application-level LightGBM smoke probe and fails closed when unavailable
+unless explicit CPU fallback is configured. Backend validation adds a gate; it does not replace
+readiness, authorization, budget, cooldown, source-integrity, or lock checks. The model artifact,
+candidate registration, and execution identity record requested and effective compute provenance.
+
 ## Safety Contract
 
 Before loading training rows, execution revalidates the request, evidence,
@@ -43,6 +49,12 @@ Execute the frozen request:
 ```bash
 ashare-quant --config config/default.yaml retraining execute \
   --request-id REQUEST_ID
+```
+
+Before authorizing a CUDA execution, run:
+
+```bash
+ashare-quant --config config/default.yaml models training-backend-status
 ```
 
 Before execution, use `retraining lifecycle-dry-run --request-id REQUEST_ID`. It checks current

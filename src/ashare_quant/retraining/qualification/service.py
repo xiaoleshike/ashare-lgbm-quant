@@ -14,6 +14,7 @@ import pandas as pd
 
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.models.compute import resolve_training_backend
 from ashare_quant.models.shadow.storage import canonical_payload_hash, file_sha256
 from ashare_quant.monitoring.performance_observation.storage import (
     read_observation_artifact,
@@ -200,6 +201,12 @@ class OperationalQualificationService:
             return {"qualification_run_id": run_id, "status": "MISSING"}
         training = self.authorization.evaluate(snapshot, stage="training")
         shadow = self.authorization.evaluate(snapshot, stage="shadow")
+        training_checkpoint = snapshot.checkpoints.get("training")
+        training_compute = (
+            training_checkpoint.metrics.get("training_compute")
+            if training_checkpoint is not None
+            else None
+        )
         return {
             **snapshot.summary.model_dump(mode="json"),
             "status": "VALID",
@@ -211,6 +218,15 @@ class OperationalQualificationService:
             "runtime_training_enabled": self.policy.allow_real_training,
             "runtime_shadow_enabled": self.policy.allow_real_shadow,
             "runtime_capability_hash": self.policy.runtime_capability_hash,
+            "requested_training_backend": self.settings.ranker.training_backend.device_type,
+            "effective_training_backend": (
+                training_compute.get("effective_device_type")
+                if isinstance(training_compute, dict)
+                else None
+            ),
+            "training_backend_probe_status": (
+                training_compute.get("probe_status") if isinstance(training_compute, dict) else None
+            ),
             "training_authorization_status": training.status,
             "training_authorization_id": training.authorization_id,
             "training_authorization_expires_at": training.expires_at,
@@ -551,6 +567,7 @@ class OperationalQualificationService:
         if not self.policy.allow_real_training:
             return snapshot
         self._require_static_policy(snapshot)
+        resolve_training_backend(self.settings.ranker.training_backend)
         authorization_status = self.authorization.evaluate(snapshot, stage="training")
         if authorization_status.status != "ACTIVE":
             return snapshot
@@ -616,6 +633,9 @@ class OperationalQualificationService:
                 or not registration.qualification_only
             ):
                 raise DataValidationError("training output lacks qualification-only lineage")
+            training_compute = artifact.get("training_compute")
+            if not isinstance(training_compute, dict):
+                raise DataValidationError("training output lacks compute backend provenance")
             checkpoint = QualificationCheckpoint(
                 name="training",
                 status="success",
@@ -629,7 +649,11 @@ class OperationalQualificationService:
                     "model": file_sha256(manifest_path),
                     "registration": file_sha256(registration_path),
                 },
-                metrics={"training_run_id": result.training_run_id, "model_id": result.model_id},
+                metrics={
+                    "training_run_id": result.training_run_id,
+                    "model_id": result.model_id,
+                    "training_compute": training_compute,
+                },
             )
             self.authorization.receipt(
                 claim,

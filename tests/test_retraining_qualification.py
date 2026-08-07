@@ -237,6 +237,26 @@ def test_training_is_disabled_by_default_and_cli_intent_cannot_bypass(
     assert "training" not in calls
 
 
+def test_cuda_probe_failure_cannot_be_bypassed_by_qualification_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, calls, _ = qualification_service(tmp_path, monkeypatch, real_training=True)
+    started = service.start(REQUEST_ID, as_of=AS_OF)
+    authorization_id = authorize_stage(service, started.qualification_run_id, "training")
+    monkeypatch.setattr(
+        "ashare_quant.retraining.qualification.service.resolve_training_backend",
+        lambda _settings: (_ for _ in ()).throw(DataValidationError("CUDA unavailable")),
+    )
+
+    with pytest.raises(DataValidationError, match="CUDA unavailable"):
+        service.advance(started.qualification_run_id, target="training")
+
+    assert calls == ["readiness"]
+    status = service.authorization_status(started.qualification_run_id, stage="training")[0]
+    assert status.authorization_id == authorization_id
+    assert status.status == "ACTIVE"
+
+
 def test_full_fixture_qualification_is_explicit_and_isolated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

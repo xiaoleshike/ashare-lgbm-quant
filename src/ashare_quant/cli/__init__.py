@@ -58,6 +58,8 @@ from ashare_quant.models import (
     RollbackService,
     load_promotion_gate_policy,
 )
+from ashare_quant.models.compute import probe_training_backend, resolve_training_backend
+from ashare_quant.models.compute.benchmark import TrainingBackendBenchmarkService
 from ashare_quant.models.shadow import ShadowPredictionService
 from ashare_quant.monitoring import (
     AlertService,
@@ -360,6 +362,22 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "--reports-root", default=None, help="Override the configured report output root."
     )
     commands = parser.add_subparsers(dest="models_command", required=True)
+    commands.add_parser(
+        "training-backend-status",
+        help="Probe the configured LightGBM training backend without production mutation.",
+    )
+    backend_benchmark = commands.add_parser(
+        "benchmark-training-backend",
+        help="Run an isolated CPU or CUDA benchmark from an immutable model experiment.",
+    )
+    backend_benchmark.add_argument("--backend", required=True, choices=("cpu", "cuda"))
+    backend_benchmark.add_argument("--experiment-id", required=True)
+    backend_compare = commands.add_parser(
+        "compare-training-backends",
+        help="Compare exact-identity CPU and CUDA benchmark artifacts.",
+    )
+    backend_compare.add_argument("--cpu-benchmark-id", required=True)
+    backend_compare.add_argument("--cuda-benchmark-id", required=True)
     ranker = commands.add_parser(
         "ranker-baseline", help="Run fixed top-50 and robust-subset lambdarank experiments."
     )
@@ -1401,6 +1419,67 @@ def run_models_command(args: argparse.Namespace) -> int:
     )
     output_root = settings.paths.models if args.output_root is None else Path(args.output_root)
     reports_root = settings.paths.reports if args.reports_root is None else Path(args.reports_root)
+    settings = settings.model_copy(
+        update={
+            "paths": settings.paths.model_copy(
+                update={
+                    "processed_data": processed_root,
+                    "models": output_root,
+                    "reports": reports_root,
+                }
+            )
+        }
+    )
+    if args.models_command == "training-backend-status":
+        probe = probe_training_backend(settings.ranker.training_backend)
+        try:
+            runtime = resolve_training_backend(settings.ranker.training_backend)
+        except DataValidationError as error:
+            print(
+                f"training_backend: configured={settings.ranker.training_backend.device_type} "
+                f"gpu_device_id={settings.ranker.training_backend.gpu_device_id} "
+                f"fallback={settings.ranker.training_backend.allow_cpu_fallback} "
+                f"lightgbm={probe.lightgbm_version or '-'} status={probe.status} "
+                f"effective=- message={error}"
+            )
+            return 2 if probe.status == "ERROR" else 1
+        print(
+            f"training_backend: configured={runtime.requested_device_type} "
+            f"gpu_device_id={runtime.gpu_device_id} "
+            f"fallback={runtime.allow_cpu_fallback} "
+            f"fallback_used={runtime.fallback_used} lightgbm={runtime.lightgbm_version} "
+            f"status={probe.status} effective={runtime.effective_device_type} "
+            f"device={runtime.device_name or '-'}"
+        )
+        return 0
+    if args.models_command in {"benchmark-training-backend", "compare-training-backends"}:
+        benchmark = TrainingBackendBenchmarkService(settings)
+        try:
+            if args.models_command == "benchmark-training-backend":
+                benchmark_result = benchmark.run(
+                    backend=args.backend, experiment_id=args.experiment_id
+                )
+                print(
+                    "training_backend_benchmark: "
+                    f"benchmark_id={benchmark_result.benchmark_id} "
+                    f"status={benchmark_result.status} "
+                    f"idempotent={benchmark_result.idempotent} "
+                    f"output={benchmark_result.output_dir}"
+                )
+                return 0
+            comparison = benchmark.compare(
+                cpu_benchmark_id=args.cpu_benchmark_id,
+                cuda_benchmark_id=args.cuda_benchmark_id,
+            )
+            print(
+                f"training_backend_comparison: comparison_id={comparison.comparison_id} "
+                f"status={comparison.status} idempotent={comparison.idempotent} "
+                f"output={comparison.output_dir}"
+            )
+            return 0 if comparison.status == "PASS" else 1
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"training backend benchmark failed: {error}", file=sys.stderr)
+            return 2
     if args.models_command == "promotion":
         service = PromotionGovernanceService(
             models_root=output_root,

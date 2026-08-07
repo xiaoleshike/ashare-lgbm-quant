@@ -83,6 +83,7 @@ def test_challenger_reads_horizon_manifest_and_registers_candidate(
     assert manifest["validation_dates"] == {"start": "20200102", "end": "20211231"}
     assert manifest["training_rows"] == 20
     assert manifest["validation_rows"] == 20
+    assert manifest["training_compute"]["effective_device_type"] == "cpu"
     assert manifest["isolation_contract"]["final_test_labels_loaded"] is False
     metrics = json.loads((result.output_dir / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["test"] == {}

@@ -486,6 +486,31 @@ class WalkForwardPlanSettings(BaseModel):
     evaluation_frequency: Literal["monthly"] = "monthly"
 
 
+class TrainingBackendConsistencySettings(BaseModel):
+    """Benchmark-only behavioral tolerances for CPU/CUDA comparison."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    minimum_prediction_pearson: float = Field(default=0.999, ge=-1.0, le=1.0)
+    minimum_prediction_spearman: float = Field(default=0.999, ge=-1.0, le=1.0)
+    maximum_rank_ic_absolute_delta: float = Field(default=0.002, ge=0.0)
+    maximum_ndcg_absolute_delta: float = Field(default=0.002, ge=0.0)
+
+
+class TrainingBackendSettings(BaseModel):
+    """Explicit LightGBM training backend and failover policy."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    device_type: Literal["cpu", "cuda"] = "cpu"
+    gpu_device_id: int = Field(default=0, ge=0)
+    allow_cpu_fallback: bool = False
+    require_cuda_probe: bool = True
+    consistency: TrainingBackendConsistencySettings = Field(
+        default_factory=TrainingBackendConsistencySettings
+    )
+
+
 class HorizonExperimentSettings(BaseModel):
     """One independently trained future multi-horizon challenger specification."""
 
@@ -672,6 +697,7 @@ class RankerSettings(BaseModel):
     minimum_group_size: int = Field(default=20, ge=2)
     ndcg_at: tuple[int, ...] = (10, 50)
     portfolio_fractions: tuple[float, ...] = (0.05, 0.10)
+    training_backend: TrainingBackendSettings = Field(default_factory=TrainingBackendSettings)
     walk_forward: WalkForwardPlanSettings = Field(default_factory=WalkForwardPlanSettings)
 
     @model_validator(mode="after")

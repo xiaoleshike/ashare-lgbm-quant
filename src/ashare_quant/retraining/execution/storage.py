@@ -113,6 +113,14 @@ class RetrainingExecutionStorage:
                 qualification_phase=(qualification.qualification_phase if qualification else None),
                 promotion_forbidden=qualification is not None,
                 trading_forbidden=qualification is not None,
+                training_compute=artifact_manifest.training_compute,
+                training_compute_hash=(
+                    canonical_payload_hash(
+                        artifact_manifest.training_compute.model_dump(mode="json")
+                    )
+                    if artifact_manifest.training_compute is not None
+                    else None
+                ),
             )
             atomic_write_json(
                 staged_registration / "registration.json", registration.model_dump(mode="json")
@@ -154,6 +162,11 @@ class RetrainingExecutionStorage:
                     ),
                     "promotion_forbidden": qualification is not None,
                     "trading_forbidden": qualification is not None,
+                    "training_compute": (
+                        artifact_manifest.training_compute.model_dump(mode="json")
+                        if artifact_manifest.training_compute is not None
+                        else None
+                    ),
                 },
             )
             execution_hash = canonical_payload_hash(
@@ -170,6 +183,7 @@ class RetrainingExecutionStorage:
                     ),
                     "promotion_forbidden": qualification is not None,
                     "trading_forbidden": qualification is not None,
+                    "training_compute_hash": registration.training_compute_hash,
                 }
             )
             atomic_write_json(

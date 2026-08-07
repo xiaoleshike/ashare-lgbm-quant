@@ -90,6 +90,7 @@ def write_staged_artifact(
         qualification_source=(qualification.qualification_source if qualification else None),
         promotion_forbidden=qualification is not None,
         trading_forbidden=qualification is not None,
+        training_compute=trained.training_compute,
     )
     atomic_write_json(directory / "manifest.json", manifest.model_dump(mode="json"))
     validate_artifact(directory, manifest)

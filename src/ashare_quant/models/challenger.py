@@ -14,8 +14,14 @@ import numpy as np
 
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.models.compute.backend import resolve_training_backend
+from ashare_quant.models.compute.schemas import TrainingRuntimeMetadata
 from ashare_quant.models.feature_lists import feature_list_hash
-from ashare_quant.models.ranker import feature_importance, fit_ranker, ranker_parameters
+from ashare_quant.models.ranker import (
+    feature_importance,
+    fit_ranker,
+    ranker_parameters,
+)
 from ashare_quant.models.ranker_data import RankerDataLoader
 from ashare_quant.models.ranker_metrics import evaluate_ranker
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
@@ -218,7 +224,8 @@ class ChallengerTrainer:
             features,
             self.settings.ranker.relevance_grades,
         )
-        model = fit_ranker(train, validation, self.settings.ranker)
+        runtime = resolve_training_backend(self.settings.ranker.training_backend)
+        model = fit_ranker(train, validation, self.settings.ranker, runtime)
         predictions = np.asarray(model.predict(validation.features), dtype=float)
         validation_metrics = evaluate_ranker(
             validation,
@@ -237,6 +244,7 @@ class ChallengerTrainer:
             features=features,
             training_rows=len(train.frame),
             validation_rows=len(validation.frame),
+            runtime=runtime,
         )
         self._publish(
             output_dir=output_dir,
@@ -276,8 +284,10 @@ class ChallengerTrainer:
         features: tuple[str, ...],
         training_rows: int,
         validation_rows: int,
+        runtime: TrainingRuntimeMetadata | None = None,
     ) -> dict[str, Any]:
         git = current_git_info()
+        effective = runtime or resolve_training_backend(self.settings.ranker.training_backend)
         feature_manifest = self.processed_root / "features_daily" / "_manifest.json"
         universe_manifest = self.processed_root / "universe_daily" / "_manifest.json"
         return {
@@ -313,7 +323,8 @@ class ChallengerTrainer:
             "git_dirty": git["dirty"],
             "training_rows": training_rows,
             "validation_rows": validation_rows,
-            "fixed_parameters": ranker_parameters(self.settings.ranker),
+            "fixed_parameters": ranker_parameters(self.settings.ranker, effective),
+            "training_compute": effective.model_dump(mode="json"),
             "source_manifests": {
                 "horizon_experiment": {
                     "path": str(plan_path.resolve()),

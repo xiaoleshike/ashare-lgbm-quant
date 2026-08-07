@@ -14,11 +14,16 @@ import lightgbm as lgb
 
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.models.compute import resolve_training_backend
 from ashare_quant.models.feature_lists import (
     feature_list_hash,
     load_robust_features,
 )
-from ashare_quant.models.ranker import feature_importance, ranker_parameters
+from ashare_quant.models.ranker import (
+    feature_importance,
+    ranker_parameters,
+    training_runtime_metadata,
+)
 from ashare_quant.models.ranker_data import RankerDataLoader, RankerDataset
 from ashare_quant.utils.manifest import config_hash, current_git_info, read_manifest
 
@@ -111,11 +116,16 @@ class ProductionRankerTrainer:
                     "feature_importance": feature_importance(model, features),
                 },
             )
-            write_json(directory / "manifest.json", self._manifest(features, train))
+            write_json(directory / "manifest.json", self._manifest(features, train, model))
             replace_directory_atomically(directory, final_dir)
         return final_dir
 
-    def _manifest(self, features: tuple[str, ...], train: RankerDataset) -> dict[str, Any]:
+    def _manifest(
+        self,
+        features: tuple[str, ...],
+        train: RankerDataset,
+        model: lgb.LGBMRanker,
+    ) -> dict[str, Any]:
         git_info = current_git_info()
         production = self.settings.production_model
         ranker = self.settings.ranker
@@ -140,7 +150,8 @@ class ProductionRankerTrainer:
             "label_horizon": ranker.label_horizon,
             "target": "future_excess_ret_5d",
             "ranker_relevance": "within-trade-date quantile grade",
-            "fixed_parameters": ranker_parameters(ranker),
+            "fixed_parameters": ranker_parameters(ranker, training_runtime_metadata(model)),
+            "training_compute": training_runtime_metadata(model).model_dump(mode="json"),
             "source_manifests": {
                 artifact: read_manifest(self.processed_root / artifact)
                 for artifact in ("features_daily", "labels_forward", "universe_daily")
@@ -151,13 +162,15 @@ class ProductionRankerTrainer:
 def fit_production_ranker(train: RankerDataset, settings: AppSettings) -> lgb.LGBMRanker:
     """Fit one fixed production model without validation or test data."""
 
-    model = lgb.LGBMRanker(**ranker_parameters(settings.ranker))
+    runtime = resolve_training_backend(settings.ranker.training_backend)
+    model = lgb.LGBMRanker(**ranker_parameters(settings.ranker, runtime))
     model.fit(
         train.features,
         train.relevance,
         group=train.groups,
         feature_name=list(train.feature_names),
     )
+    model._ashare_training_compute = runtime
     return model
 
 
