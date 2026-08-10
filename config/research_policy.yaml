@@ -1,0 +1,22 @@
+schema_version: 1
+policy_version: "2.8.2I-B-v1"
+historical_holdout:
+  classification: HISTORICAL_HOLDOUT
+  start_date: "20230101"
+  end_date: "20260710"
+prospective_lockbox:
+  start_date: "20260810"
+  allowed_consumers:
+    - production_shadow
+    - performance_observation
+    - challenger_paper_trading
+    - promotion_evidence
+  forbidden_consumers:
+    - feature_selection
+    - hyperparameter_tuning
+    - model_family_selection
+    - horizon_selection
+    - fold_selection
+    - research_threshold_tuning
+    - walk_forward_evaluation
+governed_training_access: NOT_YET_ENABLED

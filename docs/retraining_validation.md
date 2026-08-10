@@ -30,7 +30,9 @@ authorization.
 6. Atomically publish immutable evidence with the root manifest written last.
 
 The offline evaluation may read mature `labels_forward` rows only after the
-selection/final-test isolation checks pass. The executable validation is
+selection/historical-holdout isolation checks pass. Older immutable manifests retain the
+`final_test_period` field, but current research policy does not classify that repeatedly inspected
+history as a pristine lockbox. The executable validation is
 label-free and does not modify paper-trading state.
 
 Executable evidence freezes `accounting_schema_version=2`, the complete execution-cost schedule,

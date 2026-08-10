@@ -221,3 +221,23 @@ The default cost schedule resolves sell-side stamp duty by effective trade date,
 2023-08-28 transition. Promotion evidence preparation rejects executable validation generated under
 the legacy accounting schema or without exact cost-policy identity. See `docs/backtest.md` for the
 metric formulas and artifact contract.
+# Research Validation and Prospective Lockbox
+
+Research policy is stored in `config/research_policy.yaml`. The prospective lockbox begins on
+`20260810`. Do not move this boundary or change its consumer lists without treating the change as a
+new reviewed research policy identity. A forbidden research command that reaches the boundary must
+stop with `RESEARCH_LOCKBOX_VIOLATION`; do not bypass it by editing generated manifests.
+
+Walk-forward gaps default to `auto`: H5/H10/H20/H60 shared plans resolve to 61 purge and embargo
+sessions. An explicit smaller value is a configuration error. Inspect planned resolved gaps and the
+research policy hash before starting an expensive run.
+
+Multi-fold runs write only to `reports/research/walk_forward/<run_id>`. Use `models
+walk-forward-status` after completion and `models walk-forward-recovery` after interruption.
+Recovery is read-only. A missing/corrupt child manifest or source hash requires operator review;
+never average only the remaining folds. The legacy robust feature set is marked
+`LEGACY_PROVENANCE_INCOMPLETE` and cannot support new governed multi-fold evidence until a new
+feature-set artifact is created from exact immutable diagnostics.
+
+Full commands and evidence semantics are documented in
+[`research_validation.md`](research_validation.md).

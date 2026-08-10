@@ -16,13 +16,15 @@ from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
+from ashare_quant.models.research_policy import enforce_research_window, load_research_policy
+from ashare_quant.models.temporal_isolation import GapSetting, resolve_temporal_gaps
 from ashare_quant.utils.manifest import (
     atomic_write_json,
     config_hash,
     current_git_info,
 )
 
-PLAN_SCHEMA_VERSION = 2
+PLAN_SCHEMA_VERSION = 3
 type WalkForwardScheme = Literal["expanding", "rolling"]
 
 
@@ -91,20 +93,39 @@ class PurgedWalkForwardPlanner:
         purge_days: int | None = None,
         embargo_days: int | None = None,
         rolling_years: int | None = None,
+        horizons: tuple[int, ...] | None = None,
+        research_policy_path: Path = Path("config/research_policy.yaml"),
     ) -> WalkForwardPlanResult:
         """Publish a read-only walk-forward plan without loading labels or fitting a model."""
 
         _validate_date_range(start_date, end_date)
         model = self._resolve_model(model_id)
         policy = self.settings.ranker.walk_forward
-        purge = policy.purge_days if purge_days is None else purge_days
-        embargo = policy.embargo_days if embargo_days is None else embargo_days
+        configured_purge: GapSetting = policy.purge_days if purge_days is None else purge_days
+        configured_embargo: GapSetting = (
+            policy.embargo_days if embargo_days is None else embargo_days
+        )
+        selected_horizons = horizons or tuple(
+            item.horizon for item in self.settings.models.horizon_experiments
+        )
+        gaps = resolve_temporal_gaps(
+            selected_horizons, purge=configured_purge, embargo=configured_embargo
+        )
+        purge = gaps.resolved_purge
+        embargo = gaps.resolved_embargo
         rolling_window_years = (
             policy.rolling_window_years if rolling_years is None else rolling_years
         )
         _validate_runtime_policy(policy, purge, embargo, rolling_window_years)
         if scheme not in {"expanding", "rolling"}:
             raise DataValidationError(f"unsupported walk-forward scheme: {scheme}")
+        research_policy = load_research_policy(research_policy_path)
+        enforce_research_window(
+            research_policy,
+            consumer="fold_selection",
+            start_date=start_date,
+            end_date=end_date,
+        )
 
         sessions = self._load_open_sessions(start_date, end_date)
         folds = _build_folds(
@@ -134,8 +155,28 @@ class PurgedWalkForwardPlanner:
             end_date=end_date,
             scheme=scheme,
             model_id=model.model_id,
+            feature_hash=model.feature_hash,
+            horizons=selected_horizons,
+            purge=purge,
+            embargo=embargo,
+            research_policy_hash=research_policy.policy_hash,
+            folds=tuple(fold.to_dict() for fold in folds),
         )
         output_dir = self.reports_root / "walk_forward" / run_id
+        if (output_dir / "manifest.json").is_file():
+            existing = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            existing_folds = json.loads((output_dir / "folds.json").read_text(encoding="utf-8"))
+            if existing.get("run_id") != run_id or existing_folds.get("folds") != [
+                fold.to_dict() for fold in folds
+            ]:
+                raise DataValidationError(f"walk-forward plan identity conflict: {output_dir}")
+            return WalkForwardPlanResult(
+                run_id=run_id,
+                output_dir=output_dir,
+                fold_count=len(folds),
+                scheme=scheme,
+                model_id=model.model_id,
+            )
         fold_payload: dict[str, Any] = {
             "schema_version": PLAN_SCHEMA_VERSION,
             "run_id": run_id,
@@ -159,6 +200,12 @@ class PurgedWalkForwardPlanner:
             "model_status": model.status,
             "model_artifact_path": model.artifact_path,
             "feature_hash": model.feature_hash,
+            "research_policy_path": str(research_policy_path),
+            "research_policy_hash": research_policy.policy_hash,
+            "prospective_lockbox_start": research_policy.prospective_lockbox.start_date,
+            "historical_evaluation_classification": (
+                research_policy.historical_holdout.classification
+            ),
             "policy": {
                 "annual_sessions": policy.annual_sessions,
                 "minimum_training_years": policy.minimum_training_years,
@@ -166,6 +213,12 @@ class PurgedWalkForwardPlanner:
                 "validation_sessions": policy.validation_sessions,
                 "purge_sessions": purge,
                 "embargo_sessions": embargo,
+                "gap_policy": gaps.gap_policy,
+                "configured_purge": configured_purge,
+                "configured_embargo": configured_embargo,
+                "required_gap_sessions": gaps.required_gap,
+                "horizons": list(gaps.horizons),
+                "label_semantics": gaps.label_semantics,
                 "evaluation_frequency": policy.evaluation_frequency,
             },
             "trade_calendar": {
@@ -334,16 +387,33 @@ def _validate_date_range(start_date: str, end_date: str) -> None:
         raise DataValidationError("start_date must not be after end_date")
 
 
-def _run_id(*, start_date: str, end_date: str, scheme: str, model_id: str) -> str:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+def _run_id(
+    *,
+    start_date: str,
+    end_date: str,
+    scheme: str,
+    model_id: str,
+    feature_hash: str,
+    horizons: tuple[int, ...],
+    purge: int,
+    embargo: int,
+    research_policy_hash: str,
+    folds: tuple[dict[str, Any], ...],
+) -> str:
     identity = json.dumps(
         {
             "start_date": start_date,
             "end_date": end_date,
             "scheme": scheme,
             "model_id": model_id,
+            "feature_hash": feature_hash,
+            "horizons": sorted(set(horizons)),
+            "purge": purge,
+            "embargo": embargo,
+            "research_policy_hash": research_policy_hash,
+            "folds": folds,
         },
         sort_keys=True,
     ).encode()
-    digest = hashlib.sha256(identity).hexdigest()[:8]
-    return f"walk_forward_{scheme}_{timestamp}_{digest}"
+    digest = hashlib.sha256(identity).hexdigest()[:16]
+    return f"walk_forward_{scheme}_{digest}"

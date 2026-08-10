@@ -43,6 +43,7 @@ from ashare_quant.models import (
     HumanReviewService,
     ModelDriftDiagnosticEngine,
     ModelRegistry,
+    MultiFoldEvaluationRunner,
     MultiHorizonEnsembleEngine,
     MultiHorizonExperimentPlanner,
     ProductionInferenceEngine,
@@ -56,11 +57,15 @@ from ashare_quant.models import (
     PromotionGovernanceService,
     PurgedWalkForwardPlanner,
     RankerBaselineRunner,
+    RankerFoldExecutor,
     RollbackService,
+    WalkForwardRecoveryInspector,
     load_promotion_gate_policy,
+    walk_forward_status,
 )
 from ashare_quant.models.compute import probe_training_backend, resolve_training_backend
 from ashare_quant.models.compute.benchmark import TrainingBackendBenchmarkService
+from ashare_quant.models.feature_provenance import create_governed_feature_set
 from ashare_quant.models.shadow import ShadowPredictionService
 from ashare_quant.monitoring import (
     AlertService,
@@ -497,6 +502,41 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     walk_forward.add_argument(
         "--rolling-years", type=int, default=None, help="Override rolling window years."
     )
+    walk_forward.add_argument(
+        "--horizons",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Horizon scope used to resolve AUTO gaps; defaults to configured horizons.",
+    )
+    walk_forward_run = commands.add_parser(
+        "walk-forward-run",
+        help="Execute every eligible fold from one immutable horizon experiment.",
+    )
+    walk_forward_run.add_argument("--experiment-id", required=True)
+    walk_forward_run.add_argument("--experiment-manifest", required=True)
+    walk_forward_run.add_argument("--feature-provenance", required=True)
+    walk_forward_run.add_argument(
+        "--ranking-only",
+        action="store_true",
+        help="Do not require executable portfolio evidence for this research run.",
+    )
+    walk_forward_status_parser = commands.add_parser(
+        "walk-forward-status", help="Validate one completed multi-fold experiment."
+    )
+    walk_forward_status_parser.add_argument("--experiment-id", required=True)
+    walk_forward_recovery = commands.add_parser(
+        "walk-forward-recovery", help="Inspect multi-fold artifacts without repair."
+    )
+    walk_forward_recovery.add_argument("--experiment-id", required=True)
+    feature_set_create = commands.add_parser(
+        "feature-set-create",
+        help="Publish governed feature provenance from one immutable diagnostics run.",
+    )
+    feature_set_create.add_argument("--diagnostics-dir", required=True)
+    feature_set_create.add_argument("--name", required=True)
+    feature_set_create.add_argument("--version", required=True)
+    feature_set_create.add_argument("--created-by", required=True)
     horizon_plan = commands.add_parser(
         "horizon-plan",
         help="Bind configured label horizons to an existing purged fold plan.",
@@ -1892,6 +1932,7 @@ def run_models_command(args: argparse.Namespace) -> int:
                 purge_days=args.purge_days,
                 embargo_days=args.embargo_days,
                 rolling_years=args.rolling_years,
+                horizons=None if args.horizons is None else tuple(args.horizons),
             )
         except (DataValidationError, OSError, ValueError) as error:
             print(f"walk-forward planning failed: {error}", file=sys.stderr)
@@ -1901,6 +1942,67 @@ def run_models_command(args: argparse.Namespace) -> int:
             f"scheme={walk_forward_result.scheme} model_id={walk_forward_result.model_id} "
             f"folds={walk_forward_result.fold_count} output={walk_forward_result.output_dir}"
         )
+        return 0
+    if args.models_command == "walk-forward-run":
+        raw_root = (
+            settings.paths.parquet_store if args.storage_root is None else Path(args.storage_root)
+        )
+        multi_fold_runner = MultiFoldEvaluationRunner(
+            reports_root=reports_root,
+            settings=settings,
+            executor=RankerFoldExecutor(
+                raw_root=raw_root,
+                processed_root=processed_root,
+                settings=settings,
+            ),
+        )
+        try:
+            walk_forward_evaluation_result = multi_fold_runner.run(
+                experiment_manifest=Path(args.experiment_manifest),
+                experiment_id=args.experiment_id,
+                feature_provenance_path=Path(args.feature_provenance),
+                require_executable=not args.ranking_only,
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"walk-forward execution failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            "walk_forward_evaluation: "
+            f"run_id={walk_forward_evaluation_result.experiment_id} "
+            f"status={walk_forward_evaluation_result.status} "
+            f"folds={walk_forward_evaluation_result.fold_count} "
+            f"output={walk_forward_evaluation_result.output_dir}"
+        )
+        return 0
+    if args.models_command == "walk-forward-status":
+        try:
+            status = walk_forward_status(reports_root, args.experiment_id)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"walk-forward status failed: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(status, sort_keys=True))
+        return 0 if status["status"] == "COMPLETE" else 1
+    if args.models_command == "walk-forward-recovery":
+        try:
+            recovery = WalkForwardRecoveryInspector(reports_root).inspect(args.experiment_id)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"walk-forward recovery failed: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(recovery, sort_keys=True))
+        return 0 if recovery["status"] == "CLEAN" else 1
+    if args.models_command == "feature-set-create":
+        try:
+            feature_set_path = create_governed_feature_set(
+                diagnostics_dir=Path(args.diagnostics_dir),
+                output_root=reports_root / "feature_selection",
+                feature_set_name=args.name,
+                feature_set_version=args.version,
+                created_by=args.created_by,
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"feature-set creation failed: {error}", file=sys.stderr)
+            return 2
+        print(f"governed_feature_set: path={feature_set_path}")
         return 0
     if args.models_command == "diagnostics":
         if args.models_diagnostics_command != "drift":

@@ -38,10 +38,10 @@ def test_expanding_plan_has_strict_chronology_and_leakage_boundaries(
     for fold in folds:
         assert fold["train_end"] < fold["validation_start"]
         assert fold["validation_end"] < fold["evaluation_start"]
-        assert positions[fold["validation_start"]] - positions[fold["train_end"]] - 1 == 3
-        assert positions[fold["evaluation_start"]] - positions[fold["validation_end"]] - 1 == 3
-        assert positions[fold["train_end"]] + 3 < positions[fold["validation_start"]]
-        assert positions[fold["validation_end"]] + 3 < positions[fold["evaluation_start"]]
+        assert positions[fold["validation_start"]] - positions[fold["train_end"]] - 1 == 6
+        assert positions[fold["evaluation_start"]] - positions[fold["validation_end"]] - 1 == 6
+        assert positions[fold["train_end"]] + 6 < positions[fold["validation_start"]]
+        assert positions[fold["validation_end"]] + 6 < positions[fold["evaluation_start"]]
 
 
 def test_rolling_plan_uses_fixed_trading_session_window(tmp_path: Path) -> None:
@@ -81,22 +81,18 @@ def test_non_trading_request_boundaries_map_only_to_open_sessions(tmp_path: Path
             assert "20200104" <= fold[field] <= "20200628"
 
 
-def test_walk_forward_gaps_are_horizon_agnostic_boundaries(tmp_path: Path) -> None:
+def test_walk_forward_rejects_unsafe_explicit_horizon_gap(tmp_path: Path) -> None:
     planner, _ = _planner_fixture(tmp_path)
 
-    result = planner.build(
-        start_date="20200104",
-        end_date="20200630",
-        scheme="expanding",
-        purge_days=2,
-        embargo_days=2,
-    )
-
-    folds = _read_folds(result.output_dir)
-    assert all(fold["purge_sessions"] == 2 for fold in folds)
-    assert all(fold["embargo_sessions"] == 2 for fold in folds)
-    assert all("label_horizon" not in fold for fold in folds)
-    assert all("label_exit_lag_sessions" not in fold for fold in folds)
+    with pytest.raises(DataValidationError, match="required=6"):
+        planner.build(
+            start_date="20200104",
+            end_date="20200630",
+            scheme="expanding",
+            purge_days=2,
+            embargo_days=2,
+            horizons=(5,),
+        )
 
 
 def test_plan_manifest_records_fold_model_and_calendar_provenance(tmp_path: Path) -> None:
@@ -142,15 +138,30 @@ def test_plan_manifest_records_fold_model_and_calendar_provenance(tmp_path: Path
 def test_plan_needs_no_labels_features_or_model_training(tmp_path: Path) -> None:
     planner, _ = _planner_fixture(tmp_path)
     assert not (tmp_path / "processed").exists()
-
     result = planner.build(
         start_date="20200104",
         end_date="20200630",
         scheme="expanding",
     )
-
     assert result.fold_count > 0
     assert not (tmp_path / "processed").exists()
+
+
+def test_walk_forward_plan_identity_is_deterministic(tmp_path: Path) -> None:
+    planner, _ = _planner_fixture(tmp_path)
+    first = planner.build(
+        start_date="20200104",
+        end_date="20200630",
+        scheme="expanding",
+    )
+    manifest_bytes = (first.output_dir / "manifest.json").read_bytes()
+    second = planner.build(
+        start_date="20200104",
+        end_date="20200630",
+        scheme="expanding",
+    )
+    assert second.run_id == first.run_id
+    assert (second.output_dir / "manifest.json").read_bytes() == manifest_bytes
 
 
 def test_models_walk_forward_cli_success_and_failure(
@@ -212,16 +223,17 @@ def _planner_fixture(tmp_path: Path) -> tuple[PurgedWalkForwardPlanner, tuple[st
     settings = AppSettings.model_validate(
         {
             "ranker": {
-                "label_horizon": 2,
+                "label_horizon": 5,
                 "walk_forward": {
                     "annual_sessions": 10,
                     "minimum_training_years": 2,
                     "rolling_window_years": 2,
                     "validation_sessions": 10,
-                    "purge_days": 3,
-                    "embargo_days": 3,
+                    "purge_days": "auto",
+                    "embargo_days": "auto",
                 },
-            }
+            },
+            "models": {"horizon_experiments": [{"name": "h5", "horizon": 5, "holding_days": 5}]},
         }
     )
     config_path = tmp_path / "config.yaml"

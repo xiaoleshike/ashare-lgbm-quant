@@ -15,7 +15,7 @@ ashare-quant --config config/default.yaml labels build \
 
 ## Walk-forward Integration
 
-All horizons reference the same existing walk-forward fold plan so their later challenger results use identical evaluation dates. Because the 60d label enters at T+1 and matures 60 sessions later, the shared plan must have at least 61 purge and embargo sessions. Prepare that plan separately:
+All horizons reference the same existing walk-forward fold plan so their later challenger results use identical evaluation dates. Because the 60d label enters at T+1 and matures 60 sessions later, the shared plan resolves AUTO purge and embargo to 61 sessions. Explicit values below the required horizon-safe gap fail closed.
 
 The fold manifest must use horizon-agnostic schema version 2. Older manifests containing `label_horizon` or `label_exit_lag_sessions` are rejected and must be regenerated.
 
@@ -23,9 +23,7 @@ The fold manifest must use horizon-agnostic schema version 2. Older manifests co
 ashare-quant --config config/default.yaml models walk-forward-plan \
   --start-date 20100101 \
   --end-date 20260717 \
-  --scheme expanding \
-  --purge-days 61 \
-  --embargo-days 61
+  --scheme expanding
 ```
 
 Then create the multi-horizon plan, either by automatic compatible-plan discovery or an explicit immutable reference:
@@ -39,7 +37,11 @@ ashare-quant --config config/default.yaml models horizon-plan \
 
 The result is `reports/horizon_experiments/<run_id>/experiment_manifest.json`. Each horizon record contains its future label name, maturity and required gap sessions, holding period, execution rule, feature and universe hashes, and the referenced fold manifest. Evaluation ranges are clipped to the latest signal date whose label can mature under the authoritative `trade_cal`.
 
-`selection_period` folds may be used to compare challengers. `final_test_period` folds are reserved for one final evaluation and explicitly carry `may_select_model=false`. A later challenger trainer must consume one horizon record at a time and must not combine targets or use final-test results for selection.
+Existing immutable plans retain their historical `final_test_period` field. Under research policy
+2.8.2I-B that repeatedly inspected period is classified as `HISTORICAL_HOLDOUT`, not a pristine
+lockbox. It remains forbidden for automatic model selection. New prospective evidence begins at
+the governed 2026-08-10 lockbox boundary. See
+[`research_validation.md`](research_validation.md).
 
 ## Production Observation
 

@@ -180,8 +180,8 @@ ranker:
     minimum_training_years: 5
     rolling_window_years: 5
     validation_sessions: 252
-    purge_days: 6
-    embargo_days: 6
+    purge_days: auto
+    embargo_days: auto
     evaluation_frequency: monthly
 models:
   horizon_experiments:

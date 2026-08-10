@@ -25,6 +25,7 @@ from ashare_quant.models.ranker import (
 from ashare_quant.models.ranker_data import RankerDataLoader
 from ashare_quant.models.ranker_metrics import evaluate_ranker
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
+from ashare_quant.models.temporal_isolation import required_temporal_gap_sessions
 from ashare_quant.utils.manifest import config_hash, current_git_info
 
 CHALLENGER_MANIFEST_SCHEMA_VERSION = 1
@@ -431,7 +432,9 @@ def _validate_experiment(
         raise DataValidationError("experiment universe_hash differs from plan")
     if experiment.get("config_hash") != config_hash_value:
         raise DataValidationError("experiment config_hash differs from plan")
-    if _required_int(experiment, "label_maturity_sessions") != horizon + 1:
+    if _required_int(experiment, "label_maturity_sessions") != required_temporal_gap_sessions(
+        horizon
+    ):
         raise DataValidationError("experiment label maturity does not match horizon")
     selection = _required_mapping(experiment, "selection_period")
     final_test = _required_mapping(experiment, "final_test_period")

@@ -269,6 +269,10 @@ def _planner_fixture(
             "canonical_artifact": {"min_date": "20100104", "max_date": "20260717"},
         },
     )
+    atomic_write_json(
+        processed_root / "features_daily" / "_manifest.json",
+        {"artifact_name": "features_daily", "feature_hash": feature_list_hash(("f1", "f2"))},
+    )
     fold_dir = reports_root / "walk_forward" / "walk_forward_fixture"
     folds_file = fold_dir / "folds.json"
     atomic_write_json(

@@ -17,6 +17,8 @@ from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
+from ashare_quant.models.research_policy import enforce_research_window, load_research_policy
+from ashare_quant.models.temporal_isolation import required_temporal_gap_sessions
 from ashare_quant.utils.manifest import atomic_write_json, config_hash, current_git_info
 
 HORIZON_PLAN_SCHEMA_VERSION = 2
@@ -45,6 +47,7 @@ class MultiHorizonExperimentPlanner:
         reports_root: Path,
         settings: AppSettings,
         config_path: Path,
+        research_policy_path: Path = Path("config/research_policy.yaml"),
     ) -> None:
         self.raw_root = raw_root
         self.models_root = models_root
@@ -52,6 +55,7 @@ class MultiHorizonExperimentPlanner:
         self.reports_root = reports_root
         self.settings = settings
         self.config_path = config_path
+        self.research_policy_path = research_policy_path
 
     def build(self, *, folds_manifest: Path | None = None) -> HorizonExperimentPlanResult:
         """Create a plan using label availability metadata without loading target values."""
@@ -61,12 +65,25 @@ class MultiHorizonExperimentPlanner:
         maximum_horizon = max(experiment.horizon for experiment in experiments)
         fold_path, fold_manifest, fold_payload = self._resolve_folds_manifest(
             folds_manifest,
-            required_gap=maximum_horizon + 1,
+            required_gap=required_temporal_gap_sessions(maximum_horizon),
             feature_hash=champion.feature_hash,
         )
         sessions = _load_open_sessions(self.raw_root)
         selection_period = self.settings.models.selection_period
         final_test_period = self.settings.models.final_test_period
+        research_policy = load_research_policy(self.research_policy_path)
+        enforce_research_window(
+            research_policy,
+            consumer="horizon_selection",
+            start_date=selection_period.start_date,
+            end_date=selection_period.end_date,
+        )
+        enforce_research_window(
+            research_policy,
+            consumer="walk_forward_evaluation",
+            start_date=final_test_period.start_date,
+            end_date=final_test_period.end_date,
+        )
         label_availability, labels_fingerprint = _load_label_availability(
             self.processed_root,
             tuple(experiment.horizon for experiment in experiments),
@@ -78,6 +95,9 @@ class MultiHorizonExperimentPlanner:
         universe_manifest_path = self.processed_root / "universe_daily" / "_manifest.json"
         universe_manifest = _load_json(universe_manifest_path, "universe manifest")
         universe_hash = _file_hash(universe_manifest_path)
+        features_manifest_path = self.processed_root / "features_daily" / "_manifest.json"
+        _load_json(features_manifest_path, "features manifest")
+        features_manifest_hash = _file_hash(features_manifest_path)
         fold_hash = _file_hash(fold_path)
         folds_file = _folds_file(fold_path, fold_manifest)
         folds_hash = _file_hash(folds_file)
@@ -91,11 +111,13 @@ class MultiHorizonExperimentPlanner:
             "model_type": champion.model_type,
             "feature_hash": champion.feature_hash,
             "universe_hash": universe_hash,
+            "features_manifest_hash": features_manifest_hash,
             "config_hash": resolved_config_hash,
             "folds_manifest_hash": fold_hash,
             "folds_hash": folds_hash,
             "labels_fingerprint": labels_fingerprint,
             "git_commit": git["commit"],
+            "research_policy_hash": research_policy.policy_hash,
             "experiments": [_experiment_config(experiment) for experiment in experiments],
             "selection_period": selection_period.model_dump(mode="json"),
             "final_test_period": final_test_period.model_dump(mode="json"),
@@ -164,6 +186,8 @@ class MultiHorizonExperimentPlanner:
                 "git_commit": universe_manifest.get("git_commit"),
                 "config_hash": universe_manifest.get("config_hash"),
             },
+            "features_manifest": str(features_manifest_path.resolve()),
+            "features_manifest_hash": features_manifest_hash,
             "folds_manifest": str(fold_path.resolve()),
             "folds_manifest_hash": fold_hash,
             "folds_hash": folds_hash,
@@ -175,9 +199,13 @@ class MultiHorizonExperimentPlanner:
             },
             "final_test_period": {
                 **final_test_period.model_dump(mode="json"),
-                "purpose": "one_time_final_evaluation_only",
+                "purpose": "historical_holdout_evaluation_only",
+                "classification": research_policy.historical_holdout.classification,
                 "may_select_model": False,
             },
+            "research_policy_path": str(self.research_policy_path),
+            "research_policy_hash": research_policy.policy_hash,
+            "prospective_lockbox_start": research_policy.prospective_lockbox.start_date,
             "experiments": experiment_records,
             "isolation_contract": {
                 "model_trained": False,
@@ -347,7 +375,7 @@ def _experiment_record(
     final_test_period: dict[str, str],
     label_availability: dict[str, Any],
 ) -> dict[str, Any]:
-    maturity_sessions = experiment.horizon + 1
+    maturity_sessions = required_temporal_gap_sessions(experiment.horizon)
     maximum_mature_date = _maximum_mature_date(sessions, experiment.horizon)
     selection_folds = _clip_folds(
         folds,
@@ -444,7 +472,7 @@ def _load_open_sessions(raw_root: Path) -> tuple[str, ...]:
 
 
 def _maximum_mature_date(sessions: tuple[str, ...], horizon: int) -> str:
-    maturity_sessions = horizon + 1
+    maturity_sessions = required_temporal_gap_sessions(horizon)
     if len(sessions) <= maturity_sessions:
         raise DataValidationError(
             f"trade_cal has insufficient sessions for horizon {horizon} maturity"
@@ -519,10 +547,12 @@ def _load_label_availability(
             "minimum_available_date": str(row.minimum_available_date),
             "maximum_available_date": str(row.maximum_available_date),
         }
-    return availability, _dataset_fingerprint(files, dataset_dir)
+    return availability, dataset_fingerprint(files, dataset_dir)
 
 
-def _dataset_fingerprint(files: list[Path], root: Path) -> str:
+def dataset_fingerprint(files: list[Path], root: Path) -> str:
+    """Return the deterministic inventory identity used by horizon plans."""
+
     entries = [
         {
             "path": str(path.relative_to(root)),

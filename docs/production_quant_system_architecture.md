@@ -120,7 +120,7 @@ extended datasets should run in separate maintenance jobs so they cannot delay d
 
 ### Diagnostics and training
 
-Current diagnostics correctly freeze feature selection before loading the final test period. That
+Current diagnostics freeze feature selection before loading the historical holdout. That
 test period must not be reused every week. Weekly monitoring should instead evaluate predictions
 whose 5-day labels have newly matured. Feature reselection is a governed research event with a
 new chronological split, not an automatic consequence of a weak week.
@@ -292,7 +292,12 @@ Proposed schedule, in Asia/Shanghai:
 - **Next trading day after open data is available:** execute pending paper orders and reconcile.
 - **Daily after close:** mark holdings, publish P&L, and update monitoring.
 - **Weekly:** run gap/freshness audit, feature/score drift, matured-label performance, paper
-  reconciliation, and snapshot refresh. Do not rerun the fixed final-test selection workflow.
+  reconciliation, and snapshot refresh. Do not use the prospective lockbox for research selection.
+
+Phase 2.8.2I-B multi-fold evidence, feature-set provenance, horizon-safe temporal gaps, and the
+2026-08-10 prospective lockbox are specified in
+[`research_validation.md`](research_validation.md). Older manifests retain earlier final-test
+terminology but are not reinterpreted as pristine evidence.
 - **Monthly:** train an immutable candidate through a maturity-safe cutoff, compare it with the
   champion, and begin shadow evaluation. Promotion is a separate controlled action.
 

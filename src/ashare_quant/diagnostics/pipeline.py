@@ -32,6 +32,7 @@ from ashare_quant.diagnostics.model import (
     train_diagnostic_model,
 )
 from ashare_quant.features.registry import FEATURE_REGISTRY
+from ashare_quant.models.research_policy import enforce_research_window, load_research_policy
 from ashare_quant.utils.manifest import config_hash, current_git_info, read_manifest
 
 type DataFrame = pd.DataFrame
@@ -89,11 +90,13 @@ class FeatureDiagnosticPipeline:
         reports_root: Path,
         settings: AppSettings,
         config_path: Path,
+        research_policy_path: Path = Path("config/research_policy.yaml"),
     ) -> None:
         self.processed_root = processed_root
         self.reports_root = reports_root
         self.settings = settings
         self.config_path = config_path
+        self.research_policy_path = research_policy_path
         self.feature_specs = tuple(FEATURE_REGISTRY)
         self.feature_names = tuple(spec.name for spec in self.feature_specs)
         self.family_by_feature = {spec.name: spec.family for spec in self.feature_specs}
@@ -102,6 +105,19 @@ class FeatureDiagnosticPipeline:
         """Run train-only selection, validation comparison, then frozen OOS evaluation."""
 
         split.validate()
+        policy = load_research_policy(self.research_policy_path)
+        enforce_research_window(
+            policy,
+            consumer="feature_selection",
+            start_date=split.train_start,
+            end_date=split.validation_end,
+        )
+        enforce_research_window(
+            policy,
+            consumer="walk_forward_evaluation",
+            start_date=split.test_start,
+            end_date=split.test_end,
+        )
         diagnostic_settings = self.settings.diagnostics
         selected_horizon = horizon or diagnostic_settings.label_horizon
         if selected_horizon not in self.settings.labels.horizons:

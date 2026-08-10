@@ -549,8 +549,8 @@ class WalkForwardPlanSettings(BaseModel):
     minimum_training_years: PositiveInt = 5
     rolling_window_years: PositiveInt = 5
     validation_sessions: PositiveInt = 252
-    purge_days: int = Field(default=6, ge=0)
-    embargo_days: int = Field(default=6, ge=0)
+    purge_days: int | Literal["auto"] = "auto"
+    embargo_days: int | Literal["auto"] = "auto"
     evaluation_frequency: Literal["monthly"] = "monthly"
 
 

@@ -51,6 +51,13 @@ from ashare_quant.models.walk_forward import (
     WalkForwardFold,
     WalkForwardPlanResult,
 )
+from ashare_quant.models.walk_forward_evaluation import (
+    MultiFoldEvaluationRunner,
+    RankerFoldExecutor,
+    WalkForwardEvaluationResult,
+    WalkForwardRecoveryInspector,
+    walk_forward_status,
+)
 
 __all__ = [
     "ChallengerTrainer",
@@ -93,4 +100,9 @@ __all__ = [
     "RegisteredModel",
     "WalkForwardFold",
     "WalkForwardPlanResult",
+    "MultiFoldEvaluationRunner",
+    "RankerFoldExecutor",
+    "WalkForwardEvaluationResult",
+    "WalkForwardRecoveryInspector",
+    "walk_forward_status",
 ]
