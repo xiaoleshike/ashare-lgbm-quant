@@ -155,8 +155,7 @@ class RankerFoldExecutor:
         model = fit_ranker(train, validation, self.settings.ranker, runtime)
         validation_predictions = np.asarray(model.predict(validation.features), dtype=float)
         evaluation_predictions = np.asarray(model.predict(evaluation.features), dtype=float)
-        predictions = evaluation.frame.loc[:, ["trade_date", "ts_code"]].copy()
-        predictions["score"] = evaluation_predictions
+        predictions = _build_prediction_frame(evaluation.frame, evaluation_predictions)
         ranking = _ranking_metrics(evaluation, evaluation_predictions, self.settings)
         executable = (
             self._executable_metrics(predictions, horizon)
@@ -234,6 +233,17 @@ class RankerFoldExecutor:
             },
             "cost_policy_hash": str(results[0].cost_policy["cost_policy_hash"]),
         }
+
+
+def _build_prediction_frame(
+    evaluation_frame: pd.DataFrame,
+    evaluation_predictions: np.ndarray,
+) -> pd.DataFrame:
+    """Build the canonical upstream prediction artifact consumed by executable validation."""
+
+    predictions = evaluation_frame.loc[:, ["trade_date", "ts_code"]].copy()
+    predictions["prediction_score"] = evaluation_predictions
+    return predictions
 
 
 class MultiFoldEvaluationRunner:

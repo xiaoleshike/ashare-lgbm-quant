@@ -5,9 +5,11 @@ import json
 import shutil
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
+from ashare_quant.backtest.executable_validation import _signals
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.feature_lists import feature_list_hash
@@ -26,6 +28,7 @@ from ashare_quant.models.walk_forward_evaluation import (
     FoldExecutionResult,
     MultiFoldEvaluationRunner,
     WalkForwardRecoveryInspector,
+    _build_prediction_frame,
     walk_forward_status,
 )
 from ashare_quant.utils.manifest import atomic_write_json
@@ -52,6 +55,26 @@ def test_gap_override_and_shared_multi_horizon_policy() -> None:
     assert resolve_temporal_gaps((20,), purge=21, embargo=30).resolved_embargo == 30
     with pytest.raises(DataValidationError, match="unsafe explicit purge_sessions"):
         resolve_temporal_gaps((20,), purge=20, embargo=21)
+
+
+def test_multi_fold_prediction_schema_matches_shared_executable_adapter() -> None:
+    evaluation = pd.DataFrame(
+        {
+            "trade_date": ["20240102", "20240102"],
+            "ts_code": ["000001.SZ", "000002.SZ"],
+            "unused_feature": [1.0, 2.0],
+        }
+    )
+    scores = np.asarray([0.25, -0.5], dtype=float)
+
+    predictions = _build_prediction_frame(evaluation, scores)
+    assert predictions.columns.tolist() == ["trade_date", "ts_code", "prediction_score"]
+    signals = _signals(predictions)
+    assert signals.columns.tolist() == ["trade_date", "ts_code", "score"]
+    assert signals["score"].tolist() == scores.tolist()
+
+    with pytest.raises(KeyError, match="prediction_score"):
+        _signals(predictions.rename(columns={"prediction_score": "score"}))
 
 
 def test_research_lockbox_enforcement() -> None:
@@ -435,7 +458,11 @@ class FakeExecutor:
             raise DataValidationError("synthetic interruption")
         index = int(fold_id[-1])
         predictions = pd.DataFrame(
-            {"trade_date": [fold["evaluation_start"]], "ts_code": ["000001.SZ"], "score": [0.1]}
+            {
+                "trade_date": [fold["evaluation_start"]],
+                "ts_code": ["000001.SZ"],
+                "prediction_score": [0.1],
+            }
         )
 
         def save(path: Path) -> None:
