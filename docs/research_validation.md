@@ -43,8 +43,21 @@ The plan freezes configured/resolved values, horizons, required gap, and label s
 ## Feature Provenance
 
 Fully governed feature-set evidence binds the ordered feature list and hash, selection policy and
-version, selection window, diagnostics run and manifest hash, feature-universe identity, and
-asserted creator. Any change produces a new deterministic feature-set ID.
+version, selection window, diagnostics run and manifest hash, recommendation hash,
+feature-universe identity, and asserted creator. Any semantic change produces a new deterministic
+feature-set ID. Schema-v2 provenance stores reports-relative source locators; absolute paths and
+`created_at` are non-identity metadata. Validation resolves the locator below the active reports
+root and verifies the immutable diagnostics and recommendation hashes, so relocating a checkout
+does not change identity.
+
+Governed feature-set provenance is the feature authority for new research. The Champion remains a
+reference model for model type, semantic defaults, and comparison, but its feature hash does not
+constrain a new research feature set. A new plan freezes `feature_set_id`, ordered feature-list
+hash, and exact provenance artifact hash. Walk-forward plan schema v4 passes that lineage to
+multi-horizon plan schema v3 and the multi-fold runner verifies all three identities match.
+Multi-fold evidence uses schema v2. Earlier feature provenance schema v1 remains readable, but a
+schema-v1 `GOVERNED` artifact is path-bound legacy evidence and is rejected for new governed plans;
+`LEGACY_PROVENANCE_INCOMPLETE` remains explicitly legacy and is never upgraded in place.
 
 The existing `robust_features.json` cannot be linked to an exact immutable diagnostics run or
 selection window. Its companion
@@ -82,6 +95,12 @@ written only after every required fold validates. Resume reuses hash-valid compl
 reruns only an unpublished interrupted fold. Missing or corrupt folds are never excluded from a
 successful average. Recovery inspection is read-only.
 
+`COMPLETE` is accepted only after one shared root-to-leaf validator verifies the root schema,
+status and identity; `aggregate_metrics.json`; `fold_summary.parquet`; the exact expected fold
+directory set; every fold manifest; and every model, prediction, metric, executable, and feature
+importance child hash. Status, completed-run resume, and recovery all reuse this validator. Any
+tamper returns a failure or `ACTION_REQUIRED`; completed evidence is never regenerated or repaired.
+
 Ranking evidence includes Rank IC mean/median/std/ICIR, positive ratio, NDCG@10/50, coverage, date
 count, and security count. Executable evidence requires accounting schema v2 and reports Top10,
 Top20, and Top50 results. Aggregation reports distributions across folds: mean, median, standard
@@ -107,7 +126,8 @@ Create a horizon-safe plan (AUTO uses the configured H5/H10/H20/H60 scope):
 
 ```bash
 ashare-quant --config config/default.yaml models walk-forward-plan \
-  --start-date 20100101 --end-date 20260710 --scheme expanding
+  --start-date 20100101 --end-date 20260710 --scheme expanding \
+  --feature-provenance reports/feature_selection/FEATURE_SET_ID/feature_set.json
 ```
 
 Execute an exact experiment after creating a fully governed feature-set provenance artifact:
@@ -130,4 +150,5 @@ ashare-quant --config config/default.yaml models walk-forward-recovery \
   --experiment-id WALK_FORWARD_RUN_ID
 ```
 
-Status and recovery validate immutable child hashes. Recovery never repairs or deletes artifacts.
+Status and recovery validate the complete root-to-leaf evidence chain. Recovery never repairs or
+deletes artifacts.

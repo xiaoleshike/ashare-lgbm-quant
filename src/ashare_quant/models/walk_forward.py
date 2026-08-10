@@ -15,6 +15,11 @@ from ashare_quant.config.settings import AppSettings, WalkForwardPlanSettings
 from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.storage import ParquetDataStore
+from ashare_quant.models.feature_provenance import (
+    feature_provenance_hash,
+    feature_provenance_locator,
+    validate_governed_feature_set,
+)
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
 from ashare_quant.models.research_policy import enforce_research_window, load_research_policy
 from ashare_quant.models.temporal_isolation import GapSetting, resolve_temporal_gaps
@@ -24,7 +29,7 @@ from ashare_quant.utils.manifest import (
     current_git_info,
 )
 
-PLAN_SCHEMA_VERSION = 3
+PLAN_SCHEMA_VERSION = 4
 type WalkForwardScheme = Literal["expanding", "rolling"]
 
 
@@ -89,6 +94,7 @@ class PurgedWalkForwardPlanner:
         start_date: str,
         end_date: str,
         scheme: WalkForwardScheme,
+        feature_provenance_path: Path,
         model_id: str | None = None,
         purge_days: int | None = None,
         embargo_days: int | None = None,
@@ -100,6 +106,15 @@ class PurgedWalkForwardPlanner:
 
         _validate_date_range(start_date, end_date)
         model = self._resolve_model(model_id)
+        feature_provenance = validate_governed_feature_set(
+            feature_provenance_path,
+            reports_root=self.reports_root,
+        )
+        provenance_hash = feature_provenance_hash(feature_provenance_path)
+        provenance_locator = feature_provenance_locator(
+            feature_provenance_path,
+            self.reports_root,
+        )
         policy = self.settings.ranker.walk_forward
         configured_purge: GapSetting = policy.purge_days if purge_days is None else purge_days
         configured_embargo: GapSetting = (
@@ -132,6 +147,7 @@ class PurgedWalkForwardPlanner:
             sessions,
             scheme=scheme,
             model=model,
+            feature_hash=feature_provenance.feature_list_hash,
             policy=policy,
             purge_sessions=purge,
             embargo_sessions=embargo,
@@ -155,7 +171,9 @@ class PurgedWalkForwardPlanner:
             end_date=end_date,
             scheme=scheme,
             model_id=model.model_id,
-            feature_hash=model.feature_hash,
+            feature_hash=feature_provenance.feature_list_hash,
+            feature_set_id=feature_provenance.feature_set_id,
+            feature_provenance_hash=provenance_hash,
             horizons=selected_horizons,
             purge=purge,
             embargo=embargo,
@@ -166,9 +184,15 @@ class PurgedWalkForwardPlanner:
         if (output_dir / "manifest.json").is_file():
             existing = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
             existing_folds = json.loads((output_dir / "folds.json").read_text(encoding="utf-8"))
-            if existing.get("run_id") != run_id or existing_folds.get("folds") != [
-                fold.to_dict() for fold in folds
-            ]:
+            if (
+                existing.get("schema_version") != PLAN_SCHEMA_VERSION
+                or existing.get("run_id") != run_id
+                or existing.get("feature_authority") != "governed_feature_set"
+                or existing.get("feature_set_id") != feature_provenance.feature_set_id
+                or existing.get("feature_set_hash") != feature_provenance.feature_list_hash
+                or existing.get("feature_provenance_hash") != provenance_hash
+                or existing_folds.get("folds") != [fold.to_dict() for fold in folds]
+            ):
                 raise DataValidationError(f"walk-forward plan identity conflict: {output_dir}")
             return WalkForwardPlanResult(
                 run_id=run_id,
@@ -199,7 +223,14 @@ class PurgedWalkForwardPlanner:
             "model_id": model.model_id,
             "model_status": model.status,
             "model_artifact_path": model.artifact_path,
-            "feature_hash": model.feature_hash,
+            "reference_model_id": model.model_id,
+            "reference_model_feature_hash": model.feature_hash,
+            "feature_authority": "governed_feature_set",
+            "feature_set_id": feature_provenance.feature_set_id,
+            "feature_hash": feature_provenance.feature_list_hash,
+            "feature_set_hash": feature_provenance.feature_list_hash,
+            "feature_provenance_locator": provenance_locator,
+            "feature_provenance_hash": provenance_hash,
             "research_policy_path": str(research_policy_path),
             "research_policy_hash": research_policy.policy_hash,
             "prospective_lockbox_start": research_policy.prospective_lockbox.start_date,
@@ -289,6 +320,7 @@ def _build_folds(
     *,
     scheme: WalkForwardScheme,
     model: RegisteredModel,
+    feature_hash: str,
     policy: WalkForwardPlanSettings,
     purge_sessions: int,
     embargo_sessions: int,
@@ -327,7 +359,7 @@ def _build_folds(
             evaluation_end=month_dates[-1],
             purge_sessions=purge_sessions,
             embargo_sessions=embargo_sessions,
-            feature_hash=model.feature_hash,
+            feature_hash=feature_hash,
             model_id=model.model_id,
             scheme=scheme,
             train_sessions=train_end_index - train_start_index + 1,
@@ -394,6 +426,8 @@ def _run_id(
     scheme: str,
     model_id: str,
     feature_hash: str,
+    feature_set_id: str,
+    feature_provenance_hash: str,
     horizons: tuple[int, ...],
     purge: int,
     embargo: int,
@@ -407,6 +441,8 @@ def _run_id(
             "scheme": scheme,
             "model_id": model_id,
             "feature_hash": feature_hash,
+            "feature_set_id": feature_set_id,
+            "feature_provenance_hash": feature_provenance_hash,
             "horizons": sorted(set(horizons)),
             "purge": purge,
             "embargo": embargo,

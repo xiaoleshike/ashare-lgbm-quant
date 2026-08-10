@@ -20,7 +20,12 @@ from ashare_quant.backtest.executable_validation import REQUIRED_TOP_N, _signals
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.compute import resolve_training_backend
-from ashare_quant.models.feature_provenance import validate_governed_feature_set
+from ashare_quant.models.feature_provenance import (
+    FeatureSetProvenance,
+    feature_provenance_hash,
+    feature_provenance_locator,
+    validate_governed_feature_set,
+)
 from ashare_quant.models.horizon_experiments import dataset_fingerprint
 from ashare_quant.models.ranker import feature_importance, fit_ranker, ranker_semantic_parameters
 from ashare_quant.models.ranker_data import RankerDataLoader, RankerDataset
@@ -29,7 +34,17 @@ from ashare_quant.models.research_policy import enforce_research_window, load_re
 from ashare_quant.models.temporal_isolation import required_temporal_gap_sessions
 from ashare_quant.utils.manifest import atomic_write_json
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+REQUIRED_FOLD_ARTIFACTS = frozenset(
+    {
+        "model.txt",
+        "predictions.parquet",
+        "validation_metrics.json",
+        "ranking_metrics.json",
+        "executable_metrics.json",
+        "feature_importance.json",
+    }
+)
 type JsonObject = dict[str, Any]
 
 
@@ -249,12 +264,12 @@ class MultiFoldEvaluationRunner:
         experiment = _select_experiment(plan, experiment_id)
         horizon = _required_int(experiment, "horizon")
         policy = load_research_policy(self.research_policy_path)
-        if (
-            plan.get("feature_hash")
-            != validate_governed_feature_set(feature_provenance_path).feature_list_hash
-        ):
-            raise DataValidationError("walk-forward feature-set hash differs from experiment plan")
-        provenance = validate_governed_feature_set(feature_provenance_path)
+        provenance = validate_governed_feature_set(
+            feature_provenance_path,
+            reports_root=self.reports_root,
+        )
+        provenance_sha256 = feature_provenance_hash(feature_provenance_path)
+        _validate_feature_lineage(plan, provenance, provenance_sha256)
         current_source_identity = self.executor.validate_sources(plan)
         folds = _load_eligible_folds(plan, experiment, horizon)
         for fold in folds:
@@ -269,6 +284,7 @@ class MultiFoldEvaluationRunner:
             experiment=experiment,
             fold_ids=tuple(str(fold["fold_id"]) for fold in folds),
             feature_set_id=provenance.feature_set_id,
+            feature_provenance_hash=provenance_sha256,
             research_policy_hash=policy.policy_hash,
             semantic_parameters=ranker_semantic_parameters(self.settings.ranker),
             source_identity=current_source_identity,
@@ -298,6 +314,10 @@ class MultiFoldEvaluationRunner:
                     experiment_identity=identity,
                     horizon=horizon,
                     feature_set_id=provenance.feature_set_id,
+                    feature_set_hash=provenance.feature_list_hash,
+                    feature_provenance_hash=provenance_sha256,
+                    walk_forward_plan_hash=str(plan["folds_manifest_hash"]),
+                    horizon_plan_hash=_file_hash(experiment_manifest),
                     feature_hash=provenance.feature_list_hash,
                     research_policy_hash=policy.policy_hash,
                     semantic_parameters=ranker_semantic_parameters(self.settings.ranker),
@@ -321,8 +341,14 @@ class MultiFoldEvaluationRunner:
             run_id=run_id,
             plan_path=str(experiment_manifest),
             experiment=experiment,
-            feature_provenance_path=str(feature_provenance_path),
+            feature_provenance_path=feature_provenance_locator(
+                feature_provenance_path, self.reports_root
+            ),
             feature_set_id=provenance.feature_set_id,
+            feature_set_hash=provenance.feature_list_hash,
+            feature_provenance_hash=provenance_sha256,
+            walk_forward_plan_hash=str(plan["folds_manifest_hash"]),
+            horizon_plan_hash=_file_hash(experiment_manifest),
             research_policy_path=str(self.research_policy_path),
             research_policy_hash=policy.policy_hash,
             folds=fold_manifests,
@@ -351,14 +377,7 @@ class WalkForwardRecoveryInspector:
             issues.append("top-level manifest missing")
         else:
             try:
-                manifest = _load_json(manifest_path, "walk-forward manifest")
-                expected = manifest.get("fold_manifest_hashes")
-                actual = {
-                    path.parent.name: _file_hash(path)
-                    for path in sorted((root / "folds").glob("*/manifest.json"))
-                }
-                if expected != actual:
-                    issues.append("aggregate child manifest set does not match fold artifacts")
+                validate_completed_walk_forward_artifact(root)
             except DataValidationError as error:
                 issues.append(str(error))
         return {"status": "CLEAN" if not issues else "ACTION_REQUIRED", "issues": issues}
@@ -368,20 +387,11 @@ def walk_forward_status(reports_root: Path, run_id: str) -> JsonObject:
     """Return a validated immutable experiment status snapshot."""
 
     root = reports_root / "research" / "walk_forward" / run_id
-    manifest = _load_json(root / "manifest.json", "walk-forward manifest")
-    if manifest.get("artifact_name") != "multi_fold_walk_forward_evidence":
-        raise DataValidationError("invalid multi-fold walk-forward artifact")
-    expected = manifest.get("fold_manifest_hashes")
-    actual = {
-        path.parent.name: _file_hash(path)
-        for path in sorted((root / "folds").glob("*/manifest.json"))
-    }
-    if expected != actual:
-        raise DataValidationError("walk-forward child manifest hashes changed")
+    manifest = validate_completed_walk_forward_artifact(root)
     return {
         "run_id": run_id,
         "status": manifest.get("status"),
-        "fold_count": len(actual),
+        "fold_count": len(cast(dict[str, str], manifest["fold_manifest_hashes"])),
         "research_policy_hash": manifest.get("research_policy_hash"),
         "feature_set_id": manifest.get("feature_set_id"),
     }
@@ -461,6 +471,41 @@ def _load_eligible_folds(
     return tuple(selected)
 
 
+def _validate_feature_lineage(
+    plan: JsonObject,
+    provenance: FeatureSetProvenance,
+    provenance_sha256: str,
+) -> None:
+    if plan.get("schema_version") != 3 or plan.get("feature_authority") != ("governed_feature_set"):
+        raise DataValidationError("WALK_FORWARD_FEATURE_AUTHORITY_INVALID")
+    expected = (
+        provenance.feature_set_id,
+        provenance.feature_list_hash,
+        provenance_sha256,
+    )
+    actual = (
+        plan.get("feature_set_id"),
+        plan.get("feature_set_hash"),
+        plan.get("feature_provenance_hash"),
+    )
+    if actual != expected or plan.get("feature_hash") != provenance.feature_list_hash:
+        raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH")
+    fold_path = Path(str(plan.get("folds_manifest", "")))
+    fold_manifest = _load_json(fold_path, "walk-forward fold manifest")
+    fold_actual = (
+        fold_manifest.get("feature_set_id"),
+        fold_manifest.get("feature_set_hash"),
+        fold_manifest.get("feature_provenance_hash"),
+    )
+    if (
+        fold_manifest.get("schema_version") != 4
+        or fold_manifest.get("feature_authority") != "governed_feature_set"
+        or fold_actual != expected
+        or fold_manifest.get("feature_hash") != provenance.feature_list_hash
+    ):
+        raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH")
+
+
 def _validate_fold(fold: JsonObject, required_gap: int) -> None:
     if not (
         str(fold.get("train_end", "")) < str(fold.get("validation_start", ""))
@@ -493,6 +538,7 @@ def _experiment_identity(
     experiment: JsonObject,
     fold_ids: tuple[str, ...],
     feature_set_id: str,
+    feature_provenance_hash: str,
     research_policy_hash: str,
     semantic_parameters: JsonObject,
     source_identity: JsonObject,
@@ -504,6 +550,7 @@ def _experiment_identity(
         "experiment_id": experiment.get("experiment_id"),
         "fold_ids": fold_ids,
         "feature_set_id": feature_set_id,
+        "feature_provenance_hash": feature_provenance_hash,
         "research_policy_hash": research_policy_hash,
         "semantic_parameters": semantic_parameters,
         "source_identity": source_identity,
@@ -519,6 +566,10 @@ def _publish_fold(
     experiment_identity: str,
     horizon: int,
     feature_set_id: str,
+    feature_set_hash: str,
+    feature_provenance_hash: str,
+    walk_forward_plan_hash: str,
+    horizon_plan_hash: str,
     feature_hash: str,
     research_policy_hash: str,
     semantic_parameters: JsonObject,
@@ -556,6 +607,10 @@ def _publish_fold(
             "experiment_identity": experiment_identity,
             "horizon": horizon,
             "feature_set_id": feature_set_id,
+            "feature_set_hash": feature_set_hash,
+            "feature_provenance_hash": feature_provenance_hash,
+            "walk_forward_plan_hash": walk_forward_plan_hash,
+            "horizon_plan_hash": horizon_plan_hash,
             "feature_hash": feature_hash,
             "research_policy_hash": research_policy_hash,
             "semantic_parameters": semantic_parameters,
@@ -572,20 +627,11 @@ def _publish_fold(
 def _existing_fold(path: Path, fold: JsonObject, identity: str) -> JsonObject | None:
     if not path.exists():
         return None
-    manifest = _load_json(path / "manifest.json", "fold manifest")
-    raw_fold = manifest.get("fold")
-    if (
-        manifest.get("experiment_identity") != identity
-        or not isinstance(raw_fold, dict)
-        or raw_fold.get("fold_id") != fold.get("fold_id")
-    ):
-        raise DataValidationError(f"fold identity conflict: {path}")
-    hashes = manifest.get("artifact_hashes")
-    if not isinstance(hashes, dict) or any(
-        _file_hash(path / name) != digest for name, digest in hashes.items()
-    ):
-        raise DataValidationError(f"fold artifact hash mismatch: {path}")
-    return manifest
+    return _validate_fold_artifact(
+        path,
+        expected_identity=identity,
+        expected_fold_id=str(fold.get("fold_id", "")),
+    )
 
 
 def _aggregate(folds: list[JsonObject]) -> JsonObject:
@@ -612,6 +658,10 @@ def _publish_aggregate(
     experiment: JsonObject,
     feature_provenance_path: str,
     feature_set_id: str,
+    feature_set_hash: str,
+    feature_provenance_hash: str,
+    walk_forward_plan_hash: str,
+    horizon_plan_hash: str,
     research_policy_path: str,
     research_policy_hash: str,
     folds: list[JsonObject],
@@ -664,6 +714,10 @@ def _publish_aggregate(
         "experiment": experiment,
         "feature_provenance_path": feature_provenance_path,
         "feature_set_id": feature_set_id,
+        "feature_set_hash": feature_set_hash,
+        "feature_provenance_hash": feature_provenance_hash,
+        "walk_forward_plan_hash": walk_forward_plan_hash,
+        "horizon_plan_hash": horizon_plan_hash,
         "research_policy_path": research_policy_path,
         "research_policy_hash": research_policy_hash,
         "fold_manifest_hashes": fold_hashes,
@@ -757,22 +811,135 @@ def _importance_stability(rows: list[JsonObject]) -> list[JsonObject]:
 def _existing_complete(path: Path, identity: str) -> WalkForwardEvaluationResult | None:
     if not (path / "manifest.json").is_file():
         return None
-    manifest = _load_json(path / "manifest.json", "walk-forward manifest")
-    if manifest.get("identity") != identity:
-        raise DataValidationError(f"walk-forward identity conflict: {path}")
-    expected = manifest.get("fold_manifest_hashes")
-    actual = {
-        child.parent.name: _file_hash(child)
-        for child in sorted((path / "folds").glob("*/manifest.json"))
-    }
-    if expected != actual:
-        raise DataValidationError("completed walk-forward child manifests changed")
+    manifest = validate_completed_walk_forward_artifact(path, expected_identity=identity)
     return WalkForwardEvaluationResult(
         str(manifest["run_id"]),
         str(manifest["status"]),
         len(manifest["fold_manifest_hashes"]),
         path,
     )
+
+
+def validate_completed_walk_forward_artifact(
+    path: Path,
+    *,
+    expected_identity: str | None = None,
+) -> JsonObject:
+    """Validate a COMPLETE multi-fold artifact from its root through every leaf."""
+
+    manifest = _load_json(path / "manifest.json", "walk-forward manifest")
+    if (
+        manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("artifact_name") != "multi_fold_walk_forward_evidence"
+        or manifest.get("status") != "COMPLETE"
+        or manifest.get("run_id") != path.name
+    ):
+        raise DataValidationError("WALK_FORWARD_MANIFEST_INVALID")
+    identity = manifest.get("identity")
+    if not isinstance(identity, str) or not identity:
+        raise DataValidationError("WALK_FORWARD_MANIFEST_INVALID: identity missing")
+    if expected_identity is not None and identity != expected_identity:
+        raise DataValidationError(f"walk-forward identity conflict: {path}")
+    expected_root_entries = {
+        "aggregate_metrics.json",
+        "fold_summary.parquet",
+        "folds",
+        "manifest.json",
+    }
+    if {child.name for child in path.iterdir()} != expected_root_entries:
+        raise DataValidationError("WALK_FORWARD_ROOT_ARTIFACT_SET_MISMATCH")
+    _validate_root_hash(
+        path / "aggregate_metrics.json",
+        manifest.get("aggregate_metrics_sha256"),
+        "WALK_FORWARD_AGGREGATE_HASH_MISMATCH",
+    )
+    _validate_root_hash(
+        path / "fold_summary.parquet",
+        manifest.get("fold_summary_sha256"),
+        "WALK_FORWARD_FOLD_SUMMARY_HASH_MISMATCH",
+    )
+    expected = manifest.get("fold_manifest_hashes")
+    if (
+        not isinstance(expected, dict)
+        or not expected
+        or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in expected.items()
+        )
+    ):
+        raise DataValidationError("WALK_FORWARD_MANIFEST_INVALID: fold hashes missing")
+    fold_root = path / "folds"
+    actual_ids = (
+        {child.name for child in fold_root.iterdir() if child.is_dir()}
+        if fold_root.is_dir()
+        else set()
+    )
+    if set(expected) != actual_ids:
+        raise DataValidationError(
+            "WALK_FORWARD_CHILD_SET_MISMATCH: "
+            f"expected={sorted(expected)} actual={sorted(actual_ids)}"
+        )
+    for fold_id, digest in cast(dict[str, str], expected).items():
+        fold_dir = fold_root / fold_id
+        _validate_root_hash(
+            fold_dir / "manifest.json",
+            digest,
+            f"WALK_FORWARD_CHILD_MANIFEST_HASH_MISMATCH: {fold_id}",
+        )
+        _validate_fold_artifact(
+            fold_dir,
+            expected_identity=identity,
+            expected_fold_id=fold_id,
+            expected_lineage={
+                "feature_set_id": manifest.get("feature_set_id"),
+                "feature_set_hash": manifest.get("feature_set_hash"),
+                "feature_provenance_hash": manifest.get("feature_provenance_hash"),
+                "walk_forward_plan_hash": manifest.get("walk_forward_plan_hash"),
+                "horizon_plan_hash": manifest.get("horizon_plan_hash"),
+            },
+        )
+    return manifest
+
+
+def _validate_fold_artifact(
+    path: Path,
+    *,
+    expected_identity: str,
+    expected_fold_id: str,
+    expected_lineage: JsonObject | None = None,
+) -> JsonObject:
+    manifest = _load_json(path / "manifest.json", "fold manifest")
+    raw_fold = manifest.get("fold")
+    if (
+        manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("artifact_name") != "walk_forward_fold_evidence"
+        or manifest.get("technical_status") != "VALID"
+        or manifest.get("experiment_identity") != expected_identity
+        or not isinstance(raw_fold, dict)
+        or raw_fold.get("fold_id") != expected_fold_id
+    ):
+        raise DataValidationError(f"WALK_FORWARD_FOLD_MANIFEST_INVALID: {expected_fold_id}")
+    hashes = manifest.get("artifact_hashes")
+    if expected_lineage is not None and any(
+        not isinstance(value, str) or not value or manifest.get(key) != value
+        for key, value in expected_lineage.items()
+    ):
+        raise DataValidationError(f"WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH: {expected_fold_id}")
+    if not isinstance(hashes, dict) or set(hashes) != REQUIRED_FOLD_ARTIFACTS:
+        raise DataValidationError(f"WALK_FORWARD_FOLD_ARTIFACT_SET_MISMATCH: {expected_fold_id}")
+    for name, digest in cast(dict[str, str], hashes).items():
+        _validate_root_hash(
+            path / name,
+            digest,
+            f"WALK_FORWARD_CHILD_ARTIFACT_HASH_MISMATCH: {expected_fold_id}/{name}",
+        )
+    if {child.name for child in path.iterdir()} != REQUIRED_FOLD_ARTIFACTS | {"manifest.json"}:
+        raise DataValidationError(f"WALK_FORWARD_FOLD_ARTIFACT_SET_MISMATCH: {expected_fold_id}")
+    return manifest
+
+
+def _validate_root_hash(path: Path, expected: object, reason: str) -> None:
+    if not isinstance(expected, str) or not path.is_file() or _file_hash(path) != expected:
+        raise DataValidationError(reason)
 
 
 def _load_json(path: Path, description: str) -> JsonObject:

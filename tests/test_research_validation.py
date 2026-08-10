@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -100,7 +101,7 @@ def test_governed_feature_provenance_requires_complete_sources(tmp_path: Path) -
 
 
 def test_governed_feature_set_is_created_from_exact_diagnostics(tmp_path: Path) -> None:
-    diagnostics = tmp_path / "diagnostics" / "run_1"
+    diagnostics = tmp_path / "reports" / "feature_diagnostics" / "run_1"
     diagnostics.mkdir(parents=True)
     atomic_write_json(
         diagnostics / "manifest.json",
@@ -121,7 +122,7 @@ def test_governed_feature_set_is_created_from_exact_diagnostics(tmp_path: Path) 
     )
     created = create_governed_feature_set(
         diagnostics_dir=diagnostics,
-        output_root=tmp_path / "feature_selection",
+        output_root=tmp_path / "reports" / "feature_selection",
         feature_set_name="fixture",
         feature_set_version="v1",
         created_by="pytest",
@@ -213,11 +214,124 @@ def test_multi_fold_runner_rejects_corrupt_completed_fold(tmp_path: Path) -> Non
         )
     fold_one = next((tmp_path / "reports" / "research" / "walk_forward").glob("*/folds/fold_1"))
     (fold_one / "ranking_metrics.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(DataValidationError, match="hash mismatch"):
+    with pytest.raises(DataValidationError, match="HASH_MISMATCH"):
         runner.run(
             experiment_manifest=plan,
             experiment_id="h5_fixture",
             feature_provenance_path=provenance,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("aggregate", "summary", "fold_manifest", "fold_child", "extra_fold", "missing_fold"),
+)
+def test_completed_walk_forward_tamper_fails_status_resume_and_recovery(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    plan, provenance = _research_fixture(tmp_path)
+    runner = MultiFoldEvaluationRunner(
+        reports_root=tmp_path / "reports",
+        settings=AppSettings.model_validate({}),
+        executor=FakeExecutor(),
+    )
+    result = runner.run(
+        experiment_manifest=plan,
+        experiment_id="h5_fixture",
+        feature_provenance_path=provenance,
+    )
+    if mutation == "aggregate":
+        target = result.output_dir / "aggregate_metrics.json"
+        target.write_bytes(target.read_bytes() + b"\n")
+    elif mutation == "summary":
+        target = result.output_dir / "fold_summary.parquet"
+        target.write_bytes(target.read_bytes() + b"tamper")
+    elif mutation == "fold_manifest":
+        target = result.output_dir / "folds" / "fold_1" / "manifest.json"
+        target.write_bytes(target.read_bytes() + b"\n")
+    elif mutation == "fold_child":
+        target = result.output_dir / "folds" / "fold_1" / "ranking_metrics.json"
+        target.write_text("{}", encoding="utf-8")
+    elif mutation == "extra_fold":
+        extra = result.output_dir / "folds" / "unexpected_fold"
+        extra.mkdir()
+        atomic_write_json(extra / "manifest.json", {"artifact_name": "unexpected"})
+    else:
+        shutil.rmtree(result.output_dir / "folds" / "fold_1")
+    root_manifest = (result.output_dir / "manifest.json").read_bytes()
+
+    with pytest.raises(DataValidationError):
+        walk_forward_status(tmp_path / "reports", result.experiment_id)
+    with pytest.raises(DataValidationError):
+        runner.run(
+            experiment_manifest=plan,
+            experiment_id="h5_fixture",
+            feature_provenance_path=provenance,
+        )
+    recovery = WalkForwardRecoveryInspector(tmp_path / "reports").inspect(result.experiment_id)
+    assert recovery["status"] == "ACTION_REQUIRED"
+    assert recovery["issues"]
+    assert (result.output_dir / "manifest.json").read_bytes() == root_manifest
+
+
+def test_feature_set_identity_is_path_and_time_independent_and_relocatable(
+    tmp_path: Path,
+) -> None:
+    _, first_path = _research_fixture(tmp_path / "checkout_a")
+    _, independent_path = _research_fixture(tmp_path / "checkout_b")
+    first = load_feature_set_provenance(first_path)
+    independent = load_feature_set_provenance(independent_path)
+    assert independent.feature_set_id == first.feature_set_id
+    second = first.model_copy(
+        update={
+            "created_at": "2030-01-01T00:00:00+00:00",
+            "source_diagnostics_manifest_path": "/different/checkout/manifest.json",
+        }
+    )
+    assert second.feature_set_id == first.feature_set_id
+
+    relocated_root = tmp_path / "checkout_c" / "reports"
+    shutil.copytree(tmp_path / "checkout_a" / "reports", relocated_root)
+    relocated_path = relocated_root / first_path.relative_to(tmp_path / "checkout_a" / "reports")
+    validated = validate_governed_feature_set(relocated_path, reports_root=relocated_root)
+    assert validated.feature_set_id == first.feature_set_id
+
+
+def test_feature_provenance_source_missing_or_changed_fails_closed(tmp_path: Path) -> None:
+    _, provenance_path = _research_fixture(tmp_path)
+    provenance = load_feature_set_provenance(provenance_path)
+    source = tmp_path / "reports" / str(provenance.source_diagnostics_manifest_locator)
+    source.write_text("{}", encoding="utf-8")
+    with pytest.raises(DataValidationError, match="SOURCE_HASH_MISMATCH"):
+        validate_governed_feature_set(provenance_path, reports_root=tmp_path / "reports")
+    source.unlink()
+    with pytest.raises(DataValidationError, match="SOURCE_MISSING"):
+        validate_governed_feature_set(provenance_path, reports_root=tmp_path / "reports")
+
+
+def test_multi_fold_rejects_different_or_tampered_feature_provenance(tmp_path: Path) -> None:
+    plan, provenance_path = _research_fixture(tmp_path)
+    original = load_feature_set_provenance(provenance_path)
+    mismatched = original.model_copy(
+        update={
+            "feature_set_name": "different",
+            "created_at": "2026-08-09T01:00:00+00:00",
+        }
+    )
+    different_path = provenance_path.parent.parent / "different" / "feature_set.json"
+    different_path.parent.mkdir()
+    atomic_write_json(different_path, mismatched.model_dump(mode="json"))
+    runner = MultiFoldEvaluationRunner(
+        reports_root=tmp_path / "reports",
+        settings=AppSettings.model_validate({}),
+        executor=FakeExecutor(),
+    )
+    with pytest.raises(DataValidationError, match="FEATURE_PROVENANCE_MISMATCH"):
+        runner.run(
+            experiment_manifest=plan,
+            experiment_id="h5_fixture",
+            feature_provenance_path=different_path,
         )
 
 
@@ -364,10 +478,15 @@ class FakeExecutor:
 
 def _research_fixture(tmp_path: Path) -> tuple[Path, Path]:
     features = ("f1", "f2")
-    diagnostics_manifest = tmp_path / "diagnostics_manifest.json"
+    reports_root = tmp_path / "reports"
+    diagnostics_dir = reports_root / "feature_diagnostics" / "fixture"
+    diagnostics_dir.mkdir(parents=True)
+    diagnostics_manifest = diagnostics_dir / "manifest.json"
+    recommendation = diagnostics_dir / "recommended_features.json"
     atomic_write_json(diagnostics_manifest, {"artifact_name": "feature_diagnostics"})
+    atomic_write_json(recommendation, {"recommended_features": list(features)})
     provenance = FeatureSetProvenance(
-        schema_version=1,
+        schema_version=2,
         artifact_name="feature_set_provenance",
         feature_set_name="fixture",
         feature_set_version="v1",
@@ -379,15 +498,20 @@ def _research_fixture(tmp_path: Path) -> tuple[Path, Path]:
         selection_start="20100101",
         selection_end="20191231",
         source_diagnostics_run_id="fixture",
-        source_diagnostics_manifest_path=str(diagnostics_manifest),
+        source_diagnostics_manifest_locator="feature_diagnostics/fixture/manifest.json",
         source_diagnostics_manifest_hash=hashlib.sha256(
             diagnostics_manifest.read_bytes()
         ).hexdigest(),
+        source_recommendation_locator="feature_diagnostics/fixture/recommended_features.json",
+        source_recommendation_hash=hashlib.sha256(recommendation.read_bytes()).hexdigest(),
         source_feature_universe_hash="feature-universe-fixture",
         created_at="2026-08-09T00:00:00+00:00",
         created_by="pytest",
     )
-    provenance_path = tmp_path / "feature_set.json"
+    provenance_path = (
+        reports_root / "feature_selection" / provenance.feature_set_id / "feature_set.json"
+    )
+    provenance_path.parent.mkdir(parents=True)
     atomic_write_json(provenance_path, provenance.model_dump(mode="json"))
     fold_dir = tmp_path / "walk_forward_plan"
     fold_dir.mkdir()
@@ -411,12 +535,19 @@ def _research_fixture(tmp_path: Path) -> tuple[Path, Path]:
         references.append(
             {"fold_id": fold_id, "evaluation_start": evaluation, "evaluation_end": evaluation}
         )
-    atomic_write_json(fold_dir / "folds.json", {"folds": fold_rows})
+    atomic_write_json(fold_dir / "folds.json", {"schema_version": 4, "folds": fold_rows})
     fold_manifest = fold_dir / "manifest.json"
     atomic_write_json(
         fold_manifest,
         {
+            "schema_version": 4,
             "artifact_name": "purged_walk_forward_plan",
+            "feature_authority": "governed_feature_set",
+            "feature_set_id": provenance.feature_set_id,
+            "feature_hash": provenance.feature_list_hash,
+            "feature_set_hash": provenance.feature_list_hash,
+            "feature_provenance_locator": str(provenance_path.relative_to(reports_root)),
+            "feature_provenance_hash": hashlib.sha256(provenance_path.read_bytes()).hexdigest(),
             "outputs": {"folds": "folds.json"},
         },
     )
@@ -424,9 +555,14 @@ def _research_fixture(tmp_path: Path) -> tuple[Path, Path]:
     atomic_write_json(
         plan,
         {
+            "schema_version": 3,
             "artifact_name": "multi_horizon_experiment_plan",
             "plan_identity_hash": "plan-fixture",
+            "feature_authority": "governed_feature_set",
+            "feature_set_id": provenance.feature_set_id,
             "feature_hash": feature_list_hash(features),
+            "feature_set_hash": feature_list_hash(features),
+            "feature_provenance_hash": hashlib.sha256(provenance_path.read_bytes()).hexdigest(),
             "universe_hash": "universe-fixture",
             "labels_fingerprint": "labels-fixture",
             "folds_manifest": str(fold_manifest),

@@ -17,6 +17,10 @@ from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.compute.backend import resolve_training_backend
 from ashare_quant.models.compute.schemas import TrainingRuntimeMetadata
 from ashare_quant.models.feature_lists import feature_list_hash
+from ashare_quant.models.feature_provenance import (
+    feature_provenance_hash,
+    validate_governed_feature_set,
+)
 from ashare_quant.models.ranker import (
     feature_importance,
     fit_ranker,
@@ -29,8 +33,7 @@ from ashare_quant.models.temporal_isolation import required_temporal_gap_session
 from ashare_quant.utils.manifest import config_hash, current_git_info
 
 CHALLENGER_MANIFEST_SCHEMA_VERSION = 1
-HORIZON_PLAN_SCHEMA_VERSION = 2
-WALK_FORWARD_SCHEMA_VERSION = 2
+HORIZON_PLAN_SCHEMA_VERSIONS = frozenset({2, 3})
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +88,7 @@ class ChallengerTrainer:
             else (_select_experiment(experiments, cast(str, experiment_id)),)
         )
         source_model = self._source_model(plan)
-        features = _load_features(Path(source_model.artifact_path) / "feature_list.json")
+        features = self._plan_features(plan, source_model)
         if feature_list_hash(features) != str(plan["feature_hash"]):
             raise DataValidationError(
                 "source model feature list does not match horizon experiment feature_hash"
@@ -96,6 +99,13 @@ class ChallengerTrainer:
             expected_manifest_hash=str(plan["folds_manifest_hash"]),
             expected_folds_hash=str(plan["folds_hash"]),
             expected_feature_hash=str(plan["feature_hash"]),
+            expected_schema_version=4 if plan.get("schema_version") == 3 else 2,
+            expected_feature_set_id=(
+                str(plan["feature_set_id"]) if plan.get("schema_version") == 3 else None
+            ),
+            expected_feature_provenance_hash=(
+                str(plan["feature_provenance_hash"]) if plan.get("schema_version") == 3 else None
+            ),
         )
         del fold_manifest
         return tuple(
@@ -132,9 +142,9 @@ class ChallengerTrainer:
     def _validate_plan(self, plan_path: Path, plan: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         if plan.get("artifact_name") != "multi_horizon_experiment_plan":
             raise DataValidationError(f"not a horizon experiment plan: {plan_path}")
-        if _required_int(plan, "schema_version") != HORIZON_PLAN_SCHEMA_VERSION:
+        if _required_int(plan, "schema_version") not in HORIZON_PLAN_SCHEMA_VERSIONS:
             raise DataValidationError(
-                "challenger training requires horizon experiment schema version 2"
+                "challenger training requires horizon experiment schema version 2 or 3"
             )
         current_config_hash = config_hash(self.config_path)
         if current_config_hash is None:
@@ -166,6 +176,31 @@ class ChallengerTrainer:
         if any(not value for value in ids) or len(ids) != len(set(ids)):
             raise DataValidationError("horizon experiment IDs must be non-empty and unique")
         return records
+
+    def _plan_features(
+        self,
+        plan: dict[str, Any],
+        source_model: RegisteredModel,
+    ) -> tuple[str, ...]:
+        if plan.get("schema_version") == 2:
+            return _load_features(Path(source_model.artifact_path) / "feature_list.json")
+        if plan.get("feature_authority") != "governed_feature_set":
+            raise DataValidationError("WALK_FORWARD_FEATURE_AUTHORITY_INVALID")
+        locator = plan.get("feature_provenance_locator")
+        if not isinstance(locator, str) or not locator:
+            raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH")
+        provenance_path = self.reports_root / locator
+        if feature_provenance_hash(provenance_path) != plan.get("feature_provenance_hash"):
+            raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH")
+        provenance = validate_governed_feature_set(
+            provenance_path,
+            reports_root=self.reports_root,
+        )
+        if provenance.feature_set_id != plan.get(
+            "feature_set_id"
+        ) or provenance.feature_list_hash != plan.get("feature_set_hash"):
+            raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH")
+        return provenance.features
 
     def _source_model(self, plan: dict[str, Any]) -> RegisteredModel:
         source_model_id = str(plan.get("source_model_id", ""))
@@ -504,23 +539,36 @@ def _load_and_validate_folds(
     expected_manifest_hash: str,
     expected_folds_hash: str,
     expected_feature_hash: str,
+    expected_schema_version: int = 2,
+    expected_feature_set_id: str | None = None,
+    expected_feature_provenance_hash: str | None = None,
 ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     if _file_hash(manifest_path) != expected_manifest_hash:
         raise DataValidationError("walk-forward manifest hash differs from horizon plan")
     manifest = _load_json(manifest_path, "walk-forward manifest")
     if manifest.get("artifact_name") != "purged_walk_forward_plan":
         raise DataValidationError("fold manifest is not a purged walk-forward plan")
-    if _required_int(manifest, "schema_version") != WALK_FORWARD_SCHEMA_VERSION:
-        raise DataValidationError("challenger training requires fold schema version 2")
+    if _required_int(manifest, "schema_version") != expected_schema_version:
+        raise DataValidationError(
+            f"challenger training requires fold schema version {expected_schema_version}"
+        )
     if manifest.get("feature_hash") != expected_feature_hash:
         raise DataValidationError("walk-forward feature_hash differs from horizon plan")
+    if expected_schema_version == 4 and (
+        manifest.get("feature_authority") != "governed_feature_set"
+        or manifest.get("feature_set_id") != expected_feature_set_id
+        or manifest.get("feature_provenance_hash") != expected_feature_provenance_hash
+    ):
+        raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH")
     outputs = _required_mapping(manifest, "outputs")
     folds_path = _resolve_manifest_output(manifest_path, str(outputs.get("folds", "")))
     if _file_hash(folds_path) != expected_folds_hash:
         raise DataValidationError("walk-forward folds hash differs from horizon plan")
     payload = _load_json(folds_path, "walk-forward folds")
-    if _required_int(payload, "schema_version") != WALK_FORWARD_SCHEMA_VERSION:
-        raise DataValidationError("challenger training requires folds schema version 2")
+    if _required_int(payload, "schema_version") != expected_schema_version:
+        raise DataValidationError(
+            f"challenger training requires folds schema version {expected_schema_version}"
+        )
     raw_folds = payload.get("folds")
     if not isinstance(raw_folds, list) or not raw_folds:
         raise DataValidationError("walk-forward folds are missing or empty")

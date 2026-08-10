@@ -494,6 +494,11 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "--model-id", default=None, help="Registered model identity; defaults to champion."
     )
     walk_forward.add_argument(
+        "--feature-provenance",
+        required=True,
+        help="Governed feature_set.json that is authoritative for this research plan.",
+    )
+    walk_forward.add_argument(
         "--purge-days", type=int, default=None, help="Override purged trading sessions."
     )
     walk_forward.add_argument(
@@ -1928,6 +1933,7 @@ def run_models_command(args: argparse.Namespace) -> int:
                 start_date=args.start_date,
                 end_date=args.end_date,
                 scheme=args.scheme,
+                feature_provenance_path=Path(args.feature_provenance),
                 model_id=args.model_id,
                 purge_days=args.purge_days,
                 embargo_days=args.embargo_days,

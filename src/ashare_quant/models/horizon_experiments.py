@@ -16,12 +16,16 @@ from ashare_quant.config.settings import AppSettings, HorizonExperimentSettings
 from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.storage import ParquetDataStore
+from ashare_quant.models.feature_provenance import (
+    feature_provenance_hash,
+    validate_governed_feature_set,
+)
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
 from ashare_quant.models.research_policy import enforce_research_window, load_research_policy
 from ashare_quant.models.temporal_isolation import required_temporal_gap_sessions
 from ashare_quant.utils.manifest import atomic_write_json, config_hash, current_git_info
 
-HORIZON_PLAN_SCHEMA_VERSION = 2
+HORIZON_PLAN_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +70,10 @@ class MultiHorizonExperimentPlanner:
         fold_path, fold_manifest, fold_payload = self._resolve_folds_manifest(
             folds_manifest,
             required_gap=required_temporal_gap_sessions(maximum_horizon),
-            feature_hash=champion.feature_hash,
         )
+        feature_hash = str(fold_manifest["feature_set_hash"])
+        feature_set_id = str(fold_manifest["feature_set_id"])
+        feature_provenance_sha256 = str(fold_manifest["feature_provenance_hash"])
         sessions = _load_open_sessions(self.raw_root)
         selection_period = self.settings.models.selection_period
         final_test_period = self.settings.models.final_test_period
@@ -109,7 +115,9 @@ class MultiHorizonExperimentPlanner:
             "schema_version": HORIZON_PLAN_SCHEMA_VERSION,
             "source_model_id": champion.model_id,
             "model_type": champion.model_type,
-            "feature_hash": champion.feature_hash,
+            "feature_hash": feature_hash,
+            "feature_set_id": feature_set_id,
+            "feature_provenance_hash": feature_provenance_sha256,
             "universe_hash": universe_hash,
             "features_manifest_hash": features_manifest_hash,
             "config_hash": resolved_config_hash,
@@ -148,7 +156,7 @@ class MultiHorizonExperimentPlanner:
                 experiment,
                 identity_hash=identity_hash,
                 created_time=created_time,
-                feature_hash=champion.feature_hash,
+                feature_hash=feature_hash,
                 universe_hash=universe_hash,
                 config_hash_value=resolved_config_hash,
                 model_type=champion.model_type,
@@ -177,8 +185,15 @@ class MultiHorizonExperimentPlanner:
             "config_hash": resolved_config_hash,
             "source_model_id": champion.model_id,
             "source_model_status": champion.status,
+            "reference_champion_model_id": champion.model_id,
+            "reference_champion_feature_hash": champion.feature_hash,
             "model_type": champion.model_type,
-            "feature_hash": champion.feature_hash,
+            "feature_authority": "governed_feature_set",
+            "feature_set_id": feature_set_id,
+            "feature_hash": feature_hash,
+            "feature_set_hash": feature_hash,
+            "feature_provenance_locator": fold_manifest["feature_provenance_locator"],
+            "feature_provenance_hash": feature_provenance_sha256,
             "universe_hash": universe_hash,
             "universe_manifest": str(universe_manifest_path.resolve()),
             "universe_manifest_identity": {
@@ -238,14 +253,12 @@ class MultiHorizonExperimentPlanner:
         requested: Path | None,
         *,
         required_gap: int,
-        feature_hash: str,
     ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
         if requested is not None:
             path = requested / "manifest.json" if requested.is_dir() else requested
             manifest, folds = _validate_folds_manifest(
                 path,
                 required_gap=required_gap,
-                feature_hash=feature_hash,
             )
             return path, manifest, folds
 
@@ -258,7 +271,6 @@ class MultiHorizonExperimentPlanner:
                 manifest, folds = _validate_folds_manifest(
                     path,
                     required_gap=required_gap,
-                    feature_hash=feature_hash,
                 )
             except DataValidationError as error:
                 failures.append(f"{path}: {error}")
@@ -275,17 +287,30 @@ def _validate_folds_manifest(
     path: Path,
     *,
     required_gap: int,
-    feature_hash: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest = _load_json(path, "walk-forward manifest")
     if manifest.get("artifact_name") != "purged_walk_forward_plan":
         raise DataValidationError(f"not a purged walk-forward manifest: {path}")
-    if _required_int(manifest, "schema_version") < 2:
+    if _required_int(manifest, "schema_version") != 4:
         raise DataValidationError(
-            "walk-forward manifest predates horizon-agnostic schema version 2"
+            "WALK_FORWARD_FEATURE_AUTHORITY_INVALID: schema-v4 governed plan required"
         )
-    if manifest.get("feature_hash") != feature_hash:
-        raise DataValidationError("walk-forward feature_hash does not match champion feature_hash")
+    if manifest.get("feature_authority") != "governed_feature_set":
+        raise DataValidationError("WALK_FORWARD_FEATURE_AUTHORITY_INVALID")
+    reports_root = path.resolve().parents[2]
+    locator = manifest.get("feature_provenance_locator")
+    if not isinstance(locator, str) or not locator:
+        raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH: locator missing")
+    provenance_path = reports_root / locator
+    if feature_provenance_hash(provenance_path) != manifest.get("feature_provenance_hash"):
+        raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH: hash changed")
+    provenance = validate_governed_feature_set(provenance_path, reports_root=reports_root)
+    if (
+        provenance.feature_set_id != manifest.get("feature_set_id")
+        or provenance.feature_list_hash != manifest.get("feature_set_hash")
+        or manifest.get("feature_hash") != manifest.get("feature_set_hash")
+    ):
+        raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH: identity changed")
     policy = manifest.get("policy")
     if not isinstance(policy, dict):
         raise DataValidationError("walk-forward manifest has no policy")
@@ -304,6 +329,10 @@ def _validate_folds_manifest(
         )
     folds_file = _folds_file(path, manifest)
     folds_payload = _load_json(folds_file, "walk-forward folds")
+    if _required_int(folds_payload, "schema_version") != 4:
+        raise DataValidationError(
+            "WALK_FORWARD_FEATURE_AUTHORITY_INVALID: folds schema-v4 required"
+        )
     folds = folds_payload.get("folds")
     if not isinstance(folds, list) or not folds:
         raise DataValidationError("walk-forward folds are missing or empty")
@@ -313,6 +342,8 @@ def _validate_folds_manifest(
             raise DataValidationError("walk-forward fold must be an object")
         fold_id = str(fold.get("fold_id", ""))
         fold_ids.append(fold_id)
+        if fold.get("feature_hash") != manifest.get("feature_set_hash"):
+            raise DataValidationError("WALK_FORWARD_FEATURE_PROVENANCE_MISMATCH: fold feature")
         fixed_fold_fields = {"label_horizon", "label_exit_lag_sessions"} & set(fold)
         if fixed_fold_fields:
             raise DataValidationError(f"fold contains fixed-horizon maturity fields: {fold_id}")

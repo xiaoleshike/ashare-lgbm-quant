@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.models.feature_lists import feature_list_hash
+from ashare_quant.models.feature_provenance import FeatureSetProvenance
 from ashare_quant.models.registry import ModelRegistry
 from ashare_quant.models.walk_forward import (
     PurgedWalkForwardPlanner,
@@ -22,12 +24,13 @@ from ashare_quant.models.walk_forward import (
 def test_expanding_plan_has_strict_chronology_and_leakage_boundaries(
     tmp_path: Path,
 ) -> None:
-    planner, sessions = _planner_fixture(tmp_path)
+    planner, sessions, provenance = _planner_fixture(tmp_path)
 
     result = planner.build(
         start_date="20200104",
         end_date="20200630",
         scheme="expanding",
+        feature_provenance_path=provenance,
     )
     folds = _read_folds(result.output_dir)
     positions = {date: index for index, date in enumerate(sessions)}
@@ -45,12 +48,13 @@ def test_expanding_plan_has_strict_chronology_and_leakage_boundaries(
 
 
 def test_rolling_plan_uses_fixed_trading_session_window(tmp_path: Path) -> None:
-    planner, _ = _planner_fixture(tmp_path)
+    planner, _, provenance = _planner_fixture(tmp_path)
 
     result = planner.build(
         start_date="20200104",
         end_date="20200630",
         scheme="rolling",
+        feature_provenance_path=provenance,
     )
     folds = _read_folds(result.output_dir)
 
@@ -60,12 +64,13 @@ def test_rolling_plan_uses_fixed_trading_session_window(tmp_path: Path) -> None:
 
 
 def test_non_trading_request_boundaries_map_only_to_open_sessions(tmp_path: Path) -> None:
-    planner, sessions = _planner_fixture(tmp_path)
+    planner, sessions, provenance = _planner_fixture(tmp_path)
 
     result = planner.build(
         start_date="20200104",  # Saturday
         end_date="20200628",  # Sunday
         scheme="expanding",
+        feature_provenance_path=provenance,
     )
 
     for fold in _read_folds(result.output_dir):
@@ -82,13 +87,14 @@ def test_non_trading_request_boundaries_map_only_to_open_sessions(tmp_path: Path
 
 
 def test_walk_forward_rejects_unsafe_explicit_horizon_gap(tmp_path: Path) -> None:
-    planner, _ = _planner_fixture(tmp_path)
+    planner, _, provenance = _planner_fixture(tmp_path)
 
     with pytest.raises(DataValidationError, match="required=6"):
         planner.build(
             start_date="20200104",
             end_date="20200630",
             scheme="expanding",
+            feature_provenance_path=provenance,
             purge_days=2,
             embargo_days=2,
             horizons=(5,),
@@ -96,12 +102,13 @@ def test_walk_forward_rejects_unsafe_explicit_horizon_gap(tmp_path: Path) -> Non
 
 
 def test_plan_manifest_records_fold_model_and_calendar_provenance(tmp_path: Path) -> None:
-    planner, sessions = _planner_fixture(tmp_path)
+    planner, sessions, provenance = _planner_fixture(tmp_path)
 
     result = planner.build(
         start_date="20200104",
         end_date="20200630",
         scheme="expanding",
+        feature_provenance_path=provenance,
     )
     manifest = json.loads((result.output_dir / "manifest.json").read_text(encoding="utf-8"))
     folds = _read_folds(result.output_dir)
@@ -109,7 +116,9 @@ def test_plan_manifest_records_fold_model_and_calendar_provenance(tmp_path: Path
     assert {path.name for path in result.output_dir.iterdir()} == {"folds.json", "manifest.json"}
     assert manifest["artifact_name"] == "purged_walk_forward_plan"
     assert manifest["model_id"] == "walk_forward_fixture"
-    assert manifest["feature_hash"] == feature_list_hash(("f1", "f2"))
+    assert manifest["feature_hash"] == feature_list_hash(("f1", "f3"))
+    assert manifest["feature_hash"] != manifest["reference_model_feature_hash"]
+    assert manifest["feature_authority"] == "governed_feature_set"
     assert manifest["fold_count"] == len(folds)
     assert manifest["trade_calendar"]["session_count"] == len(sessions)
     assert manifest["leakage_contract"]["labels_loaded"] is False
@@ -136,32 +145,46 @@ def test_plan_manifest_records_fold_model_and_calendar_provenance(tmp_path: Path
 
 
 def test_plan_needs_no_labels_features_or_model_training(tmp_path: Path) -> None:
-    planner, _ = _planner_fixture(tmp_path)
+    planner, _, provenance = _planner_fixture(tmp_path)
     assert not (tmp_path / "processed").exists()
     result = planner.build(
         start_date="20200104",
         end_date="20200630",
         scheme="expanding",
+        feature_provenance_path=provenance,
     )
     assert result.fold_count > 0
     assert not (tmp_path / "processed").exists()
 
 
 def test_walk_forward_plan_identity_is_deterministic(tmp_path: Path) -> None:
-    planner, _ = _planner_fixture(tmp_path)
+    planner, _, provenance = _planner_fixture(tmp_path)
     first = planner.build(
         start_date="20200104",
         end_date="20200630",
         scheme="expanding",
+        feature_provenance_path=provenance,
     )
     manifest_bytes = (first.output_dir / "manifest.json").read_bytes()
     second = planner.build(
         start_date="20200104",
         end_date="20200630",
         scheme="expanding",
+        feature_provenance_path=provenance,
     )
     assert second.run_id == first.run_id
     assert (second.output_dir / "manifest.json").read_bytes() == manifest_bytes
+
+
+def test_walk_forward_plan_rejects_legacy_feature_authority(tmp_path: Path) -> None:
+    planner, _, _ = _planner_fixture(tmp_path)
+    with pytest.raises(DataValidationError, match="LEGACY_PROVENANCE_INCOMPLETE"):
+        planner.build(
+            start_date="20200104",
+            end_date="20200630",
+            scheme="expanding",
+            feature_provenance_path=Path("config/feature_sets/robust_20_v1.provenance.json"),
+        )
 
 
 def test_models_walk_forward_cli_success_and_failure(
@@ -190,6 +213,8 @@ def test_models_walk_forward_cli_success_and_failure(
         "20260717",
         "--scheme",
         "expanding",
+        "--feature-provenance",
+        str(tmp_path / "feature_set.json"),
     ]
     assert main(command) == 0
     assert "walk_forward_plan: run_id=run" in capsys.readouterr().out
@@ -202,7 +227,9 @@ def test_models_walk_forward_cli_success_and_failure(
     assert "calendar unavailable" in capsys.readouterr().err
 
 
-def _planner_fixture(tmp_path: Path) -> tuple[PurgedWalkForwardPlanner, tuple[str, ...]]:
+def _planner_fixture(
+    tmp_path: Path,
+) -> tuple[PurgedWalkForwardPlanner, tuple[str, ...], Path]:
     raw_root = tmp_path / "raw"
     models_root = tmp_path / "models"
     reports_root = tmp_path / "reports"
@@ -238,6 +265,7 @@ def _planner_fixture(tmp_path: Path) -> tuple[PurgedWalkForwardPlanner, tuple[st
     )
     config_path = tmp_path / "config.yaml"
     config_path.write_text("ranker: fixture\n", encoding="utf-8")
+    provenance = _write_governed_provenance(reports_root, ("f1", "f3"))
     return (
         PurgedWalkForwardPlanner(
             raw_root=raw_root,
@@ -247,7 +275,48 @@ def _planner_fixture(tmp_path: Path) -> tuple[PurgedWalkForwardPlanner, tuple[st
             config_path=config_path,
         ),
         sessions,
+        provenance,
     )
+
+
+def _write_governed_provenance(reports_root: Path, features: tuple[str, ...]) -> Path:
+    diagnostics = reports_root / "feature_diagnostics" / "fixture"
+    diagnostics.mkdir(parents=True)
+    manifest = diagnostics / "manifest.json"
+    recommendation = diagnostics / "recommended_features.json"
+    manifest.write_text('{"artifact_name":"feature_diagnostics"}\n', encoding="utf-8")
+    recommendation.write_text(
+        json.dumps({"recommended_features": list(features)}), encoding="utf-8"
+    )
+    provenance = FeatureSetProvenance(
+        schema_version=2,
+        artifact_name="feature_set_provenance",
+        feature_set_name="fixture",
+        feature_set_version="v2",
+        provenance_status="GOVERNED",
+        features=features,
+        feature_list_hash=feature_list_hash(features),
+        selection_policy="fixture",
+        selection_policy_version="1",
+        selection_start="20100101",
+        selection_end="20191231",
+        source_diagnostics_run_id="fixture",
+        source_diagnostics_manifest_locator="feature_diagnostics/fixture/manifest.json",
+        source_diagnostics_manifest_hash=_sha256(manifest),
+        source_recommendation_locator="feature_diagnostics/fixture/recommended_features.json",
+        source_recommendation_hash=_sha256(recommendation),
+        source_feature_universe_hash="fixture-universe",
+        created_at="2026-08-09T00:00:00+00:00",
+        created_by="pytest",
+    )
+    path = reports_root / "feature_selection" / provenance.feature_set_id / "feature_set.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(provenance.model_dump_json(), encoding="utf-8")
+    return path
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _write_model_artifact(models_root: Path) -> Path:

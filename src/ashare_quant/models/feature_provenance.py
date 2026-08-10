@@ -21,7 +21,7 @@ class FeatureSetProvenance(BaseModel):
     """Immutable identity and evidence behind an ordered feature set."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     artifact_name: Literal["feature_set_provenance"]
     feature_set_name: str = Field(min_length=1)
     feature_set_version: str = Field(min_length=1)
@@ -34,7 +34,10 @@ class FeatureSetProvenance(BaseModel):
     selection_end: str | None = None
     source_diagnostics_run_id: str | None = None
     source_diagnostics_manifest_path: str | None = None
+    source_diagnostics_manifest_locator: str | None = None
     source_diagnostics_manifest_hash: str | None = None
+    source_recommendation_locator: str | None = None
+    source_recommendation_hash: str | None = None
     source_feature_universe_hash: str | None = None
     created_at: str | None = None
     created_by: str | None = None
@@ -50,7 +53,6 @@ class FeatureSetProvenance(BaseModel):
             self.selection_start,
             self.selection_end,
             self.source_diagnostics_run_id,
-            self.source_diagnostics_manifest_path,
             self.source_diagnostics_manifest_hash,
             self.source_feature_universe_hash,
             self.created_at,
@@ -58,6 +60,14 @@ class FeatureSetProvenance(BaseModel):
         )
         if self.provenance_status == "GOVERNED" and any(value is None for value in governed):
             raise ValueError("governed feature set requires complete selection provenance")
+        if self.provenance_status == "GOVERNED" and self.schema_version == 2:
+            portable = (
+                self.source_diagnostics_manifest_locator,
+                self.source_recommendation_locator,
+                self.source_recommendation_hash,
+            )
+            if any(value is None for value in portable):
+                raise ValueError("schema-v2 governed feature set requires portable source lineage")
         if (
             self.selection_start
             and self.selection_end
@@ -68,7 +78,15 @@ class FeatureSetProvenance(BaseModel):
 
     @property
     def feature_set_id(self) -> str:
-        payload = self.model_dump(mode="json", exclude={"created_at"})
+        payload = self.model_dump(
+            mode="json",
+            exclude={
+                "created_at",
+                "source_diagnostics_manifest_path",
+                "source_diagnostics_manifest_locator",
+                "source_recommendation_locator",
+            },
+        )
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return f"feature_set_{hashlib.sha256(encoded.encode()).hexdigest()[:16]}"
 
@@ -83,18 +101,49 @@ def load_feature_set_provenance(path: Path) -> FeatureSetProvenance:
         raise DataValidationError(f"invalid feature-set provenance {path}: {error}") from error
 
 
-def validate_governed_feature_set(path: Path) -> FeatureSetProvenance:
+def validate_governed_feature_set(
+    path: Path,
+    *,
+    reports_root: Path | None = None,
+) -> FeatureSetProvenance:
     """Require complete provenance for new governed research evidence."""
 
     provenance = load_feature_set_provenance(path)
     if provenance.provenance_status != "GOVERNED":
         raise DataValidationError("LEGACY_PROVENANCE_INCOMPLETE: governed feature set required")
-    manifest_path = Path(str(provenance.source_diagnostics_manifest_path))
+    if provenance.schema_version < 2:
+        raise DataValidationError(
+            "FEATURE_PROVENANCE_PATH_BOUND_LEGACY_UNSUPPORTED: schema-v2 provenance required"
+        )
+    root = reports_root or _infer_reports_root(path)
+    manifest_path = _resolve_locator(
+        root,
+        provenance.source_diagnostics_manifest_locator,
+        "diagnostics manifest",
+    )
+    if manifest_path.parent.name != provenance.source_diagnostics_run_id:
+        raise DataValidationError("FEATURE_PROVENANCE_SOURCE_HASH_MISMATCH: diagnostics run ID")
     if not manifest_path.is_file():
-        raise DataValidationError("source diagnostics manifest is missing")
+        raise DataValidationError("FEATURE_PROVENANCE_SOURCE_MISSING: diagnostics manifest")
     digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     if digest != provenance.source_diagnostics_manifest_hash:
-        raise DataValidationError("source diagnostics manifest hash changed")
+        raise DataValidationError("FEATURE_PROVENANCE_SOURCE_HASH_MISMATCH: diagnostics manifest")
+    recommendation_path = _resolve_locator(
+        root,
+        provenance.source_recommendation_locator,
+        "diagnostics recommendation",
+    )
+    if recommendation_path.parent != manifest_path.parent:
+        raise DataValidationError("FEATURE_PROVENANCE_SOURCE_HASH_MISMATCH: recommendation run")
+    if not recommendation_path.is_file():
+        raise DataValidationError("FEATURE_PROVENANCE_SOURCE_MISSING: recommendation")
+    recommendation_hash = hashlib.sha256(recommendation_path.read_bytes()).hexdigest()
+    if recommendation_hash != provenance.source_recommendation_hash:
+        raise DataValidationError("FEATURE_PROVENANCE_SOURCE_HASH_MISMATCH: recommendation")
+    recommendation = _load_json(recommendation_path, "diagnostics recommendation")
+    raw_features = recommendation.get("recommended_features")
+    if raw_features != list(provenance.features):
+        raise DataValidationError("FEATURE_PROVENANCE_SOURCE_HASH_MISMATCH: feature list")
     return provenance
 
 
@@ -141,8 +190,11 @@ def create_governed_feature_set(
     )
     features = tuple(raw_features)
     source_feature_universe_hash = _source_feature_universe_hash(manifest)
+    reports_root = output_root.parent
+    manifest_locator = feature_provenance_locator(manifest_path, reports_root)
+    recommendation_locator = feature_provenance_locator(recommendation_path, reports_root)
     provenance = FeatureSetProvenance(
-        schema_version=1,
+        schema_version=2,
         artifact_name="feature_set_provenance",
         feature_set_name=feature_set_name,
         feature_set_version=feature_set_version,
@@ -154,18 +206,22 @@ def create_governed_feature_set(
         selection_start=selection_start,
         selection_end=selection_end,
         source_diagnostics_run_id=diagnostics_dir.name,
-        source_diagnostics_manifest_path=str(manifest_path.resolve()),
+        source_diagnostics_manifest_path=None,
+        source_diagnostics_manifest_locator=manifest_locator,
         source_diagnostics_manifest_hash=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        source_recommendation_locator=recommendation_locator,
+        source_recommendation_hash=hashlib.sha256(recommendation_path.read_bytes()).hexdigest(),
         source_feature_universe_hash=source_feature_universe_hash,
         created_at=datetime.now(UTC).isoformat(timespec="seconds"),
         created_by=created_by.strip(),
     )
     output_dir = output_root / provenance.feature_set_id
     if output_dir.exists():
-        existing = load_feature_set_provenance(output_dir / "feature_set.json")
-        if existing.model_dump(mode="json", exclude={"created_at"}) != provenance.model_dump(
-            mode="json", exclude={"created_at"}
-        ):
+        existing = validate_governed_feature_set(
+            output_dir / "feature_set.json",
+            reports_root=reports_root,
+        )
+        if existing.feature_set_id != provenance.feature_set_id:
             raise DataValidationError(f"feature-set identity conflict: {output_dir}")
         return output_dir / "feature_set.json"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -175,7 +231,7 @@ def create_governed_feature_set(
         atomic_write_json(
             staging / "manifest.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "artifact_name": "governed_feature_set",
                 "feature_set_id": provenance.feature_set_id,
                 "feature_set_sha256": hashlib.sha256(
@@ -188,6 +244,25 @@ def create_governed_feature_set(
     return output_dir / "feature_set.json"
 
 
+def feature_provenance_hash(path: Path) -> str:
+    """Return the exact immutable feature-provenance artifact hash."""
+
+    if not path.is_file():
+        raise DataValidationError(f"feature provenance does not exist: {path}")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def feature_provenance_locator(path: Path, reports_root: Path) -> str:
+    """Return a stable reports-relative locator that never defines logical identity."""
+
+    try:
+        return str(path.resolve().relative_to(reports_root.resolve()))
+    except ValueError as error:
+        raise DataValidationError(
+            "feature provenance must be stored below the configured reports root"
+        ) from error
+
+
 def _source_feature_universe_hash(manifest: dict[str, object]) -> str:
     sources = manifest.get("source_manifests")
     if not isinstance(sources, dict) or not isinstance(sources.get("features_daily"), dict):
@@ -196,3 +271,29 @@ def _source_feature_universe_hash(manifest: dict[str, object]) -> str:
         sources["features_daily"], sort_keys=True, separators=(",", ":"), ensure_ascii=True
     )
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _infer_reports_root(path: Path) -> Path:
+    resolved = path.resolve()
+    for parent in resolved.parents:
+        if parent.name == "feature_selection":
+            return parent.parent
+    raise DataValidationError(
+        "FEATURE_PROVENANCE_SOURCE_MISSING: configured reports root is required"
+    )
+
+
+def _resolve_locator(root: Path, locator: str | None, description: str) -> Path:
+    if not locator or Path(locator).is_absolute() or ".." in Path(locator).parts:
+        raise DataValidationError(f"invalid portable {description} locator")
+    return root / locator
+
+
+def _load_json(path: Path, description: str) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise DataValidationError(f"cannot read {description}: {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise DataValidationError(f"{description} must be a JSON object: {path}")
+    return payload

@@ -14,6 +14,7 @@ from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.models.feature_lists import feature_list_hash
+from ashare_quant.models.feature_provenance import FeatureSetProvenance
 from ashare_quant.models.horizon_experiments import MultiHorizonExperimentPlanner
 from ashare_quant.models.registry import ModelRegistry
 from ashare_quant.utils.manifest import atomic_write_json
@@ -60,7 +61,10 @@ def test_horizon_plan_writes_correct_hashes_unique_ids_and_fold_references(
     experiments = manifest["experiments"]
 
     assert result.experiment_count == 4
-    assert manifest["feature_hash"] == feature_list_hash(("f1", "f2"))
+    assert manifest["feature_hash"] == feature_list_hash(("f1", "f3"))
+    assert manifest["feature_hash"] != manifest["reference_champion_feature_hash"]
+    assert manifest["feature_set_id"]
+    assert manifest["feature_provenance_hash"] == _hash(sources["feature_provenance"])
     assert manifest["universe_hash"] == _hash(sources["universe_manifest"])
     assert manifest["folds_manifest_hash"] == _hash(sources["fold_manifest"])
     assert manifest["config_hash"] == _hash(sources["config"])
@@ -100,6 +104,15 @@ def test_horizon_plan_is_idempotent_and_byte_deterministic(tmp_path: Path) -> No
     assert (second.output_dir / "experiment_manifest.json").read_bytes() == first_bytes
 
 
+def test_horizon_plan_rejects_changed_feature_provenance(tmp_path: Path) -> None:
+    planner, sources = _planner_fixture(tmp_path)
+    provenance = sources["feature_provenance"]
+    provenance.write_bytes(provenance.read_bytes() + b"\n")
+
+    with pytest.raises(DataValidationError, match="FEATURE_PROVENANCE_MISMATCH"):
+        planner.build(folds_manifest=sources["fold_manifest"])
+
+
 def test_horizon_plan_reads_legacy_repository_relative_folds_path(tmp_path: Path) -> None:
     planner, sources = _planner_fixture(tmp_path)
     manifest = json.loads(sources["fold_manifest"].read_text(encoding="utf-8"))
@@ -127,7 +140,7 @@ def test_horizon_plan_rejects_old_fixed_horizon_fold_manifest(tmp_path: Path) ->
     manifest["policy"]["label_horizon"] = 5
     atomic_write_json(sources["fold_manifest"], manifest)
 
-    with pytest.raises(DataValidationError, match="horizon-agnostic schema version 2"):
+    with pytest.raises(DataValidationError, match="schema-v4 governed plan required"):
         planner.build(folds_manifest=sources["fold_manifest"])
 
 
@@ -273,12 +286,15 @@ def _planner_fixture(
         processed_root / "features_daily" / "_manifest.json",
         {"artifact_name": "features_daily", "feature_hash": feature_list_hash(("f1", "f2"))},
     )
+    research_features = ("f1", "f3")
+    feature_provenance = _write_governed_provenance(reports_root, research_features)
+    feature_set = json.loads(feature_provenance.read_text(encoding="utf-8"))
     fold_dir = reports_root / "walk_forward" / "walk_forward_fixture"
     folds_file = fold_dir / "folds.json"
     atomic_write_json(
         folds_file,
         {
-            "schema_version": 2,
+            "schema_version": 4,
             "run_id": "walk_forward_fixture",
             "folds": [
                 {
@@ -291,6 +307,7 @@ def _planner_fixture(
                     "evaluation_end": "20220131",
                     "purge_sessions": gap,
                     "embargo_sessions": gap,
+                    "feature_hash": feature_list_hash(research_features),
                 },
                 {
                     "fold_id": "fold_0002_202601",
@@ -302,6 +319,7 @@ def _planner_fixture(
                     "evaluation_end": "20260130",
                     "purge_sessions": gap,
                     "embargo_sessions": gap,
+                    "feature_hash": feature_list_hash(research_features),
                 },
                 {
                     "fold_id": "fold_0003_202607",
@@ -313,6 +331,7 @@ def _planner_fixture(
                     "evaluation_end": "20260731",
                     "purge_sessions": gap,
                     "embargo_sessions": gap,
+                    "feature_hash": feature_list_hash(research_features),
                 },
             ],
         },
@@ -321,10 +340,17 @@ def _planner_fixture(
     atomic_write_json(
         fold_manifest,
         {
-            "schema_version": 2,
+            "schema_version": 4,
             "artifact_name": "purged_walk_forward_plan",
             "run_id": "walk_forward_fixture",
-            "feature_hash": feature_list_hash(("f1", "f2")),
+            "feature_authority": "governed_feature_set",
+            "feature_set_id": feature_set["feature_set_id"]
+            if "feature_set_id" in feature_set
+            else FeatureSetProvenance.model_validate(feature_set).feature_set_id,
+            "feature_hash": feature_list_hash(research_features),
+            "feature_set_hash": feature_list_hash(research_features),
+            "feature_provenance_locator": str(feature_provenance.relative_to(reports_root)),
+            "feature_provenance_hash": _hash(feature_provenance),
             "policy": {"purge_sessions": gap, "embargo_sessions": gap},
             "outputs": {"folds": str(folds_file.resolve())},
         },
@@ -348,8 +374,43 @@ def _planner_fixture(
             "metrics": artifact / "metrics.json",
             "sessions": session_file,
             "universe_manifest": universe_manifest,
+            "feature_provenance": feature_provenance,
         },
     )
+
+
+def _write_governed_provenance(reports_root: Path, features: tuple[str, ...]) -> Path:
+    diagnostics = reports_root / "feature_diagnostics" / "fixture"
+    diagnostics.mkdir(parents=True)
+    diagnostics_manifest = diagnostics / "manifest.json"
+    recommendation = diagnostics / "recommended_features.json"
+    atomic_write_json(diagnostics_manifest, {"artifact_name": "feature_diagnostics"})
+    atomic_write_json(recommendation, {"recommended_features": list(features)})
+    provenance = FeatureSetProvenance(
+        schema_version=2,
+        artifact_name="feature_set_provenance",
+        feature_set_name="fixture",
+        feature_set_version="v2",
+        provenance_status="GOVERNED",
+        features=features,
+        feature_list_hash=feature_list_hash(features),
+        selection_policy="fixture",
+        selection_policy_version="1",
+        selection_start="20100101",
+        selection_end="20191231",
+        source_diagnostics_run_id="fixture",
+        source_diagnostics_manifest_locator="feature_diagnostics/fixture/manifest.json",
+        source_diagnostics_manifest_hash=_hash(diagnostics_manifest),
+        source_recommendation_locator="feature_diagnostics/fixture/recommended_features.json",
+        source_recommendation_hash=_hash(recommendation),
+        source_feature_universe_hash="fixture-universe",
+        created_at="2026-08-09T00:00:00+00:00",
+        created_by="pytest",
+    )
+    path = reports_root / "feature_selection" / provenance.feature_set_id / "feature_set.json"
+    path.parent.mkdir(parents=True)
+    atomic_write_json(path, provenance.model_dump(mode="json"))
+    return path
 
 
 def _write_model_artifact(models_root: Path) -> Path:
