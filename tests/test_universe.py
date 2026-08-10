@@ -6,7 +6,7 @@ from ashare_quant.config.settings import UniverseSettings
 from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.universe import UniverseBuilder, UniverseStore, build_universe_frame
-from ashare_quant.universe.builder import year_date_ranges
+from ashare_quant.universe.builder import add_listing_flags, build_candidates, year_date_ranges
 from ashare_quant.universe.validation import validate_universe_frame
 
 
@@ -166,6 +166,69 @@ def test_universe_builder_covers_core_membership_and_tradability_rules() -> None
     assert validate_universe_frame(frame).ok
 
 
+def test_daily_only_candidate_does_not_infer_delist_date_from_last_quote() -> None:
+    daily = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * 3,
+            "trade_date": ["20240102", "20240103", "20240104"],
+        }
+    )
+
+    candidates = build_candidates(pd.DataFrame(), daily)
+
+    assert candidates["ts_code"].tolist() == ["000001.SZ"]
+    assert candidates.iloc[0]["list_date"] == "20240102"
+    assert pd.isna(candidates.iloc[0]["delist_date"])
+
+
+def test_daily_only_candidate_remains_discoverable_after_market_data_ends() -> None:
+    inputs = _daily_only_inputs()
+    settings = UniverseSettings(
+        min_list_trading_days=1,
+        liquidity_window_days=1,
+        min_avg_amount=0.0,
+        require_full_liquidity_window=False,
+    )
+
+    frame = build_universe_frame(inputs, settings, "20240103", "20240108")
+    rows = frame[frame["ts_code"] == "000001.SZ"].set_index("trade_date")
+
+    assert set(rows.index) == {"20240103", "20240104", "20240105", "20240108"}
+    assert bool(rows.loc["20240103", "is_listed"])
+    assert bool(rows.loc["20240108", "is_listed"])
+    assert pd.isna(rows.loc["20240108", "delist_date"])
+    assert not bool(rows.loc["20240108", "in_model_universe"])
+
+
+def test_authoritative_delist_date_is_preserved_and_effective_dated() -> None:
+    candidate = build_candidates(
+        pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["Lifecycle Co"],
+                "market": ["主板"],
+                "industry": ["Test"],
+                "list_date": ["20100101"],
+                "delist_date": ["20240110"],
+            }
+        ),
+        pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240109"],
+            }
+        ),
+    )
+    base = pd.DataFrame({"trade_date": ["20240109", "20240110", "20240111"]}).merge(
+        candidate, how="cross"
+    )
+
+    listed = add_listing_flags(base, ["20240109", "20240110", "20240111"])
+
+    assert candidate.iloc[0]["delist_date"] == "20240110"
+    assert listed["is_listed"].tolist() == [True, True, False]
+
+
 def test_universe_validation_detects_duplicates() -> None:
     settings = UniverseSettings(
         min_list_trading_days=3, liquidity_window_days=1, min_avg_amount=0.0
@@ -177,6 +240,33 @@ def test_universe_validation_detects_duplicates() -> None:
 
     assert not result.ok
     assert any("duplicate universe rows" in error for error in result.errors)
+
+
+def _daily_only_inputs() -> dict[str, pd.DataFrame]:
+    trade_dates = ["20240102", "20240103", "20240104", "20240105", "20240108"]
+    daily = pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": trade_date,
+                "open": 10.0,
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "amount": 1000.0,
+            }
+            for trade_date in trade_dates[:3]
+        ]
+    )
+    return {
+        "stock_basic": pd.DataFrame(),
+        "trade_cal": pd.DataFrame({"cal_date": trade_dates, "is_open": [1] * len(trade_dates)}),
+        "daily": daily,
+        "daily_basic": pd.DataFrame(columns=["ts_code", "trade_date"]),
+        "suspend_d": pd.DataFrame(columns=["ts_code", "trade_date"]),
+        "stk_limit": pd.DataFrame(columns=["ts_code", "trade_date", "up_limit", "down_limit"]),
+        "namechange": pd.DataFrame(),
+    }
 
 
 def test_year_date_ranges_splits_trade_dates_by_calendar_year() -> None:

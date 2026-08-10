@@ -345,12 +345,7 @@ def build_candidates(stock_basic: DataFrame, daily: DataFrame) -> DataFrame:
 
     stock = normalize_stock_basic(stock_basic)
     daily_bounds = daily_bounds_by_code(daily)
-    if stock.empty:
-        candidates = daily_bounds.copy()
-        candidates["_from_stock_basic"] = False
-    else:
-        candidates = stock.merge(daily_bounds, on="ts_code", how="outer")
-        candidates["_from_stock_basic"] = candidates["name"].notna()
+    candidates = stock.merge(daily_bounds, on="ts_code", how="outer")
 
     candidates["list_date"] = candidates["list_date"].fillna(candidates["first_daily_date"])
     candidates["name"] = candidates["name"].fillna(candidates["ts_code"])
@@ -359,12 +354,8 @@ def build_candidates(stock_basic: DataFrame, daily: DataFrame) -> DataFrame:
     candidates["exchange"] = candidates["exchange"].fillna(
         candidates["ts_code"].map(exchange_from_ts_code)
     )
+    # Daily bounds establish coverage, never authoritative lifecycle termination.
     candidates["delist_date"] = clean_date_series(candidates.get("delist_date"))
-
-    daily_only = ~candidates["_from_stock_basic"].astype(bool)
-    candidates.loc[daily_only & candidates["delist_date"].isna(), "delist_date"] = candidates.loc[
-        daily_only & candidates["delist_date"].isna(), "last_daily_date"
-    ]
     return candidates[
         ["ts_code", "name", "market", "exchange", "industry", "list_date", "delist_date"]
     ].drop_duplicates(subset=["ts_code"], keep="last")

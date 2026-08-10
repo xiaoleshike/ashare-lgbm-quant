@@ -39,6 +39,11 @@ valuation status, and stale-day count.
   missing or malformed prices with `BACKTEST_MARKET_DATA_INCOMPLETE`.
 - Terminal write-off: allowed only when universe data explicitly proves a delisted terminal state.
 
+Only an effective `stock_basic.delist_date` is authoritative terminal evidence. A security's last
+observed market-data date is coverage metadata, not a delisting date. Missing quotes, prolonged
+suspension, and exceeding the sell-delay threshold do not prove delisting and cannot authorize a
+terminal write-off.
+
 The engine checks nonnegative cash/equity for the unlevered strategy, finite values, equity
 reconciliation, nonnegative shares and costs, sell quantity, duplicate positions, and complete
 position lifecycles. There is intentionally no universal daily-return cap.
