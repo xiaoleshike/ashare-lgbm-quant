@@ -97,6 +97,9 @@ class _Executable:
             top_n=(10, 20, 50),
             execution_config={"commission": 0.00025, "slippage": 0.0005},
             metrics={"10": {}, "20": {}, "50": {}},
+            cost_policy_hash="c" * 64,
+            execution_cost_policy={"cost_policy_hash": "c" * 64},
+            accounting_summaries={"10": {}, "20": {}, "50": {}},
         )
 
 
@@ -246,6 +249,8 @@ def test_executable_validation_uses_frozen_scores_and_execution_costs(
             self.top_n = top_n
             self.metrics = {"annual_return": 0.01, "average_turnover": 0.1}
             self.holdings = pd.DataFrame()
+            self.cost_policy = {"cost_policy_hash": "c" * 64}
+            self.accounting_summary = {"accounting_schema_version": 2}
 
     monkeypatch.setattr(
         "ashare_quant.retraining.validation.executable.load_calendar",
@@ -261,7 +266,7 @@ def test_executable_validation_uses_frozen_scores_and_execution_costs(
     )
     monkeypatch.setattr(
         "ashare_quant.retraining.validation.executable.simulate_portfolio",
-        lambda inputs, top_n, settings: Result(top_n),
+        lambda inputs, top_n, settings, purpose: Result(top_n),
     )
 
     evidence = RetrainingExecutableValidator(

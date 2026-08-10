@@ -50,6 +50,10 @@ class RetrainingExecutableValidator:
             }
         )
         requested_dates = tuple(sorted(offline.predictions["trade_date"].astype(str).unique()))
+        if not requested_dates or requested_dates[0] <= context.artifact.validation_dates["end"]:
+            raise DataValidationError(
+                "VALIDATION_FAILED: executable predictions overlap the candidate selection period"
+            )
         calendar = load_calendar(
             self.raw_root,
             requested_dates[0],
@@ -88,7 +92,13 @@ class RetrainingExecutableValidator:
             benchmark=benchmark,
         )
         results = tuple(
-            simulate_portfolio(inputs, top_n=top_n, settings=execution) for top_n in REQUIRED_TOP_N
+            simulate_portfolio(
+                inputs,
+                top_n=top_n,
+                settings=execution,
+                purpose="executable_validation",
+            )
+            for top_n in REQUIRED_TOP_N
         )
         for result in results:
             if (
@@ -109,6 +119,11 @@ class RetrainingExecutableValidator:
             top_n=REQUIRED_TOP_N,
             execution_config=execution.model_dump(mode="json"),
             metrics=metrics,
+            cost_policy_hash=str(results[0].cost_policy["cost_policy_hash"]),
+            execution_cost_policy=results[0].cost_policy,
+            accounting_summaries={
+                str(result.top_n): result.accounting_summary for result in results
+            },
         )
 
 

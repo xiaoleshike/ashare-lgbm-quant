@@ -14,6 +14,10 @@ import pandas as pd
 
 from ashare_quant.backtest.data import load_benchmark, load_calendar, load_execution_prices
 from ashare_quant.backtest.engine import BacktestInputs, BacktestResult, simulate_portfolio
+from ashare_quant.backtest.provenance import (
+    require_oos_evaluation,
+    resolve_model_evaluation_boundary,
+)
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.challenger_evaluation import (
@@ -29,7 +33,7 @@ from ashare_quant.models.inference import (
 from ashare_quant.models.registry import ModelRegistry, RegisteredModel
 from ashare_quant.utils.manifest import atomic_write_json, config_hash, current_git_info
 
-EXECUTABLE_VALIDATION_SCHEMA_VERSION = 1
+EXECUTABLE_VALIDATION_SCHEMA_VERSION = 2
 REQUIRED_TOP_N = (10, 20, 50)
 
 type DataFrame = pd.DataFrame
@@ -112,8 +116,14 @@ class ExecutableOOSValidationEngine:
         challenger_predictions = challenger_predictions.loc[
             challenger_predictions["trade_date"].astype(str).isin(dates)
         ].reset_index(drop=True)
-        _require_oos(champion, dates[0])
-        _require_oos(challenger, dates[0])
+        for model in (champion, challenger):
+            boundary = resolve_model_evaluation_boundary(Path(model.artifact_path))
+            require_oos_evaluation(
+                boundary,
+                model_dir=Path(model.artifact_path),
+                evaluation_start=dates[0],
+                evaluation_end=dates[-1],
+            )
         champion_batch = score_registered_model_range(
             champion,
             processed_root=self.processed_root,
@@ -147,6 +157,7 @@ class ExecutableOOSValidationEngine:
                     ),
                     top_n=value,
                     settings=execution,
+                    purpose="executable_validation",
                 )
                 for value in top_n
             )
@@ -185,6 +196,7 @@ class ExecutableOOSValidationEngine:
             top_n,
             execution.model_dump(mode="json"),
             metrics,
+            model_results,
         )
         manifest = self._manifest(
             identity,
@@ -195,6 +207,7 @@ class ExecutableOOSValidationEngine:
             dates,
             top_n,
             execution.model_dump(mode="json"),
+            model_results,
         )
         _publish(output_dir, summary, manifest, model_results)
         return ExecutableValidationResult(
@@ -286,6 +299,7 @@ class ExecutableOOSValidationEngine:
         dates: tuple[str, ...],
         top_n: tuple[int, ...],
         execution: dict[str, Any],
+        model_results: dict[str, tuple[BacktestResult, ...]],
     ) -> dict[str, Any]:
         git = current_git_info()
         return {
@@ -298,7 +312,16 @@ class ExecutableOOSValidationEngine:
             "horizon": prediction_manifest["horizon"],
             "holding_period": prediction_manifest["holding_period"],
             "execution_rule": "signal_close_t_next_open_entry_and_horizon_open_exit",
-            "terminal_untradable_policy": "write_off_at_zero_after_max_sell_delay",
+            "accounting_schema_version": 2,
+            "terminal_untradable_policy": "explicit_terminal_event_only; unresolved_fails_closed",
+            "execution_cost_policy": next(iter(model_results.values()))[0].cost_policy,
+            "cost_policy_hash": next(iter(model_results.values()))[0].cost_policy[
+                "cost_policy_hash"
+            ],
+            "accounting_summaries": {
+                model_id: {str(result.top_n): result.accounting_summary for result in results}
+                for model_id, results in model_results.items()
+            },
             "top_n": list(top_n),
             "minimum_signal_date": dates[0],
             "maximum_signal_date": dates[-1],
@@ -366,6 +389,7 @@ def _summary(
     top_n: tuple[int, ...],
     execution: dict[str, Any],
     metrics: dict[str, dict[str, dict[str, float | int | None]]],
+    model_results: dict[str, tuple[BacktestResult, ...]],
 ) -> dict[str, Any]:
     comparison: dict[str, dict[str, float | None]] = {}
     for value in top_n:
@@ -383,7 +407,7 @@ def _summary(
             )
         }
     return {
-        "schema_version": 1,
+        "schema_version": EXECUTABLE_VALIDATION_SCHEMA_VERSION,
         "artifact_name": "executable_oos_portfolio_validation",
         "run_id": run_id,
         "champion_model_id": champion.model_id,
@@ -395,7 +419,14 @@ def _summary(
         "signal_dates": len(dates),
         "top_n": list(top_n),
         "execution_config": execution,
-        "terminal_untradable_policy": "write_off_at_zero_after_max_sell_delay",
+        "accounting_schema_version": 2,
+        "terminal_untradable_policy": "explicit_terminal_event_only; unresolved_fails_closed",
+        "execution_cost_policy": next(iter(model_results.values()))[0].cost_policy,
+        "cost_policy_hash": next(iter(model_results.values()))[0].cost_policy["cost_policy_hash"],
+        "accounting_summaries": {
+            model_id: {str(result.top_n): result.accounting_summary for result in results}
+            for model_id, results in model_results.items()
+        },
         "metrics": metrics,
         "challenger_minus_champion": comparison,
         "interpretation": (
@@ -460,7 +491,7 @@ def _render_report(summary: dict[str, Any]) -> str:
         f"- Signal dates: {summary['minimum_signal_date']} to {summary['maximum_signal_date']}",
         f"- Holding period: {summary['holding_period']} trading days",
         "- Execution: signal close, next-open entry, horizon next-open exit",
-        "- Terminal untradeable positions: written off at zero after max sell delay",
+        "- Unresolved positions fail closed; write-off requires a verified terminal event",
         "",
     ]
     for value in summary["top_n"]:
@@ -495,15 +526,6 @@ def _render_report(summary: dict[str, Any]) -> str:
 
 def _number(value: object) -> str:
     return "-" if not isinstance(value, (int, float)) else f"{float(value):.6f}"
-
-
-def _require_oos(model: RegisteredModel, first_signal_date: str) -> None:
-    training_end = model.training_date_range.get("end")
-    if not isinstance(training_end, str) or first_signal_date <= training_end:
-        raise DataValidationError(
-            f"executable validation is not OOS for {model.model_id}: "
-            f"first_signal={first_signal_date} train_end={training_end}"
-        )
 
 
 def _existing_result(output_dir: Path, identity: str) -> ExecutableValidationResult | None:

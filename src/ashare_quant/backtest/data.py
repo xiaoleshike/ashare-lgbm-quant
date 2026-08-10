@@ -44,7 +44,12 @@ def load_backtest_inputs(
 ) -> BacktestInputs:
     """Load scores, execution prices, constraints, calendar, and benchmark data."""
 
-    calendar = load_calendar(raw_root, start_date, end_date, settings.backtest.holding_period_days)
+    calendar = load_calendar(
+        raw_root,
+        start_date,
+        end_date,
+        settings.backtest.holding_period_days + settings.backtest.sell_delay_max_days,
+    )
     if not calendar:
         raise DataValidationError(f"no open trading calendar for {start_date}..{end_date}")
     price_start = min(start_date, calendar[0])
@@ -141,23 +146,25 @@ def load_execution_prices(
     universe_glob = processed_root / "universe_daily" / "**" / "*.parquet"
     query = f"""
         SELECT
-            CAST(d.trade_date AS VARCHAR) AS trade_date,
-            CAST(d.ts_code AS VARCHAR) AS ts_code,
+            CAST(u.trade_date AS VARCHAR) AS trade_date,
+            CAST(u.ts_code AS VARCHAR) AS ts_code,
             CAST(d.open AS DOUBLE) AS open,
             CAST(d.close AS DOUBLE) AS close,
             CAST(s.up_limit AS DOUBLE) AS up_limit,
             CAST(s.down_limit AS DOUBLE) AS down_limit,
             CAST(u.is_suspended AS BOOLEAN) AS is_suspended,
-            CAST(u.is_st AS BOOLEAN) AS is_st
-        FROM read_parquet('{daily_glob.as_posix()}', hive_partitioning=false) AS d
+            CAST(u.is_st AS BOOLEAN) AS is_st,
+            CAST(u.is_listed AS BOOLEAN) AS is_listed,
+            CAST(u.delist_date AS VARCHAR) AS delist_date
+        FROM read_parquet('{universe_glob.as_posix()}', hive_partitioning=false) AS u
+        LEFT JOIN read_parquet('{daily_glob.as_posix()}', hive_partitioning=false) AS d
+            ON CAST(u.trade_date AS VARCHAR) = CAST(d.trade_date AS VARCHAR)
+           AND CAST(u.ts_code AS VARCHAR) = CAST(d.ts_code AS VARCHAR)
         LEFT JOIN read_parquet('{limit_glob.as_posix()}', hive_partitioning=false) AS s
-            ON CAST(d.trade_date AS VARCHAR) = CAST(s.trade_date AS VARCHAR)
-           AND CAST(d.ts_code AS VARCHAR) = CAST(s.ts_code AS VARCHAR)
-        LEFT JOIN read_parquet('{universe_glob.as_posix()}', hive_partitioning=false) AS u
-            ON CAST(d.trade_date AS VARCHAR) = CAST(u.trade_date AS VARCHAR)
-           AND CAST(d.ts_code AS VARCHAR) = CAST(u.ts_code AS VARCHAR)
-        WHERE CAST(d.trade_date AS VARCHAR) BETWEEN ? AND ?
-        ORDER BY d.trade_date, d.ts_code
+            ON CAST(u.trade_date AS VARCHAR) = CAST(s.trade_date AS VARCHAR)
+           AND CAST(u.ts_code AS VARCHAR) = CAST(s.ts_code AS VARCHAR)
+        WHERE CAST(u.trade_date AS VARCHAR) BETWEEN ? AND ?
+        ORDER BY u.trade_date, u.ts_code
     """  # noqa: S608 -- local configured Parquet path
     with duckdb.connect() as connection:
         frame = connection.execute(query, [start_date, end_date]).fetch_df()
@@ -165,20 +172,35 @@ def load_execution_prices(
         raise DataValidationError(f"no daily prices for backtest {start_date}..{end_date}")
     frame["is_suspended"] = frame["is_suspended"].fillna(False).astype(bool)
     frame["is_st"] = frame["is_st"].fillna(False).astype(bool)
+    frame["is_listed"] = frame["is_listed"].fillna(False).astype(bool)
     frame["can_buy"] = (
-        ~frame["is_suspended"]
+        frame["is_listed"]
+        & ~frame["is_suspended"]
         & ~frame["is_st"]
         & frame["open"].notna()
         & (frame["open"] > 0)
         & (frame["up_limit"].isna() | (frame["open"] < frame["up_limit"] - tolerance))
     )
     frame["can_sell"] = (
-        ~frame["is_suspended"]
+        frame["is_listed"]
+        & ~frame["is_suspended"]
         & frame["open"].notna()
         & (frame["open"] > 0)
         & (frame["down_limit"].isna() | (frame["open"] > frame["down_limit"] + tolerance))
     )
-    return frame[["trade_date", "ts_code", "open", "close", "can_buy", "can_sell"]]
+    return frame[
+        [
+            "trade_date",
+            "ts_code",
+            "open",
+            "close",
+            "can_buy",
+            "can_sell",
+            "is_suspended",
+            "is_listed",
+            "delist_date",
+        ]
+    ]
 
 
 def load_benchmark(raw_root: Path, index_code: str, start_date: str, end_date: str) -> DataFrame:

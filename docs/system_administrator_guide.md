@@ -194,3 +194,30 @@ issue the replacement. Failed training or Shadow attempts consume their authoriz
 requires both the explicit pending retry state and a new authorization. Never skip checkpoints or
 treat `QUALIFIED` as Promotion approval. See `docs/controlled_operational_qualification.md` for the
 complete procedure and recovery commands.
+
+## Backtest Evidence Integrity
+
+Before treating a backtest as governance evidence, verify that its manifest uses schema version 2,
+has `purpose=OOS_EVIDENCE`, records a model boundary and exact model-manifest hash, and records
+`accounting_schema_version=2` plus a `cost_policy_hash`. A live model is not automatically valid for
+historical performance measurement: evaluation must begin strictly after its immutable training and
+selection boundary.
+
+Suspended holdings use their last valid close for valuation but remain untradeable. Unexplained quote
+gaps and unresolved exits fail evidence-grade runs. The sell-delay threshold never authorizes a zero
+write-off; only a verified terminal-security event does.
+
+Legacy or suspect backtests must not be edited or deleted. Publish a review record instead:
+
+```bash
+ashare-quant --config config/default.yaml backtest invalidate \
+  --backtest-id BACKTEST_ID \
+  --reason IN_SAMPLE_MODEL_EVALUATION \
+  --reviewed-by OPERATOR \
+  --note "Reason and replacement plan"
+```
+
+The default cost schedule resolves sell-side stamp duty by effective trade date, including the
+2023-08-28 transition. Promotion evidence preparation rejects executable validation generated under
+the legacy accounting schema or without exact cost-policy identity. See `docs/backtest.md` for the
+metric formulas and artifact contract.

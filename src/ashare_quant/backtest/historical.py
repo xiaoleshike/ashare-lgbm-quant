@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +14,11 @@ import pandas as pd
 
 from ashare_quant.backtest.data import load_backtest_inputs, load_model_and_features
 from ashare_quant.backtest.engine import BacktestResult, simulate_portfolio
+from ashare_quant.backtest.provenance import (
+    ModelEvaluationBoundary,
+    require_oos_evaluation,
+    resolve_model_evaluation_boundary,
+)
 from ashare_quant.backtest.runner import build_predictions_frame
 from ashare_quant.config.settings import AppSettings, BacktestSettings
 from ashare_quant.data.exceptions import DataValidationError
@@ -74,10 +79,12 @@ class HistoricalBacktestEngine:
         champion = ModelRegistry(self.models_root).get_champion("lightgbm_ranker")
         if champion is None:
             raise DataValidationError("no champion is registered for model_type=lightgbm_ranker")
-        _require_oos(
-            champion,
-            requested_start,
-            self.settings.backtest.historical.require_out_of_sample,
+        boundary = resolve_model_evaluation_boundary(Path(champion.artifact_path))
+        require_oos_evaluation(
+            boundary,
+            model_dir=Path(champion.artifact_path),
+            evaluation_start=requested_start,
+            evaluation_end=requested_end,
         )
         effective_end = _effective_end_date(
             self.processed_root,
@@ -110,7 +117,13 @@ class HistoricalBacktestEngine:
             execution.holding_period_days,
         )
         results = [
-            simulate_portfolio(inputs, top_n=value, settings=execution) for value in selected_top_n
+            simulate_portfolio(
+                inputs,
+                top_n=value,
+                settings=execution,
+                purpose="oos_evidence",
+            )
+            for value in selected_top_n
         ]
         daily = pd.concat([result.daily_returns for result in results], ignore_index=True)
         holdings = pd.concat([result.holdings for result in results], ignore_index=True)
@@ -132,7 +145,7 @@ class HistoricalBacktestEngine:
         )
         output_dir = self.output_root / run_id
         summary = {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact_name": "historical_champion_backtest_summary",
             "run_id": run_id,
             "model_id": champion.model_id,
@@ -146,6 +159,10 @@ class HistoricalBacktestEngine:
             "prediction_rows": len(predictions),
             "label_audit": label_audit,
             "metrics": metrics,
+            "accounting_schema_version": 2,
+            "accounting_summaries": {
+                str(result.top_n): result.accounting_summary for result in results
+            },
             "interpretation": (
                 "Executable historical simulation using same-date champion scores and next-open "
                 "execution. Labels are audited after selection and never drive scores or returns."
@@ -160,6 +177,8 @@ class HistoricalBacktestEngine:
             effective_end,
             selected_top_n,
             label_audit,
+            boundary,
+            results,
         )
         _publish(output_dir, summary, manifest, predictions, daily, holdings)
         return HistoricalBacktestResult(
@@ -204,6 +223,8 @@ class HistoricalBacktestEngine:
         effective_end: str,
         top_n: tuple[int, ...],
         label_audit: dict[str, Any],
+        boundary: ModelEvaluationBoundary,
+        results: list[BacktestResult],
     ) -> dict[str, Any]:
         git = current_git_info()
         candidate_config = {
@@ -217,12 +238,14 @@ class HistoricalBacktestEngine:
             "historical": self.settings.backtest.historical.model_dump(mode="json"),
         }
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact_name": "historical_champion_backtest",
             "model_id": champion.model_id,
             "model_type": champion.model_type,
             "model_artifact": champion.artifact_path,
             "model_training_date_range": champion.training_date_range,
+            "model_boundary": boundary.to_dict(),
+            "model_manifest_hash": boundary.manifest_hash,
             "feature_hash": feature_hash,
             "feature_count": len(feature_names),
             "candidate_config": candidate_config,
@@ -231,6 +254,10 @@ class HistoricalBacktestEngine:
             "requested_end_date": requested_end,
             "effective_end_date": effective_end,
             "out_of_sample": True,
+            "purpose": "OOS_EVIDENCE",
+            "accounting_schema_version": 2,
+            "execution_cost_policy": results[0].cost_policy,
+            "cost_policy_hash": results[0].cost_policy["cost_policy_hash"],
             "label_audit": label_audit,
             "git_commit": git["commit"],
             "git_dirty": git["dirty"],
@@ -242,15 +269,6 @@ class HistoricalBacktestEngine:
             },
             "prediction_file": "predictions.parquet",
         }
-
-
-def _require_oos(champion: RegisteredModel, start_date: str, required: bool) -> None:
-    training_end = champion.training_date_range.get("end")
-    if required and training_end is not None and start_date <= training_end:
-        raise DataValidationError(
-            "historical backtest must be out-of-sample: "
-            f"start_date={start_date} champion_train_end={training_end}"
-        )
 
 
 def _effective_end_date(
@@ -373,13 +391,14 @@ def _metrics_with_years(
     overall = {
         "cumulative_return": cumulative,
         "annual_return": result.metrics.get("annual_return"),
-        "excess_return": cumulative - benchmark_cumulative,
+        "benchmark_return": benchmark_cumulative,
+        "excess_return": (1.0 + cumulative) / (1.0 + benchmark_cumulative) - 1.0,
         "sharpe": result.metrics.get("sharpe"),
         "max_drawdown": result.metrics.get("maximum_drawdown"),
         "volatility": result.metrics.get("annual_volatility"),
         "turnover": result.metrics.get("average_turnover"),
-        "holding_days": settings.holding_period_days,
-        "win_rate": result.metrics.get("win_rate"),
+        "holding_days": result.metrics.get("average_holding_period_sessions"),
+        "win_rate": result.metrics.get("daily_win_rate"),
         "days": result.metrics.get("days"),
     }
     daily["year"] = daily["trade_date"].astype(str).str[:4]
@@ -389,7 +408,11 @@ def _metrics_with_years(
         year_benchmark = frame["benchmark_return"].to_numpy(dtype=float)
         strategy_return = float(np.prod(1.0 + year_returns) - 1.0)
         benchmark_return = float(np.prod(1.0 + year_benchmark) - 1.0)
-        volatility = float(np.std(year_returns) * np.sqrt(settings.annualization_days))
+        session_std = float(np.std(year_returns, ddof=1)) if len(year_returns) > 1 else 0.0
+        volatility = session_std * np.sqrt(settings.annualization_days)
+        daily_risk_free = (1.0 + settings.risk_free_annual_rate) ** (
+            1.0 / settings.annualization_days
+        ) - 1.0
         equity = np.cumprod(1.0 + year_returns)
         drawdown = equity / np.maximum.accumulate(equity) - 1.0
         regime = (
@@ -405,12 +428,16 @@ def _metrics_with_years(
                 "regime": regime,
                 "cumulative_return": strategy_return,
                 "benchmark_return": benchmark_return,
-                "excess_return": strategy_return - benchmark_return,
+                "excess_return": (1.0 + strategy_return) / (1.0 + benchmark_return) - 1.0,
                 "volatility": volatility,
                 "sharpe": (
                     None
                     if volatility == 0
-                    else float(np.mean(year_returns) * settings.annualization_days / volatility)
+                    else float(
+                        np.mean(year_returns - daily_risk_free)
+                        / session_std
+                        * np.sqrt(settings.annualization_days)
+                    )
                 ),
                 "max_drawdown": float(np.min(drawdown)),
                 "win_rate": float(np.mean(year_returns > 0)),
@@ -442,6 +469,19 @@ def _publish(
     holdings: DataFrame,
 ) -> None:
     output_dir.parent.mkdir(parents=True, exist_ok=True)
+    if output_dir.exists():
+        try:
+            existing_manifest = json.loads(
+                (output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            existing_summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise DataValidationError(
+                f"incomplete immutable historical backtest exists: {output_dir}"
+            ) from error
+        if existing_manifest == manifest and existing_summary == summary:
+            return
+        raise DataValidationError(f"immutable historical backtest identity differs: {output_dir}")
     with tempfile.TemporaryDirectory(dir=output_dir.parent) as temporary:
         staging = Path(temporary)
         predictions.to_parquet(staging / "predictions.parquet", index=False)
@@ -450,16 +490,7 @@ def _publish(
         atomic_write_json(staging / "summary.json", summary)
         (staging / "backtest_report.md").write_text(_render_report(summary), encoding="utf-8")
         atomic_write_json(staging / "manifest.json", manifest)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for filename in (
-            "predictions.parquet",
-            "daily_returns.parquet",
-            "holdings.parquet",
-            "summary.json",
-            "backtest_report.md",
-        ):
-            os.replace(staging / filename, output_dir / filename)
-        os.replace(staging / "manifest.json", output_dir / "manifest.json")
+        staging.rename(output_dir)
 
 
 def _render_report(summary: dict[str, Any]) -> str:

@@ -146,21 +146,89 @@ class BacktestDiagnosticSettings(BaseModel):
         return self
 
 
+class ExecutionCostScheduleEntry(BaseModel):
+    """One effective-dated deterministic A-share execution-cost regime."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    effective_from: str
+    commission_rate: float = Field(default=0.00025, ge=0)
+    minimum_commission: float = Field(default=0.0, ge=0)
+    stamp_duty_sell: float = Field(default=0.001, ge=0)
+    transfer_fee_rate: float = Field(default=0.0, ge=0)
+    slippage_rate: float = Field(default=0.0005, ge=0)
+
+    @model_validator(mode="after")
+    def validate_effective_date(self) -> ExecutionCostScheduleEntry:
+        if len(self.effective_from) != 8 or not self.effective_from.isdigit():
+            raise ValueError("execution-cost effective_from must be YYYYMMDD")
+        return self
+
+
+class ExecutionCostPolicySettings(BaseModel):
+    """Versioned effective-dated execution-cost policy."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    policy_name: str = "a_share_execution_costs_v1"
+    schedules: tuple[ExecutionCostScheduleEntry, ...] = (
+        ExecutionCostScheduleEntry(effective_from="19000101", stamp_duty_sell=0.001),
+        ExecutionCostScheduleEntry(effective_from="20230828", stamp_duty_sell=0.0005),
+    )
+
+    @model_validator(mode="after")
+    def validate_schedules(self) -> ExecutionCostPolicySettings:
+        dates = tuple(item.effective_from for item in self.schedules)
+        if not dates or dates != tuple(sorted(set(dates))):
+            raise ValueError("execution-cost schedules must be non-empty, unique, and ascending")
+        return self
+
+
 class BacktestSettings(BaseModel):
     """Executable portfolio backtest assumptions."""
 
-    execution: Literal["next_open", "next_vwap"] = "next_open"
+    execution: Literal["next_open"] = "next_open"
     initial_cash: float = Field(default=1_000_000.0, gt=0)
     top_n: tuple[PositiveInt, ...] = (10, 20, 50)
     holding_period_days: PositiveInt = 5
     commission: float = Field(default=0.00025, ge=0)
     stamp_duty: float = Field(default=0.001, ge=0)
     slippage: float = Field(default=0.0005, ge=0)
+    execution_costs: ExecutionCostPolicySettings = Field(
+        default_factory=ExecutionCostPolicySettings
+    )
     benchmark_index_code: str = "000300.SH"
     annualization_days: PositiveInt = 252
+    risk_free_annual_rate: float = Field(default=0.0, gt=-1.0)
     sell_delay_max_days: int = Field(default=20, ge=0)
     historical: HistoricalBacktestSettings = Field(default_factory=HistoricalBacktestSettings)
     diagnostics: BacktestDiagnosticSettings = Field(default_factory=BacktestDiagnosticSettings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_explicit_legacy_costs(cls, value: object) -> object:
+        """Turn explicitly supplied legacy scalars into one fixed historical regime."""
+
+        if not isinstance(value, dict) or "execution_costs" in value:
+            return value
+        if not any(name in value for name in ("commission", "stamp_duty", "slippage")):
+            return value
+        copied = dict(value)
+        copied["execution_costs"] = {
+            "policy_name": "legacy_fixed_proportional_costs",
+            "schedules": [
+                {
+                    "effective_from": "19000101",
+                    "commission_rate": copied.get("commission", 0.00025),
+                    "minimum_commission": 0.0,
+                    "stamp_duty_sell": copied.get("stamp_duty", 0.001),
+                    "transfer_fee_rate": 0.0,
+                    "slippage_rate": copied.get("slippage", 0.0005),
+                }
+            ],
+        }
+        return copied
 
     @model_validator(mode="after")
     def validate_backtest_settings(self) -> BacktestSettings:

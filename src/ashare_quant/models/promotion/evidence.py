@@ -97,6 +97,8 @@ def verify_evidence_snapshot(snapshot: EvidenceSnapshot, reports_root: Path) -> 
         if file_sha256(path) != source.sha256:
             raise DataValidationError(f"promotion evidence source changed: {source.source_path}")
         payload = _load_json(path)
+        if source.evidence_type == "executable_validation":
+            _validate_executable_accounting(payload)
         if _manifest_identity(payload) != source.manifest_identity:
             raise DataValidationError(f"promotion evidence identity changed: {source.source_path}")
         if source.evidence_date > snapshot.evidence_cutoff_date:
@@ -131,6 +133,8 @@ def _reference(
             f"{evidence_type} evidence date {evidence_date} exceeds cutoff {cutoff_date}"
         )
     _validate_model_lineage(evidence_type, payload, candidate_model_id, champion_model_id)
+    if evidence_type == "executable_validation":
+        _validate_executable_accounting(payload)
     return EvidenceReference(
         evidence_type=cast(EvidenceType, evidence_type),
         source_path=str(resolved.relative_to(root)),
@@ -170,6 +174,21 @@ def _validate_model_lineage(
             )
     if payload.get("access_policy") == "frozen_oos_evaluation":
         raise DataValidationError(f"{evidence_type} uses forbidden frozen OOS evidence")
+
+
+def _validate_executable_accounting(payload: dict[str, Any]) -> None:
+    """Reject legacy executable evidence produced by superseded accounting semantics."""
+
+    if payload.get("schema_version") != 2 or payload.get("accounting_schema_version") != 2:
+        raise DataValidationError(
+            "executable validation uses a legacy or unsupported accounting schema"
+        )
+    cost_hash = payload.get("cost_policy_hash")
+    policy = payload.get("execution_cost_policy")
+    if not isinstance(cost_hash, str) or len(cost_hash) != 64 or not isinstance(policy, dict):
+        raise DataValidationError("executable validation lacks immutable execution-cost identity")
+    if policy.get("cost_policy_hash") != cost_hash:
+        raise DataValidationError("executable validation cost-policy identity mismatch")
 
 
 def _evidence_date(evidence_type: str, payload: dict[str, Any], path: Path) -> str:

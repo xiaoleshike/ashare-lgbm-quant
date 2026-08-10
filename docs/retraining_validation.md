@@ -21,9 +21,10 @@ authorization.
 3. Score the fold's evaluation period and compute post-hoc Rank IC, ICIR,
    positive-IC ratio, Top-N observation metrics, yearly stability, and market
    regime metrics.
-4. Apply the existing next-open portfolio simulator with the model horizon,
-   configured commission, stamp duty, slippage, suspension, and price-limit
-   constraints. Every signal date must have a complete executable exit.
+4. Apply the shared accounting-schema-v2 next-open portfolio simulator with the model horizon,
+   effective-dated cost policy, suspension valuation, and price-limit constraints. Candidate
+   evaluation must begin after its immutable selection fold; every position must have a complete
+   executable or explicitly terminal lifecycle.
 5. Verify eligibility for a future prospective shadow-prediction adapter without
    generating a production prediction.
 6. Atomically publish immutable evidence with the root manifest written last.
@@ -31,6 +32,12 @@ authorization.
 The offline evaluation may read mature `labels_forward` rows only after the
 selection/final-test isolation checks pass. The executable validation is
 label-free and does not modify paper-trading state.
+
+Executable evidence freezes `accounting_schema_version=2`, the complete execution-cost schedule,
+`cost_policy_hash`, accounting diagnostics, and corrected compounded metrics. Unexpected market-data
+gaps, unresolved positions, invalid costs, unsupported execution modes, and accounting invariant
+failures block validation. Old executable evidence remains immutable but is not accepted as current
+Promotion evidence.
 
 ## Commands
 

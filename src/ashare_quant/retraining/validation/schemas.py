@@ -38,7 +38,7 @@ class OfflineValidationEvidence(BaseModel):
 class ExecutableValidationEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     artifact_name: Literal["retraining_executable_validation"] = "retraining_executable_validation"
     model_id: str
     horizon: int
@@ -50,6 +50,10 @@ class ExecutableValidationEvidence(BaseModel):
     top_n: tuple[int, ...]
     execution_config: dict[str, Any]
     metrics: dict[str, dict[str, float | int | None]]
+    accounting_schema_version: Literal[2] = 2
+    cost_policy_hash: str = Field(min_length=64, max_length=64)
+    execution_cost_policy: dict[str, Any]
+    accounting_summaries: dict[str, dict[str, float | int]]
     unresolved_holdings: Literal[False] = False
     labels_loaded: Literal[False] = False
     trading_state_modified: Literal[False] = False

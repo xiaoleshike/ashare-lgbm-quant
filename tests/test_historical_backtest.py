@@ -139,7 +139,7 @@ def test_historical_backtest_rejects_non_chronological_predictions(
 def test_historical_backtest_rejects_in_sample_period(tmp_path: Path, monkeypatch) -> None:
     engine, _ = historical_fixture(tmp_path, monkeypatch)
 
-    with pytest.raises(DataValidationError, match="must be out-of-sample"):
+    with pytest.raises(DataValidationError, match="BACKTEST_IN_SAMPLE_OVERLAP"):
         engine.run(start_date="20190101", end_date="20191231", top_n=(1,))
 
 

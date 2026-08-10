@@ -13,9 +13,14 @@ import pandas as pd
 
 from ashare_quant.backtest.data import load_backtest_inputs, load_model_and_features
 from ashare_quant.backtest.engine import BacktestResult, simulate_portfolio
+from ashare_quant.backtest.provenance import (
+    ModelEvaluationBoundary,
+    require_oos_evaluation,
+    resolve_model_evaluation_boundary,
+)
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
-from ashare_quant.utils.manifest import config_hash, current_git_info, read_manifest
+from ashare_quant.utils.manifest import config_hash, current_git_info
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,13 @@ class BacktestRunner:
         """Run all requested Top-N variants and publish outputs atomically."""
 
         resolved_model_dir = self._resolve_model_dir(model_dir)
+        boundary = resolve_model_evaluation_boundary(resolved_model_dir)
+        require_oos_evaluation(
+            boundary,
+            model_dir=resolved_model_dir,
+            evaluation_start=start_date,
+            evaluation_end=end_date,
+        )
         model, feature_names, feature_hash = load_model_and_features(resolved_model_dir)
         inputs = load_backtest_inputs(
             raw_root=self.raw_root,
@@ -70,7 +82,12 @@ class BacktestRunner:
         )
         top_values = top_n or tuple(int(value) for value in self.settings.backtest.top_n)
         results = [
-            simulate_portfolio(inputs, top_n=value, settings=self.settings.backtest)
+            simulate_portfolio(
+                inputs,
+                top_n=value,
+                settings=self.settings.backtest,
+                purpose="oos_evidence",
+            )
             for value in top_values
         ]
         experiment_id = (
@@ -86,6 +103,7 @@ class BacktestRunner:
             inputs.signals,
             top_values,
             results,
+            boundary,
         )
         return BacktestRunResult(
             experiment_id=experiment_id,
@@ -117,6 +135,7 @@ class BacktestRunner:
         signals: pd.DataFrame,
         top_n: tuple[int, ...],
         results: list[BacktestResult],
+        boundary: ModelEvaluationBoundary,
     ) -> Path:
         final_dir = self.output_root / experiment_id
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -136,7 +155,11 @@ class BacktestRunner:
             build_predictions_frame(signals, top_n).to_csv(
                 directory / "predictions.csv", index=False
             )
-            metrics: dict[str, Any] = {str(result.top_n): result.metrics for result in results}
+            metrics: dict[str, Any] = {
+                "schema_version": 2,
+                "accounting_schema_version": 2,
+                "results": {str(result.top_n): result.metrics for result in results},
+            }
             _write_json(directory / "metrics.json", metrics)
             _write_json(
                 directory / "manifest.json",
@@ -148,6 +171,7 @@ class BacktestRunner:
                     start_date,
                     end_date,
                     results,
+                    boundary,
                 ),
             )
             directory.rename(final_dir)
@@ -162,10 +186,11 @@ class BacktestRunner:
         start_date: str,
         end_date: str,
         results: list[BacktestResult],
+        boundary: ModelEvaluationBoundary,
     ) -> dict[str, Any]:
         git_info = current_git_info()
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact_name": "ranker_executable_backtest",
             "experiment_id": experiment_id,
             "completed_at": datetime.now(UTC).isoformat(),
@@ -174,17 +199,25 @@ class BacktestRunner:
             "config_path": str(self.config_path),
             "config_hash": config_hash(self.config_path),
             "model_dir": str(model_dir),
-            "model_manifest": read_manifest(model_dir),
+            "model_boundary": boundary.to_dict(),
+            "model_manifest_hash": boundary.manifest_hash,
             "feature_list_hash": feature_hash,
             "feature_count": len(feature_names),
             "start_date": start_date,
             "end_date": end_date,
             "top_n": [result.top_n for result in results],
+            "purpose": "OOS_EVIDENCE",
+            "accounting_schema_version": 2,
             "execution": "signal_close_t_next_open",
             "holding_period_days": self.settings.backtest.holding_period_days,
             "commission": self.settings.backtest.commission,
             "stamp_duty": self.settings.backtest.stamp_duty,
             "slippage": self.settings.backtest.slippage,
+            "execution_cost_policy": results[0].cost_policy,
+            "cost_policy_hash": results[0].cost_policy["cost_policy_hash"],
+            "accounting_summaries": {
+                str(result.top_n): result.accounting_summary for result in results
+            },
             "benchmark_index_code": self.settings.backtest.benchmark_index_code,
             "prediction_file": "predictions.csv",
         }

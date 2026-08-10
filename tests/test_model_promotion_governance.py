@@ -140,7 +140,10 @@ def _evidence(
             reports_root / "executable_validation" / "run" / "manifest.json",
             {
                 "artifact_name": "executable_oos_portfolio_validation_manifest",
-                "schema_version": 1,
+                "schema_version": 2,
+                "accounting_schema_version": 2,
+                "cost_policy_hash": "c" * 64,
+                "execution_cost_policy": {"cost_policy_hash": "c" * 64},
                 "challenger_model_id": candidate_id,
                 "champion_model_id": champion_id,
                 "maximum_signal_date": date,
@@ -238,6 +241,26 @@ def test_create_is_immutable_idempotent_and_does_not_change_registry(tmp_path: P
     assert registry.registry_path.read_bytes() == registry_before
     assert registry.get_champion().model_id == champion_id  # type: ignore[union-attr]
     assert (first.output_dir / "manifest.json").is_file()
+
+
+def test_legacy_executable_accounting_cannot_become_promotion_evidence(
+    tmp_path: Path,
+) -> None:
+    models_root = tmp_path / "models"
+    reports_root = tmp_path / "reports"
+    _, champion_id, candidate_id = _setup_registry(models_root)
+    paths = _evidence(reports_root, candidate_id, champion_id)
+    executable = json.loads(paths.executable_validation.read_text(encoding="utf-8"))
+    executable["schema_version"] = 1
+    executable.pop("accounting_schema_version")
+    paths.executable_validation.write_text(json.dumps(executable), encoding="utf-8")
+
+    with pytest.raises(DataValidationError, match="legacy or unsupported accounting schema"):
+        PromotionGovernanceService(models_root=models_root, reports_root=reports_root).create(
+            model_id=candidate_id,
+            evidence_cutoff_date="20260729",
+            evidence_paths=paths,
+        )
 
 
 def test_evidence_resolver_discovers_and_hash_binds_immutable_sources(tmp_path: Path) -> None:

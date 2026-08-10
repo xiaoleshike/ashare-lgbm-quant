@@ -17,6 +17,7 @@ from ashare_quant.backtest import (
     HistoricalBacktestEngine,
 )
 from ashare_quant.backtest.executable_validation import ExecutableOOSValidationEngine
+from ashare_quant.backtest.invalidation import BacktestInvalidationService
 from ashare_quant.config import load_settings
 from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS
 from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
@@ -699,6 +700,13 @@ def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.Argument
         "diagnostics", help="Diagnose alpha in one immutable historical backtest run."
     )
     diagnostics.add_argument("--run-id", required=True, help="Historical backtest run ID.")
+    invalidate = commands.add_parser(
+        "invalidate", help="Append an immutable review record for unsafe backtest evidence."
+    )
+    invalidate.add_argument("--backtest-id", required=True)
+    invalidate.add_argument("--reason", action="append", required=True)
+    invalidate.add_argument("--reviewed-by", required=True)
+    invalidate.add_argument("--note", default="")
 
 
 def add_pipeline_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -2198,6 +2206,26 @@ def run_backtest_command(args: argparse.Namespace) -> int:
     )
     models_root = settings.paths.models if args.models_root is None else Path(args.models_root)
     output_root = settings.paths.backtests if args.output_root is None else Path(args.output_root)
+    if args.backtest_command == "invalidate":
+        try:
+            invalidation_result = BacktestInvalidationService(
+                backtests_root=output_root,
+                reports_root=settings.paths.reports,
+            ).create(
+                backtest_id=args.backtest_id,
+                reason_codes=tuple(args.reason),
+                reviewed_by=args.reviewed_by,
+                note=args.note,
+            )
+        except (DataValidationError, ValueError) as error:
+            print(f"backtest invalidation failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"backtest_invalidation: id={invalidation_result.invalidation_id} "
+            f"idempotent={invalidation_result.idempotent} "
+            f"output={invalidation_result.output_dir}"
+        )
+        return 0
     if args.backtest_command == "diagnostics":
         historical_root = settings.paths.reports / "backtest"
         diagnostic_root = (
@@ -2290,7 +2318,7 @@ def run_backtest_command(args: argparse.Namespace) -> int:
             Path(effective_config_path(args.config)),
         )
         try:
-            result = runner.run(
+            backtest_result = runner.run(
                 model_dir=None if args.model_dir is None else Path(args.model_dir),
                 start_date=args.start_date,
                 end_date=args.end_date,
@@ -2300,10 +2328,11 @@ def run_backtest_command(args: argparse.Namespace) -> int:
             print(f"backtest run failed: {error}", file=sys.stderr)
             return 2
         print(
-            f"backtest: experiment_id={result.experiment_id} output={result.output_dir} "
-            f"top_n={','.join(str(value) for value in result.top_n)}"
+            f"backtest: experiment_id={backtest_result.experiment_id} "
+            f"output={backtest_result.output_dir} "
+            f"top_n={','.join(str(value) for value in backtest_result.top_n)}"
         )
-        for top_n, metrics in result.metrics.items():
+        for top_n, metrics in backtest_result.metrics.items():
             print(
                 f"top{top_n}: annual_return={metrics.get('annual_return')} "
                 f"sharpe={metrics.get('sharpe')} "

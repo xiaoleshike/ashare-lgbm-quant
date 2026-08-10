@@ -50,21 +50,18 @@ def test_limit_down_sell_rejection_delays_exit_until_sellable() -> None:
     assert sells.iloc[1]["trade_date"] == "20240108"
 
 
-def test_persistently_untradeable_position_is_written_off_after_max_delay() -> None:
+def test_persistently_untradeable_position_keeps_value_after_max_delay() -> None:
     inputs = make_inputs(exit_can_sell=False, delayed_exit_can_sell=False)
     settings = make_settings().model_copy(update={"sell_delay_max_days": 1})
 
     result = simulate_portfolio(inputs, top_n=1, settings=settings)
-    closures = result.trades[result.trades["status"] == "written_off"]
-
-    assert len(closures) == 1
-    assert closures.iloc[0]["trade_date"] == "20240108"
-    assert closures.iloc[0]["gross_value"] == 0.0
-    assert closures.iloc[0]["reason"] == "untradeable_after_max_sell_delay"
-    assert result.metrics["written_off_positions"] == 1
-    assert result.metrics["trade_win_rate"] == 0.0
+    assert "written_off" not in result.trades["status"].tolist()
+    assert result.metrics["written_off_positions"] == 0
     final_date = result.daily_returns["trade_date"].astype(str).max()
-    assert not result.holdings["trade_date"].astype(str).eq(final_date).any()
+    final_holding = result.holdings[result.holdings["trade_date"].astype(str).eq(final_date)]
+    assert len(final_holding) == 1
+    assert final_holding.iloc[0]["market_value"] > 0
+    assert result.accounting_summary["unresolved_positions"] == 1
 
 
 def test_costs_are_deducted_from_cash_and_reported() -> None:
