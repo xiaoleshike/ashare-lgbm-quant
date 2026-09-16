@@ -10,6 +10,10 @@ import pandas as pd
 
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.datasets import get_dataset_spec
+from ashare_quant.data.security_identity import (
+    SecurityIdentityResolver,
+    canonicalize_security_datasets,
+)
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.features.fundamentals import build_fundamental_features
 from ashare_quant.features.market import build_market_features
@@ -48,6 +52,9 @@ class FeatureBuilder:
         self._universe_store = universe_store
         self._feature_store = feature_store
         self._settings = settings
+        self._identity_resolver = SecurityIdentityResolver.from_path(
+            settings.security_identity.mapping_path
+        )
 
     def build(self, start_date: str, end_date: str) -> FeatureBuildResult:
         """Build and persist daily feature rows."""
@@ -110,7 +117,7 @@ class FeatureBuilder:
             }
         )
         inputs["universe"] = self._universe_store.read(history_start, end_date)
-        return inputs
+        return canonicalize_security_datasets(inputs, self._identity_resolver)
 
 
 def build_feature_frame(

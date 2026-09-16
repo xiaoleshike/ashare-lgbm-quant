@@ -38,11 +38,17 @@ valuation status, and stale-day count.
 - `STALE_MISSING_DATA`: available only in diagnostic mode. Evidence-grade runs fail on unexplained
   missing or malformed prices with `BACKTEST_MARKET_DATA_INCOMPLETE`.
 - Terminal write-off: allowed only when universe data explicitly proves a delisted terminal state.
+- Security aliases: execution prices use the same versioned canonical identity as
+  universe construction before security/date joins.
 
 Only an effective `stock_basic.delist_date` is authoritative terminal evidence. A security's last
 observed market-data date is coverage metadata, not a delisting date. Missing quotes, prolonged
 suspension, and exceeding the sell-delay threshold do not prove delisting and cannot authorize a
 terminal write-off.
+
+A missing quote is not a suspension. Only explicit point-in-time suspension evidence
+permits `STALE_SUSPENDED` valuation using the last valid close. Otherwise an
+evidence-grade run raises `BACKTEST_MARKET_DATA_INCOMPLETE`.
 
 The engine checks nonnegative cash/equity for the unlevered strategy, finite values, equity
 reconciliation, nonnegative shares and costs, sell quantity, duplicate positions, and complete

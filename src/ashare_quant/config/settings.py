@@ -81,6 +81,14 @@ class DataSettings(BaseModel):
         return self
 
 
+class SecurityIdentitySettings(BaseModel):
+    """Versioned source-code alias mapping used at processed-data boundaries."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mapping_path: Path = Path("config/security_identity/bse_code_aliases.json")
+
+
 class HistoricalBacktestPeriodSettings(BaseModel):
     """Named chronological evaluation period for a frozen champion model."""
 
@@ -1098,6 +1106,7 @@ class AppSettings(BaseModel):
     paths: PathSettings = Field(default_factory=PathSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     data: DataSettings = Field(default_factory=DataSettings)
+    security_identity: SecurityIdentitySettings = Field(default_factory=SecurityIdentitySettings)
     universe: UniverseSettings = Field(default_factory=UniverseSettings)
     labels: LabelSettings = Field(default_factory=LabelSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)

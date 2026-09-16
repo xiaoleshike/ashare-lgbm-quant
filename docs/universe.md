@@ -2,6 +2,34 @@
 
 Phase 2 builds `universe_daily`, a daily A-share universe and tradability table stored under `data/processed/universe_daily/year=YYYY/month=MM/data.parquet` by default.
 
+## Security Identity
+
+Cross-source stock joins use the versioned mapping in
+`config/security_identity/bse_code_aliases.json`. Raw Parquet remains the provider
+source of record: a historical `839680.BJ` row is not rewritten. At the
+raw-to-processed boundary the row retains `source_ts_code=839680.BJ` in memory and
+uses `ts_code=920680.BJ` as its canonical security identity.
+
+Mappings are explicit and may be effective-dated. No numeric-prefix or suffix
+heuristic is used. Unknown codes remain unchanged. Canonical duplicates with equal
+semantics are deterministically merged; conflicting rows for one canonical key fail
+with `SECURITY_IDENTITY_COLLISION`.
+
+`namechange` is revision-like reference data: when the same named event is present
+under both an alias and the canonical code, the canonical-code source record is the
+authority for fields such as the closed `end_date`. Same-source multi-event rows are
+preserved for the dataset normalizer and are not misclassified as alias collisions.
+
+Universe manifests record `security_identity_mapping_version` and
+`security_identity_mapping_hash`. The canonicalization boundary covers
+`stock_basic`, `daily`, `daily_basic`, `suspend_d`, `stk_limit`, and `namechange`.
+Feature and label builders reuse the resolver for `adj_factor` and their financial
+statement inputs. Production candidate filtering also canonicalizes `daily`,
+`daily_basic`, and `stk_limit` before joining them to the processed universe.
+
+For `suspend_d`, `S` is an active suspension event and `R` is a resumption event.
+Missing price data is never used to infer suspension.
+
 ## Base Universe
 
 `in_base_universe` means a stock belongs to the daily historical candidate set according to `stock_basic.list_date`, `stock_basic.delist_date`, and historical appearances in `daily`. The builder uses the union of `stock_basic` and all `daily.ts_code` values, so historical stocks are not dropped merely because they are absent from a current listed-only view.

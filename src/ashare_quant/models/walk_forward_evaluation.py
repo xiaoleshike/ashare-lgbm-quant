@@ -19,6 +19,7 @@ from ashare_quant.backtest.engine import BacktestInputs, simulate_portfolio
 from ashare_quant.backtest.executable_validation import REQUIRED_TOP_N, _signals
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_identity import SecurityIdentityResolver
 from ashare_quant.models.compute import resolve_training_backend
 from ashare_quant.models.feature_provenance import (
     FeatureSetProvenance,
@@ -202,6 +203,9 @@ class RankerFoldExecutor:
             calendar[0],
             calendar[-1],
             self.settings.universe.price_tolerance,
+            identity_resolver=SecurityIdentityResolver.from_path(
+                self.settings.security_identity.mapping_path
+            ),
         )
         benchmark = load_benchmark(
             self.raw_root, execution.benchmark_index_code, calendar[0], calendar[-1]

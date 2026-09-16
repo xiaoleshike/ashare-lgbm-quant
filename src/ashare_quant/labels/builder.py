@@ -10,6 +10,10 @@ import pandas as pd
 from ashare_quant.config.settings import AppSettings, LabelSettings
 from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_identity import (
+    SecurityIdentityResolver,
+    canonicalize_security_datasets,
+)
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.labels.storage import LABEL_COLUMNS, LabelStore
 from ashare_quant.labels.validation import LabelValidationResult, validate_label_frame
@@ -44,6 +48,9 @@ class LabelBuilder:
         self._universe_store = universe_store
         self._label_store = label_store
         self._settings = settings
+        self._identity_resolver = SecurityIdentityResolver.from_path(
+            settings.security_identity.mapping_path
+        )
 
     def build(
         self,
@@ -101,7 +108,7 @@ class LabelBuilder:
         future_end = future_calendar_end(
             calendar, end_date, max_horizon + self._settings.labels.max_exit_delay_days + 1
         )
-        return {
+        inputs = {
             "trade_cal": calendar,
             "daily": self._raw_store.read_dataset(get_dataset_spec("daily")),
             "adj_factor": self._raw_store.read_dataset(get_dataset_spec("adj_factor")),
@@ -109,6 +116,7 @@ class LabelBuilder:
             "index_daily": self._raw_store.read_dataset(get_dataset_spec("index_daily")),
             "universe": self._universe_store.read(start_date, future_end),
         }
+        return canonicalize_security_datasets(inputs, self._identity_resolver)
 
 
 def build_label_frame(

@@ -55,6 +55,7 @@ class DatasetSpec:
     vip_endpoint: str | None = None
     response_row_limit: int | None = None
     optional: bool = False
+    string_columns: tuple[str, ...] = ()
 
 
 DATASET_SPECS: dict[str, DatasetSpec] = {
@@ -192,6 +193,7 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         uses_trade_calendar=True,
         allow_empty_trading_days=True,
         fields=("ts_code", "trade_date", "suspend_timing", "suspend_type"),
+        string_columns=("ts_code", "trade_date", "suspend_timing", "suspend_type"),
     ),
     "stk_limit": DatasetSpec(
         name="stk_limit",

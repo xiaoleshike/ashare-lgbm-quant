@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from ashare_quant.config.settings import UniverseSettings
 from ashare_quant.data.datasets import get_dataset_spec
+from ashare_quant.data.security_identity import SecurityIdentityResolver
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.universe import UniverseBuilder, UniverseStore, build_universe_frame
 from ashare_quant.universe.builder import add_listing_flags, build_candidates, year_date_ranges
@@ -164,6 +167,86 @@ def test_universe_builder_covers_core_membership_and_tradability_rules() -> None
     assert "not_listed" in str(delisted["exclude_reason"])
 
     assert validate_universe_frame(frame).ok
+
+
+def test_bse_alias_suspension_and_resume_are_canonicalized() -> None:
+    trade_dates = ["20250429", "20250430", "20250506"]
+    inputs = {
+        "stock_basic": pd.DataFrame(
+            {
+                "ts_code": ["920680.BJ"],
+                "name": ["Test BSE"],
+                "market": ["BSE"],
+                "industry": ["Test"],
+                "list_date": ["20200101"],
+                "delist_date": [None],
+            }
+        ),
+        "trade_cal": pd.DataFrame({"cal_date": trade_dates, "is_open": [1, 1, 1]}),
+        "daily": pd.DataFrame(
+            {
+                "ts_code": ["920680.BJ", "920680.BJ"],
+                "trade_date": ["20250429", "20250506"],
+                "open": [9.49, 7.25],
+                "high": [9.49, 7.25],
+                "low": [9.49, 7.25],
+                "close": [9.49, 7.25],
+                "amount": [1000.0, 1000.0],
+            }
+        ),
+        "daily_basic": pd.DataFrame(columns=["ts_code", "trade_date"]),
+        "suspend_d": pd.DataFrame(
+            {
+                "ts_code": ["839680.BJ", "839680.BJ"],
+                "trade_date": ["20250430", "20250506"],
+                "suspend_type": ["S", "R"],
+            }
+        ),
+        "stk_limit": pd.DataFrame(
+            {
+                "ts_code": ["920680.BJ"],
+                "trade_date": ["20250430"],
+                "up_limit": [12.33],
+                "down_limit": [6.65],
+            }
+        ),
+        "namechange": pd.DataFrame(
+            {
+                "ts_code": ["920680.BJ"],
+                "name": ["ST Test BSE"],
+                "start_date": ["20250506"],
+                "end_date": [None],
+                "ann_date": ["20250506"],
+            }
+        ),
+    }
+    settings = UniverseSettings(
+        min_list_trading_days=0,
+        liquidity_window_days=1,
+        min_avg_amount=0.0,
+        require_full_liquidity_window=False,
+    )
+    identity = SecurityIdentityResolver.from_path(
+        Path("config/security_identity/bse_code_aliases.json")
+    )
+
+    frame = build_universe_frame(
+        inputs,
+        settings,
+        trade_dates[0],
+        trade_dates[-1],
+        identity_resolver=identity,
+    ).set_index("trade_date")
+
+    assert not bool(frame.loc["20250429", "is_suspended"])
+    assert bool(frame.loc["20250430", "is_suspended"])
+    assert not bool(frame.loc["20250430", "can_buy"])
+    assert not bool(frame.loc["20250430", "can_sell"])
+    assert not bool(frame.loc["20250430", "in_model_universe"])
+    assert not bool(frame.loc["20250506", "is_suspended"])
+    assert bool(frame.loc["20250506", "is_st"])
+    assert not bool(frame.loc["20250506", "in_model_universe"])
+    assert "st" in str(frame.loc["20250506", "exclude_reason"])
 
 
 def test_daily_only_candidate_does_not_infer_delist_date_from_last_quote() -> None:

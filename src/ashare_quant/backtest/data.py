@@ -13,6 +13,7 @@ import pandas as pd
 from ashare_quant.backtest.engine import BacktestInputs
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_identity import SecurityIdentityResolver
 
 type DataFrame = pd.DataFrame
 
@@ -61,6 +62,9 @@ def load_backtest_inputs(
         price_start,
         price_end,
         settings.universe.price_tolerance,
+        identity_resolver=SecurityIdentityResolver.from_path(
+            settings.security_identity.mapping_path
+        ),
     )
     benchmark = load_benchmark(
         raw_root, settings.backtest.benchmark_index_code, price_start, price_end
@@ -138,38 +142,60 @@ def load_execution_prices(
     start_date: str,
     end_date: str,
     tolerance: float,
+    *,
+    identity_resolver: SecurityIdentityResolver | None = None,
 ) -> DataFrame:
     """Load next-open tradability fields without using label outputs."""
 
     daily_glob = raw_root / "daily" / "**" / "*.parquet"
     limit_glob = raw_root / "stk_limit" / "**" / "*.parquet"
     universe_glob = processed_root / "universe_daily" / "**" / "*.parquet"
-    query = f"""
+    universe_query = f"""
         SELECT
             CAST(u.trade_date AS VARCHAR) AS trade_date,
             CAST(u.ts_code AS VARCHAR) AS ts_code,
-            CAST(d.open AS DOUBLE) AS open,
-            CAST(d.close AS DOUBLE) AS close,
-            CAST(s.up_limit AS DOUBLE) AS up_limit,
-            CAST(s.down_limit AS DOUBLE) AS down_limit,
             CAST(u.is_suspended AS BOOLEAN) AS is_suspended,
             CAST(u.is_st AS BOOLEAN) AS is_st,
             CAST(u.is_listed AS BOOLEAN) AS is_listed,
             CAST(u.delist_date AS VARCHAR) AS delist_date
         FROM read_parquet('{universe_glob.as_posix()}', hive_partitioning=false) AS u
-        LEFT JOIN read_parquet('{daily_glob.as_posix()}', hive_partitioning=false) AS d
-            ON CAST(u.trade_date AS VARCHAR) = CAST(d.trade_date AS VARCHAR)
-           AND CAST(u.ts_code AS VARCHAR) = CAST(d.ts_code AS VARCHAR)
-        LEFT JOIN read_parquet('{limit_glob.as_posix()}', hive_partitioning=false) AS s
-            ON CAST(u.trade_date AS VARCHAR) = CAST(s.trade_date AS VARCHAR)
-           AND CAST(u.ts_code AS VARCHAR) = CAST(s.ts_code AS VARCHAR)
         WHERE CAST(u.trade_date AS VARCHAR) BETWEEN ? AND ?
         ORDER BY u.trade_date, u.ts_code
     """  # noqa: S608 -- local configured Parquet path
+    daily_query = f"""
+        SELECT CAST(trade_date AS VARCHAR) AS trade_date,
+               CAST(ts_code AS VARCHAR) AS ts_code,
+               CAST(open AS DOUBLE) AS open,
+               CAST(close AS DOUBLE) AS close
+        FROM read_parquet('{daily_glob.as_posix()}', hive_partitioning=false)
+        WHERE CAST(trade_date AS VARCHAR) BETWEEN ? AND ?
+    """  # noqa: S608 -- local configured Parquet path
+    limit_query = f"""
+        SELECT CAST(trade_date AS VARCHAR) AS trade_date,
+               CAST(ts_code AS VARCHAR) AS ts_code,
+               CAST(up_limit AS DOUBLE) AS up_limit,
+               CAST(down_limit AS DOUBLE) AS down_limit
+        FROM read_parquet('{limit_glob.as_posix()}', hive_partitioning=false)
+        WHERE CAST(trade_date AS VARCHAR) BETWEEN ? AND ?
+    """  # noqa: S608 -- local configured Parquet path
     with duckdb.connect() as connection:
-        frame = connection.execute(query, [start_date, end_date]).fetch_df()
+        frame = connection.execute(universe_query, [start_date, end_date]).fetch_df()
+        daily = connection.execute(daily_query, [start_date, end_date]).fetch_df()
+        limits = connection.execute(limit_query, [start_date, end_date]).fetch_df()
     if frame.empty:
         raise DataValidationError(f"no daily prices for backtest {start_date}..{end_date}")
+    resolver = identity_resolver or SecurityIdentityResolver.empty()
+    daily = resolver.canonicalize_frame(daily, "daily")
+    limits = resolver.canonicalize_frame(limits, "stk_limit")
+    frame = frame.merge(
+        daily[["trade_date", "ts_code", "open", "close"]],
+        on=["trade_date", "ts_code"],
+        how="left",
+    ).merge(
+        limits[["trade_date", "ts_code", "up_limit", "down_limit"]],
+        on=["trade_date", "ts_code"],
+        how="left",
+    )
     frame["is_suspended"] = frame["is_suspended"].fillna(False).astype(bool)
     frame["is_st"] = frame["is_st"].fillna(False).astype(bool)
     frame["is_listed"] = frame["is_listed"].fillna(False).astype(bool)

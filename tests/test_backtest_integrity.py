@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from ashare_quant.backtest.costs import ExecutionCostPolicy
+from ashare_quant.backtest.data import load_execution_prices
 from ashare_quant.backtest.engine import BacktestInputs, calculate_metrics, simulate_portfolio
 from ashare_quant.backtest.invalidation import BacktestInvalidationService
 from ashare_quant.backtest.provenance import (
@@ -21,6 +22,7 @@ from ashare_quant.config.settings import (
     ExecutionCostScheduleEntry,
 )
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_identity import SecurityIdentityResolver
 
 
 def test_evidence_model_manifest_is_required(tmp_path: Path) -> None:
@@ -78,6 +80,94 @@ def test_suspended_quote_carries_last_close_without_equity_collapse() -> None:
     )
     assert result.daily_returns["net_return"].min() > -0.1
     assert result.accounting_summary["stale_valuation_days"] == 1
+
+
+def test_bse_suspension_uses_last_valid_close_and_resumes_current_valuation() -> None:
+    dates = (
+        "20250424",
+        "20250425",
+        "20250428",
+        "20250429",
+        "20250430",
+        "20250506",
+        "20250507",
+    )
+    inputs = _inputs(
+        [
+            _price("20250424", 11.80, 11.80),
+            _price("20250425", 11.70, 11.70),
+            _price("20250428", 10.66, 10.66),
+            _price("20250429", 9.49, 9.49),
+            _price("20250430", np.nan, np.nan, can_sell=False, suspended=True),
+            _price("20250506", 7.25, 7.25),
+            _price("20250507", 7.71, 7.71),
+        ],
+        calendar=dates,
+    )
+
+    result = simulate_portfolio(
+        inputs,
+        top_n=1,
+        settings=_settings(holding_period_days=6),
+        purpose="executable_validation",
+    )
+
+    suspended = result.holdings[result.holdings["trade_date"] == "20250430"].iloc[0]
+    resumed = result.holdings[result.holdings["trade_date"] == "20250506"].iloc[0]
+    shares = float(suspended["shares"])
+    assert suspended["valuation_status"] == "STALE_SUSPENDED"
+    assert suspended["market_value"] == pytest.approx(shares * 9.49)
+    assert resumed["valuation_status"] == "CURRENT"
+    assert resumed["market_value"] == pytest.approx(shares * 7.25)
+
+
+def test_execution_price_loader_joins_raw_alias_to_canonical_universe(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    processed_root = tmp_path / "processed"
+    for dataset in ("daily", "stk_limit"):
+        (raw_root / dataset / "year=2025" / "month=04").mkdir(parents=True)
+    (processed_root / "universe_daily" / "year=2025" / "month=04").mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "trade_date": ["20250430"],
+            "ts_code": ["839680.BJ"],
+            "open": [7.0],
+            "close": [7.1],
+        }
+    ).to_parquet(raw_root / "daily" / "year=2025" / "month=04" / "data.parquet")
+    pd.DataFrame(
+        {
+            "trade_date": ["20250430"],
+            "ts_code": ["839680.BJ"],
+            "up_limit": [12.33],
+            "down_limit": [6.65],
+        }
+    ).to_parquet(raw_root / "stk_limit" / "year=2025" / "month=04" / "data.parquet")
+    pd.DataFrame(
+        {
+            "trade_date": ["20250430"],
+            "ts_code": ["920680.BJ"],
+            "is_suspended": [False],
+            "is_st": [False],
+            "is_listed": [True],
+            "delist_date": [None],
+        }
+    ).to_parquet(processed_root / "universe_daily" / "year=2025" / "month=04" / "data.parquet")
+
+    prices = load_execution_prices(
+        raw_root,
+        processed_root,
+        "20250430",
+        "20250430",
+        1e-6,
+        identity_resolver=SecurityIdentityResolver.from_path(
+            Path("config/security_identity/bse_code_aliases.json")
+        ),
+    )
+
+    assert prices.loc[0, "ts_code"] == "920680.BJ"
+    assert prices.loc[0, "close"] == pytest.approx(7.1)
+    assert bool(prices.loc[0, "can_buy"])
 
 
 def test_unexplained_missing_quote_fails_evidence_mode() -> None:

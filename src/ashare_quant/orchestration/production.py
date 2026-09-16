@@ -14,6 +14,7 @@ from ashare_quant.data.datasets import DEFAULT_DATASETS
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.ingestion import DataIngestionService
 from ashare_quant.data.quality_logging import append_validation_results
+from ashare_quant.data.security_identity import SecurityIdentityResolver
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.data.validation import DataValidator
 from ashare_quant.features import FeatureBuilder, FeatureStore, FeatureValidator
@@ -261,6 +262,10 @@ class ProductionDailyStageExecutor:
                     "namechange",
                 ),
             ),
+            extra={
+                "security_identity_mapping_version": (result.security_identity_mapping_version),
+                "security_identity_mapping_hash": result.security_identity_mapping_hash,
+            },
         )
         return StageResult(
             "success",
@@ -326,7 +331,12 @@ class ProductionDailyStageExecutor:
             canonical_statistics=statistics,
             partitions_changed=result.partitions_changed,
             source_fingerprints=sources,
-            extra={"feature_count": feature_count},
+            extra={
+                "feature_count": feature_count,
+                **SecurityIdentityResolver.from_path(
+                    self.settings.security_identity.mapping_path
+                ).provenance(),
+            },
         )
         return StageResult(
             "success",

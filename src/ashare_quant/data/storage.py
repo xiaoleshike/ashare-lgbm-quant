@@ -48,7 +48,7 @@ class ParquetDataStore:
             return 0
         self._validate_frame(spec, frame)
 
-        normalized = self._normalize_dates(spec, frame.copy())
+        normalized = self._normalize_types(spec, frame.copy())
         rows_written = 0
         for partition_path, partition_frame in self._iter_partitions(spec, normalized):
             merged = self._merge_existing(spec, partition_path, partition_frame)
@@ -65,7 +65,7 @@ class ParquetDataStore:
             raise DataValidationError(f"{spec.name} snapshot refresh returned no rows")
         self._validate_frame(spec, frame)
         path = self.dataset_dir(spec) / "snapshot=latest" / "data.parquet"
-        normalized = self._normalize_dates(spec, frame.copy())
+        normalized = self._normalize_types(spec, frame.copy())
         merged = normalized.drop_duplicates(subset=list(spec.primary_key), keep="last")
         sort_columns = [column for column in (*spec.primary_key, spec.date_column or "") if column]
         merged = merged.sort_values(sort_columns).reset_index(drop=True)
@@ -175,9 +175,12 @@ class ParquetDataStore:
         if missing_pk:
             raise DataValidationError(f"{spec.name} is missing primary-key columns: {missing_pk}")
 
-    def _normalize_dates(self, spec: DatasetSpec, frame: DataFrame) -> DataFrame:
+    def _normalize_types(self, spec: DatasetSpec, frame: DataFrame) -> DataFrame:
+        for column in spec.string_columns:
+            if column in frame.columns:
+                frame[column] = frame[column].astype("string")
         if spec.date_column is not None and spec.date_column in frame.columns:
-            frame[spec.date_column] = frame[spec.date_column].astype(str)
+            frame[spec.date_column] = frame[spec.date_column].astype("string")
         return frame
 
     def _iter_partitions(self, spec: DatasetSpec, frame: DataFrame) -> list[tuple[Path, DataFrame]]:

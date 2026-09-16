@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import duckdb
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.storage import ParquetDataStore
@@ -234,3 +237,44 @@ def test_validator_classifies_stk_limit_special_values(tmp_path) -> None:
     assert result.ok is True
     assert any("no-price-limit sentinel" in warning for warning in result.warnings)
     assert any("suspended zero-limit rows" in warning for warning in result.warnings)
+
+
+def test_suspend_string_columns_have_stable_parquet_schema_across_partitions(tmp_path) -> None:
+    store = ParquetDataStore(tmp_path)
+    spec = get_dataset_spec("suspend_d")
+    store.write(
+        spec,
+        pd.DataFrame(
+            {
+                "ts_code": ["839680.BJ"],
+                "trade_date": ["20250131"],
+                "suspend_timing": [None],
+                "suspend_type": ["S"],
+            }
+        ),
+    )
+    store.write(
+        spec,
+        pd.DataFrame(
+            {
+                "ts_code": ["839680.BJ"],
+                "trade_date": ["20250203"],
+                "suspend_timing": ["09:30"],
+                "suspend_type": ["R"],
+            }
+        ),
+    )
+    files = sorted(store.dataset_dir(spec).glob("**/*.parquet"))
+
+    timing_types = [
+        pq.ParquetFile(path).schema_arrow.field("suspend_timing").type for path in files
+    ]
+    assert timing_types[0] == timing_types[1]
+    assert pa.types.is_string(timing_types[0]) or pa.types.is_large_string(timing_types[0])
+    glob = store.dataset_dir(spec) / "**" / "*.parquet"
+    with duckdb.connect() as connection:
+        rows = connection.execute(
+            "SELECT count(*) FROM read_parquet(?, hive_partitioning=false)",
+            [glob.as_posix()],
+        ).fetchone()
+    assert rows == (2,)

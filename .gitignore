@@ -9,11 +9,23 @@ htmlcov/
 .env
 .env.*
 !.env.example
+
+# Local secrets and machine-specific deployment overrides.
+/deploy/systemd/ashare-quant.env
+/deploy/systemd/*.local
+/config/local.yaml
+/config/*.local.yaml
+
+# Local data, immutable runtime artifacts, and operational state.
 /data/
+/data_on_sata
 /models/
 /reports/
+/backtests/
 /paper_trading/
+/runs/
 /logs/
+*.log
 *.parquet
 *.duckdb
 *.db

@@ -19,10 +19,14 @@ from ashare_quant.backtest import (
 from ashare_quant.backtest.executable_validation import ExecutableOOSValidationEngine
 from ashare_quant.backtest.invalidation import BacktestInvalidationService
 from ashare_quant.config import load_settings
-from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS
+from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS, get_dataset_spec
 from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
 from ashare_quant.data.ingestion import DataIngestionService, GapReport, build_store
 from ashare_quant.data.quality_logging import append_quality_event, append_validation_results
+from ashare_quant.data.security_identity import (
+    SecurityIdentityResolver,
+    scan_cross_source_identity,
+)
 from ashare_quant.data.validation import DataValidator, ValidationResult
 from ashare_quant.diagnostics import FeatureDiagnosticPipeline
 from ashare_quant.diagnostics.pipeline import ChronologicalSplit
@@ -210,6 +214,11 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     add_dataset_args(validate_parser)
 
     data_subparsers.add_parser("status", help="Show local dataset status.")
+    identity_parser = data_subparsers.add_parser(
+        "security-identity-scan",
+        help="Read-only cross-source security alias consistency scan.",
+    )
+    add_date_range_args(identity_parser)
 
 
 def add_universe_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1083,6 +1092,40 @@ def run_data_command(args: argparse.Namespace) -> int:
     configure_logging(settings.logging.level, settings.logging.json_logs)
     store = build_store(args.storage_root, settings)
 
+    if args.data_command == "security-identity-scan":
+        resolver = SecurityIdentityResolver.from_path(settings.security_identity.mapping_path)
+        universe_store = UniverseStore(settings.paths.processed_data)
+        frames = {
+            name: store.read_dataset(get_dataset_spec(name), args.start_date, args.end_date)
+            for name in (
+                "stock_basic",
+                "daily",
+                "daily_basic",
+                "suspend_d",
+                "stk_limit",
+                "namechange",
+            )
+        }
+        frames["universe_daily"] = universe_store.read(args.start_date, args.end_date)
+        try:
+            scan_result = scan_cross_source_identity(frames, resolver)
+        except DataValidationError as error:
+            print(f"security identity scan failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"mapping_version={scan_result.mapping_version} "
+            f"mapping_hash={scan_result.mapping_hash} "
+            f"configured_aliases={scan_result.configured_aliases} "
+            f"observed_aliases={scan_result.observed_aliases} "
+            f"observed_alias_rows={scan_result.observed_alias_rows} "
+            f"unresolved_mismatches={len(scan_result.unresolved_mismatches)} "
+            f"same_source_multi_event_keys={scan_result.same_source_multi_event_keys} "
+            f"collisions={scan_result.collisions}"
+        )
+        for mismatch in scan_result.unresolved_mismatches:
+            print(f"  unresolved: {mismatch}")
+        return 0 if scan_result.ok else 1
+
     if args.data_command == "status":
         for status in store.all_statuses():
             print(
@@ -1218,6 +1261,12 @@ def run_universe_command(args: argparse.Namespace) -> int:
                         "namechange",
                     ),
                 ),
+                extra={
+                    "security_identity_mapping_version": (
+                        build_result.security_identity_mapping_version
+                    ),
+                    "security_identity_mapping_hash": build_result.security_identity_mapping_hash,
+                },
             )
         return 0 if build_result.validation.ok else 1
 
@@ -1298,7 +1347,12 @@ def run_labels_command(args: argparse.Namespace) -> int:
                 end_date=build_result.end_date,
                 row_count=build_result.rows_written,
                 source_fingerprints=source_fingerprints,
-                extra={"label_horizons": list(build_result.horizons)},
+                extra={
+                    "label_horizons": list(build_result.horizons),
+                    **SecurityIdentityResolver.from_path(
+                        settings.security_identity.mapping_path
+                    ).provenance(),
+                },
             )
         return 0 if build_result.validation.ok else 1
 
@@ -1399,7 +1453,12 @@ def run_features_command(args: argparse.Namespace) -> int:
             canonical_statistics=canonical_statistics,
             partitions_changed=result.partitions_changed,
             source_fingerprints=source_fingerprints,
-            extra={"feature_count": canonical_feature_count},
+            extra={
+                "feature_count": canonical_feature_count,
+                **SecurityIdentityResolver.from_path(
+                    settings.security_identity.mapping_path
+                ).provenance(),
+            },
         )
         return 0
 
@@ -2179,6 +2238,9 @@ def run_strategy_command(args: argparse.Namespace) -> int:
         reports_root=reports_root,
         config_path=Path(effective_config_path(args.config)),
         settings=settings.strategy.candidate_selection,
+        identity_resolver=SecurityIdentityResolver.from_path(
+            settings.security_identity.mapping_path
+        ),
     )
     try:
         result = selector.select(args.as_of)
@@ -2508,6 +2570,9 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
                 reports_root=reports_root,
                 config_path=config_path,
                 settings=settings.strategy.candidate_selection,
+                identity_resolver=SecurityIdentityResolver.from_path(
+                    settings.security_identity.mapping_path
+                ),
             ),
             research_report=DailyResearchReportGenerator(
                 raw_root=settings.paths.parquet_store,

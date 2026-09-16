@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "artifact_name": "security_identity_mapping",
+  "mapping_version": "bse_code_aliases_v1",
+  "aliases": [
+    {
+      "source_code": "831396.BJ",
+      "canonical_code": "920496.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "BSE historical code migration"
+    },
+    {
+      "source_code": "831832.BJ",
+      "canonical_code": "920932.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "BSE historical code migration"
+    },
+    {
+      "source_code": "837023.BJ",
+      "canonical_code": "920123.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "BSE historical code migration"
+    },
+    {
+      "source_code": "839680.BJ",
+      "canonical_code": "920680.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "BSE historical code migration"
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import pandas as pd
 
 from ashare_quant.config.settings import CandidateSelectionSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_identity import SecurityIdentityResolver
 from ashare_quant.utils.manifest import atomic_write_json, config_hash, current_git_info
 
 type DataFrame = pd.DataFrame
@@ -54,12 +55,14 @@ class CandidateSelector:
         reports_root: Path,
         config_path: Path,
         settings: CandidateSelectionSettings,
+        identity_resolver: SecurityIdentityResolver,
     ) -> None:
         self.raw_root = raw_root
         self.processed_root = processed_root
         self.reports_root = reports_root
         self.config_path = config_path
         self.settings = settings
+        self.identity_resolver = identity_resolver
 
     def select(self, as_of: str) -> CandidateSelectionResult:
         """Filter and rank one existing production prediction artifact."""
@@ -71,7 +74,12 @@ class CandidateSelector:
         model_id, feature_hash = _validate_prediction_identity(
             predictions, prediction_manifest, as_of
         )
-        inputs = _load_filter_inputs(self.raw_root, self.processed_root, as_of)
+        inputs = _load_filter_inputs(
+            self.raw_root,
+            self.processed_root,
+            as_of,
+            self.identity_resolver,
+        )
         candidates, filtered_counts = _apply_filters(predictions, inputs, self.settings)
         self._publish(
             report_dir,
@@ -126,6 +134,7 @@ class CandidateSelector:
             "config_path": str(self.config_path),
             "config_hash": config_hash(self.config_path),
             "filtering_rules": self.settings.model_dump(mode="json"),
+            **self.identity_resolver.provenance(),
             "prediction_count": len(predictions),
             "candidate_count": len(candidates),
             "filtered_counts": filtered_counts,
@@ -195,7 +204,12 @@ def _validate_prediction_identity(
     return model_id, feature_hash
 
 
-def _load_filter_inputs(raw_root: Path, processed_root: Path, as_of: str) -> DataFrame:
+def _load_filter_inputs(
+    raw_root: Path,
+    processed_root: Path,
+    as_of: str,
+    identity_resolver: SecurityIdentityResolver,
+) -> DataFrame:
     universe = _read_date_partition(
         processed_root,
         "universe_daily",
@@ -224,6 +238,9 @@ def _load_filter_inputs(raw_root: Path, processed_root: Path, as_of: str) -> Dat
     limits = _read_date_partition(
         raw_root, "stk_limit", as_of, ("ts_code", "up_limit", "down_limit")
     )
+    daily = _canonicalize_filter_input(daily, "daily", as_of, identity_resolver)
+    daily_basic = _canonicalize_filter_input(daily_basic, "daily_basic", as_of, identity_resolver)
+    limits = _canonicalize_filter_input(limits, "stk_limit", as_of, identity_resolver)
     for name, frame in (
         ("universe_daily", universe),
         ("daily", daily),
@@ -236,6 +253,20 @@ def _load_filter_inputs(raw_root: Path, processed_root: Path, as_of: str) -> Dat
     merged = universe.merge(daily, on="ts_code", how="outer", validate="one_to_one")
     merged = merged.merge(daily_basic, on="ts_code", how="outer", validate="one_to_one")
     return merged.merge(limits, on="ts_code", how="outer", validate="one_to_one")
+
+
+def _canonicalize_filter_input(
+    frame: DataFrame,
+    dataset: str,
+    as_of: str,
+    identity_resolver: SecurityIdentityResolver,
+) -> DataFrame:
+    """Canonicalize one same-date raw input without leaking source-code columns into joins."""
+
+    working = frame.copy()
+    working["trade_date"] = as_of
+    canonical = identity_resolver.canonicalize_frame(working, dataset)
+    return canonical.drop(columns=["trade_date", "source_ts_code"])
 
 
 def _read_date_partition(

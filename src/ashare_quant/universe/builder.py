@@ -10,6 +10,10 @@ import pandas as pd
 from ashare_quant.config.settings import AppSettings, UniverseSettings
 from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_identity import (
+    SecurityIdentityResolver,
+    canonicalize_security_datasets,
+)
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.universe.storage import UNIVERSE_COLUMNS, UniverseStore
 from ashare_quant.universe.tradability import add_tradability_flags
@@ -28,6 +32,8 @@ class UniverseBuildResult:
     rows_built: int
     partitions_changed: int
     validation: UniverseValidationResult
+    security_identity_mapping_version: str
+    security_identity_mapping_hash: str
 
 
 class UniverseBuilder:
@@ -42,11 +48,14 @@ class UniverseBuilder:
         self._raw_store = raw_store
         self._universe_store = universe_store
         self._settings = settings
+        self._identity_resolver = SecurityIdentityResolver.from_path(
+            settings.security_identity.mapping_path
+        )
 
     def build(self, start_date: str, end_date: str) -> UniverseBuildResult:
         """Build and persist daily universe rows for an inclusive date range."""
 
-        inputs = prepare_universe_inputs(self._load_inputs())
+        inputs = prepare_universe_inputs(self._load_inputs(), self._identity_resolver)
         rows_built = 0
         rows_written = 0
         errors: list[str] = []
@@ -76,13 +85,19 @@ class UniverseBuilder:
             rows_built=rows_built,
             partitions_changed=len(changed_partitions),
             validation=validation,
+            security_identity_mapping_version=self._identity_resolver.mapping_version,
+            security_identity_mapping_hash=self._identity_resolver.mapping_hash,
         )
 
     def preview(self, start_date: str, end_date: str) -> DataFrame:
         """Build universe rows in memory without writing."""
 
         return build_universe_frame(
-            self._load_inputs(), self._settings.universe, start_date, end_date
+            self._load_inputs(),
+            self._settings.universe,
+            start_date,
+            end_date,
+            identity_resolver=self._identity_resolver,
         )
 
     def _load_inputs(self) -> dict[str, DataFrame]:
@@ -103,8 +118,14 @@ def build_universe_frame(
     settings: UniverseSettings,
     start_date: str,
     end_date: str,
+    identity_resolver: SecurityIdentityResolver | None = None,
 ) -> DataFrame:
     """Build a daily universe frame from already loaded raw input frames."""
+
+    if "_security_identity_prepared" not in inputs:
+        inputs = prepare_universe_inputs(
+            inputs, identity_resolver or SecurityIdentityResolver.empty()
+        )
 
     all_trade_dates = open_trade_dates(inputs["trade_cal"], None, end_date)
     build_dates = [date for date in all_trade_dates if start_date <= date <= end_date]
@@ -142,21 +163,32 @@ def build_universe_frame(
     return base.sort_values(["trade_date", "ts_code"]).reset_index(drop=True)
 
 
-def prepare_universe_inputs(inputs: dict[str, DataFrame]) -> dict[str, DataFrame]:
+def prepare_universe_inputs(
+    inputs: dict[str, DataFrame],
+    identity_resolver: SecurityIdentityResolver | None = None,
+) -> dict[str, DataFrame]:
     """Precompute full-history normalized inputs reused by chunked universe builds."""
 
-    prepared = dict(inputs)
-    daily = normalize_daily(inputs["daily"])
+    resolver = identity_resolver or SecurityIdentityResolver.empty()
+    prepared = canonicalize_security_datasets(inputs, resolver)
+    prepared["_security_identity_prepared"] = pd.DataFrame()
+    daily = normalize_daily(prepared["daily"])
     prepared["_daily_normalized"] = daily
     prepared["_daily_with_liquidity"] = add_liquidity_features(daily)
-    prepared["_daily_basic_normalized"] = normalize_daily_basic(inputs["daily_basic"])
-    prepared["_suspend_keys"] = normalize_suspend_keys(inputs["suspend_d"])
-    prepared["_limit_prices"] = normalize_limit_prices(inputs["stk_limit"])
-    prepared["_candidates"] = build_candidates(inputs["stock_basic"], daily)
-    prepared["_st_keys"] = build_historical_st_keys(
-        inputs.get("namechange", pd.DataFrame()),
-        open_trade_dates(inputs["trade_cal"], None, str(inputs["trade_cal"]["cal_date"].max())),
-    )
+    prepared["_daily_basic_normalized"] = normalize_daily_basic(prepared["daily_basic"])
+    prepared["_suspend_keys"] = normalize_suspend_keys(prepared["suspend_d"])
+    prepared["_limit_prices"] = normalize_limit_prices(prepared["stk_limit"])
+    prepared["_candidates"] = build_candidates(prepared["stock_basic"], daily)
+    namechange = prepared.get("namechange", pd.DataFrame())
+    if not namechange.empty:
+        prepared["_st_keys"] = build_historical_st_keys(
+            namechange,
+            open_trade_dates(
+                prepared["trade_cal"],
+                None,
+                str(prepared["trade_cal"]["cal_date"].max()),
+            ),
+        )
     return prepared
 
 
@@ -592,7 +624,11 @@ def normalize_suspend_keys(suspend_d: DataFrame) -> DataFrame:
 
     if suspend_d.empty or not {"ts_code", "trade_date"}.issubset(suspend_d.columns):
         return pd.DataFrame(columns=["ts_code", "trade_date"])
-    suspend_keys = suspend_d[["ts_code", "trade_date"]].copy()
+    working = suspend_d.copy()
+    if "suspend_type" in working.columns:
+        event_type = working["suspend_type"].fillna("").astype(str).str.upper()
+        working = working[event_type == "S"].copy()
+    suspend_keys = working[["ts_code", "trade_date"]].copy()
     suspend_keys["ts_code"] = suspend_keys["ts_code"].astype(str)
     suspend_keys["trade_date"] = suspend_keys["trade_date"].astype(str)
     return suspend_keys.drop_duplicates()

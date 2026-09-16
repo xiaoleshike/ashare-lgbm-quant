@@ -4,10 +4,13 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from ashare_quant.cli import main
 from ashare_quant.config import load_settings
 from ashare_quant.config.settings import CandidateSelectionSettings
+from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_identity import SecurityIdentityResolver
 from ashare_quant.strategy import CandidateSelector
 from ashare_quant.utils.manifest import atomic_write_json, config_hash
 
@@ -71,6 +74,45 @@ def test_bj_market_is_excluded_while_star_and_chinext_remain_configurable(
     _replace_ts_code(tmp_path / "boards", "000002.SZ", "300001.SZ")
     board_result = selector.select(AS_OF)
     assert board_result.candidates["ts_code"].tolist() == ["300001.SZ", "688001.SH"]
+
+
+def test_candidate_inputs_use_canonical_security_identity(tmp_path: Path) -> None:
+    selector = candidate_fixture(
+        tmp_path,
+        settings=CandidateSelectionSettings(
+            exclude_bj_market=False,
+            min_total_mv=None,
+            min_daily_amount=None,
+        ),
+        identity_resolver=_bse_identity_resolver(),
+    )
+    _replace_ts_code(tmp_path / "reports", "000001.SZ", "920680.BJ")
+    _replace_ts_code(tmp_path / "processed", "000001.SZ", "920680.BJ")
+    _replace_ts_code(tmp_path / "raw", "000001.SZ", "839680.BJ")
+
+    result = selector.select(AS_OF)
+
+    assert "920680.BJ" in set(result.candidates["ts_code"])
+    manifest = json.loads(
+        (tmp_path / "reports" / AS_OF / "candidates_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["security_identity_mapping_version"] == "bse_code_aliases_v1"
+    assert len(manifest["security_identity_mapping_hash"]) == 64
+
+
+def test_candidate_alias_collision_fails_closed(tmp_path: Path) -> None:
+    selector = candidate_fixture(tmp_path, identity_resolver=_bse_identity_resolver())
+    path = next((tmp_path / "raw" / "daily").glob("**/*.parquet"))
+    frame = pd.read_parquet(path)
+    alias = frame.loc[frame["ts_code"].eq("000001.SZ")].copy()
+    alias["ts_code"] = "839680.BJ"
+    canonical = alias.copy()
+    canonical["ts_code"] = "920680.BJ"
+    canonical["close"] = 99.0
+    pd.concat([frame, alias, canonical], ignore_index=True).to_parquet(path, index=False)
+
+    with pytest.raises(DataValidationError, match="SECURITY_IDENTITY_COLLISION"):
+        selector.select(AS_OF)
 
 
 def test_market_cap_filter_excludes_below_configured_threshold(tmp_path: Path) -> None:
@@ -195,6 +237,7 @@ def candidate_fixture(
     tmp_path: Path,
     *,
     settings: CandidateSelectionSettings | None = None,
+    identity_resolver: SecurityIdentityResolver | None = None,
 ) -> CandidateSelector:
     raw_root = tmp_path / "raw"
     processed_root = tmp_path / "processed"
@@ -287,6 +330,7 @@ def candidate_fixture(
         reports_root=reports_root,
         config_path=config_path,
         settings=settings or CandidateSelectionSettings(),
+        identity_resolver=identity_resolver or SecurityIdentityResolver.empty(),
     )
 
 
@@ -303,3 +347,9 @@ def _replace_ts_code(root: Path, old: str, new: str) -> None:
             continue
         frame.loc[frame["ts_code"].astype(str).eq(old), "ts_code"] = new
         frame.to_parquet(path, index=False)
+
+
+def _bse_identity_resolver() -> SecurityIdentityResolver:
+    return SecurityIdentityResolver.from_path(
+        Path("config/security_identity/bse_code_aliases.json")
+    )
