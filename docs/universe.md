@@ -24,7 +24,9 @@ Universe manifests record `security_identity_mapping_version` and
 `security_identity_mapping_hash`. The canonicalization boundary covers
 `stock_basic`, `daily`, `daily_basic`, `suspend_d`, `stk_limit`, and `namechange`.
 Feature and label builders reuse the resolver for `adj_factor` and their financial
-statement inputs. Production candidate filtering also canonicalizes `daily`,
+statement inputs. Disabled, non-PIT-safe sources such as `fina_indicator` are not
+loaded by FeatureBuilder and therefore cannot block enabled feature families on
+fields the model does not consume. Production candidate filtering also canonicalizes `daily`,
 `daily_basic`, and `stk_limit` before joining them to the processed universe.
 
 For `suspend_d`, `S` is an active suspension event and `R` is a resumption event.

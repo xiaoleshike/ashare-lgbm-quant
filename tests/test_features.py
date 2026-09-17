@@ -861,8 +861,38 @@ def test_feature_builder_reads_only_required_date_windows() -> None:
     assert raw_store.calls["daily_basic"] == [("20221117", "20240520")]
     assert raw_store.calls["index_daily"] == [("20221117", "20240520")]
     assert raw_store.calls["trade_cal"] == [("20221117", "20240520")]
-    assert raw_store.calls["fina_indicator"] == [(None, "20240520")]
+    assert "fina_indicator" not in raw_store.calls
+    assert raw_store.calls["income"] == [(None, "20240520")]
+    assert raw_store.calls["balancesheet"] == [(None, "20240520")]
+    assert raw_store.calls["cashflow"] == [(None, "20240520")]
     assert universe_store.calls == [("20221117", "20240520")]
+
+
+def test_disabled_fina_indicator_alias_conflict_does_not_block_feature_builder() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs()
+    inputs["fina_indicator"] = pd.DataFrame(
+        {
+            "ts_code": ["837023.BJ", "920123.BJ"],
+            "ann_date": ["20200806", "20200806"],
+            "end_date": ["20200630", "20200630"],
+            "roe": [5.79, 5.79],
+            "fcff": [-57_931_490.0, -27_831_490.0],
+        }
+    )
+    raw_store = FakeRawStore(inputs)
+    builder = FeatureBuilder(
+        raw_store,
+        FakeUniverseStore(inputs["universe"]),
+        FakeFeatureStore(),
+        settings,
+    )
+
+    frame = builder.preview("20240520", "20240520")
+
+    assert not frame.empty
+    assert "fina_indicator" not in raw_store.calls
+    assert "roe" not in frame.columns
 
 
 def test_feature_builder_month_chunks_match_one_shot_output() -> None:

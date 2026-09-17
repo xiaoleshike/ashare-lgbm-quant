@@ -23,6 +23,8 @@ from ashare_quant.universe import UniverseStore
 
 type DataFrame = pd.DataFrame
 
+_FINANCIAL_DATASETS = ("fina_indicator", "income", "balancesheet", "cashflow")
+
 
 @dataclass(frozen=True, slots=True)
 class FeatureBuildResult:
@@ -109,13 +111,18 @@ class FeatureBuilder:
             name: self._raw_store.read_dataset(get_dataset_spec(name), history_start, end_date)
             for name in dated_names
         }
-        financial_names = ("fina_indicator", "income", "balancesheet", "cashflow")
-        inputs.update(
-            {
-                name: self._raw_store.read_dataset(get_dataset_spec(name), None, end_date)
-                for name in financial_names
-            }
-        )
+        enabled_financial_sources = {
+            dataset
+            for spec in FEATURE_REGISTRY
+            for dataset in spec.source_datasets
+            if dataset in _FINANCIAL_DATASETS
+        }
+        for name in _FINANCIAL_DATASETS:
+            inputs[name] = (
+                self._raw_store.read_dataset(get_dataset_spec(name), None, end_date)
+                if name in enabled_financial_sources
+                else pd.DataFrame()
+            )
         inputs["universe"] = self._universe_store.read(history_start, end_date)
         return canonicalize_security_datasets(inputs, self._identity_resolver)
 
