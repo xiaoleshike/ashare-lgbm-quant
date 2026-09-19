@@ -23,12 +23,14 @@ def test_explicit_mapping_is_deterministic_and_does_not_guess() -> None:
     identity = resolver()
 
     assert identity.canonicalize("839680.BJ", as_of_date="20250430") == "920680.BJ"
+    assert identity.canonicalize("835305.BJ", as_of_date="20250430") == "920305.BJ"
     assert identity.canonicalize("920680.BJ", as_of_date="20250430") == "920680.BJ"
     assert identity.canonicalize("600000.SH", as_of_date="20250430") == "600000.SH"
     assert identity.canonicalize("000001.SZ", as_of_date="20250430") == "000001.SZ"
     assert identity.canonicalize("830000.BJ", as_of_date="20250430") == "830000.BJ"
     assert len(identity.mapping_hash) == 64
-    assert identity.mapping_version == "bse_code_aliases_v1"
+    assert identity.mapping_version == "bse_code_aliases_v2"
+    assert identity.alias_count == 248
 
 
 def test_effective_dated_mapping_is_point_in_time(tmp_path: Path) -> None:

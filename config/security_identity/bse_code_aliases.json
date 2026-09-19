@@ -1,15 +1,371 @@
 {
   "schema_version": 1,
   "artifact_name": "security_identity_mapping",
-  "mapping_version": "bse_code_aliases_v1",
+  "mapping_version": "bse_code_aliases_v2",
+  "mapping_source": {
+    "name": "Beijing Stock Exchange new-old code mapping table",
+    "url": "https://www.bse.cn/service/code_mapping.html"
+  },
   "aliases": [
+    {
+      "source_code": "430017.BJ",
+      "canonical_code": "920017.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430047.BJ",
+      "canonical_code": "920047.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430090.BJ",
+      "canonical_code": "920090.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430139.BJ",
+      "canonical_code": "920139.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430198.BJ",
+      "canonical_code": "920198.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430300.BJ",
+      "canonical_code": "920300.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430418.BJ",
+      "canonical_code": "920418.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430425.BJ",
+      "canonical_code": "920425.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430476.BJ",
+      "canonical_code": "920476.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430478.BJ",
+      "canonical_code": "920478.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430489.BJ",
+      "canonical_code": "920489.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430510.BJ",
+      "canonical_code": "920510.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430556.BJ",
+      "canonical_code": "920556.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430564.BJ",
+      "canonical_code": "920564.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430685.BJ",
+      "canonical_code": "920685.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "430718.BJ",
+      "canonical_code": "920718.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830779.BJ",
+      "canonical_code": "920779.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830799.BJ",
+      "canonical_code": "920799.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830809.BJ",
+      "canonical_code": "920809.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830832.BJ",
+      "canonical_code": "920832.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830839.BJ",
+      "canonical_code": "920839.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830879.BJ",
+      "canonical_code": "920879.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830896.BJ",
+      "canonical_code": "920896.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830946.BJ",
+      "canonical_code": "920946.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830964.BJ",
+      "canonical_code": "920964.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "830974.BJ",
+      "canonical_code": "920974.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831010.BJ",
+      "canonical_code": "920010.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831039.BJ",
+      "canonical_code": "920039.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831087.BJ",
+      "canonical_code": "920087.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831152.BJ",
+      "canonical_code": "920152.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831167.BJ",
+      "canonical_code": "920267.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831175.BJ",
+      "canonical_code": "920375.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831195.BJ",
+      "canonical_code": "920195.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831278.BJ",
+      "canonical_code": "920378.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831304.BJ",
+      "canonical_code": "920304.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831305.BJ",
+      "canonical_code": "920405.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831370.BJ",
+      "canonical_code": "920370.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
     {
       "source_code": "831396.BJ",
       "canonical_code": "920496.BJ",
       "exchange": "BJ",
       "effective_from": null,
       "effective_to": null,
-      "mapping_source": "BSE historical code migration"
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831445.BJ",
+      "canonical_code": "920445.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831526.BJ",
+      "canonical_code": "920526.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831627.BJ",
+      "canonical_code": "920627.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831641.BJ",
+      "canonical_code": "920641.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831689.BJ",
+      "canonical_code": "920689.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831726.BJ",
+      "canonical_code": "920726.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831768.BJ",
+      "canonical_code": "920768.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
     },
     {
       "source_code": "831832.BJ",
@@ -17,7 +373,903 @@
       "exchange": "BJ",
       "effective_from": null,
       "effective_to": null,
-      "mapping_source": "BSE historical code migration"
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831834.BJ",
+      "canonical_code": "920834.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831855.BJ",
+      "canonical_code": "920855.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831856.BJ",
+      "canonical_code": "920856.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831906.BJ",
+      "canonical_code": "920906.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "831961.BJ",
+      "canonical_code": "920961.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832000.BJ",
+      "canonical_code": "920000.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832023.BJ",
+      "canonical_code": "920023.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832089.BJ",
+      "canonical_code": "920089.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832110.BJ",
+      "canonical_code": "920110.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832145.BJ",
+      "canonical_code": "920145.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832149.BJ",
+      "canonical_code": "920249.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832171.BJ",
+      "canonical_code": "920171.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832175.BJ",
+      "canonical_code": "920175.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832225.BJ",
+      "canonical_code": "920225.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832278.BJ",
+      "canonical_code": "920278.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832419.BJ",
+      "canonical_code": "920419.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832469.BJ",
+      "canonical_code": "920469.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832471.BJ",
+      "canonical_code": "920471.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832491.BJ",
+      "canonical_code": "920491.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832522.BJ",
+      "canonical_code": "920522.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832566.BJ",
+      "canonical_code": "920566.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832651.BJ",
+      "canonical_code": "920651.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832662.BJ",
+      "canonical_code": "920662.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832735.BJ",
+      "canonical_code": "920735.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832786.BJ",
+      "canonical_code": "920786.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832802.BJ",
+      "canonical_code": "920802.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832876.BJ",
+      "canonical_code": "920876.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832885.BJ",
+      "canonical_code": "920885.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832978.BJ",
+      "canonical_code": "920978.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "832982.BJ",
+      "canonical_code": "920982.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833030.BJ",
+      "canonical_code": "920130.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833075.BJ",
+      "canonical_code": "920075.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833171.BJ",
+      "canonical_code": "920571.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833230.BJ",
+      "canonical_code": "920230.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833266.BJ",
+      "canonical_code": "920266.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833284.BJ",
+      "canonical_code": "920284.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833346.BJ",
+      "canonical_code": "920346.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833394.BJ",
+      "canonical_code": "920394.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833427.BJ",
+      "canonical_code": "920427.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833429.BJ",
+      "canonical_code": "920429.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833454.BJ",
+      "canonical_code": "920454.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833455.BJ",
+      "canonical_code": "920455.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833509.BJ",
+      "canonical_code": "920509.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833523.BJ",
+      "canonical_code": "920523.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833533.BJ",
+      "canonical_code": "920533.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833575.BJ",
+      "canonical_code": "920575.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833580.BJ",
+      "canonical_code": "920580.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833751.BJ",
+      "canonical_code": "920751.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833781.BJ",
+      "canonical_code": "920781.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833819.BJ",
+      "canonical_code": "920819.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833873.BJ",
+      "canonical_code": "920873.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833914.BJ",
+      "canonical_code": "920914.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "833943.BJ",
+      "canonical_code": "920943.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834014.BJ",
+      "canonical_code": "920014.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834021.BJ",
+      "canonical_code": "920021.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834033.BJ",
+      "canonical_code": "920033.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834058.BJ",
+      "canonical_code": "920058.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834062.BJ",
+      "canonical_code": "920062.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834261.BJ",
+      "canonical_code": "920261.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834407.BJ",
+      "canonical_code": "920407.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834415.BJ",
+      "canonical_code": "920415.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834475.BJ",
+      "canonical_code": "920475.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834599.BJ",
+      "canonical_code": "920599.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834639.BJ",
+      "canonical_code": "920639.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834682.BJ",
+      "canonical_code": "920682.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834765.BJ",
+      "canonical_code": "920765.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834770.BJ",
+      "canonical_code": "920770.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "834950.BJ",
+      "canonical_code": "920950.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835174.BJ",
+      "canonical_code": "920174.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835179.BJ",
+      "canonical_code": "920179.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835184.BJ",
+      "canonical_code": "920184.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835185.BJ",
+      "canonical_code": "920185.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835207.BJ",
+      "canonical_code": "920207.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835237.BJ",
+      "canonical_code": "920237.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835305.BJ",
+      "canonical_code": "920305.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835368.BJ",
+      "canonical_code": "920368.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835438.BJ",
+      "canonical_code": "920438.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835508.BJ",
+      "canonical_code": "920508.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835579.BJ",
+      "canonical_code": "920579.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835640.BJ",
+      "canonical_code": "920640.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835670.BJ",
+      "canonical_code": "920670.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835857.BJ",
+      "canonical_code": "920057.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835892.BJ",
+      "canonical_code": "920992.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "835985.BJ",
+      "canonical_code": "920985.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836077.BJ",
+      "canonical_code": "920077.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836149.BJ",
+      "canonical_code": "920149.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836208.BJ",
+      "canonical_code": "920208.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836221.BJ",
+      "canonical_code": "920221.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836239.BJ",
+      "canonical_code": "920239.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836247.BJ",
+      "canonical_code": "920247.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836260.BJ",
+      "canonical_code": "920260.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836263.BJ",
+      "canonical_code": "920263.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836270.BJ",
+      "canonical_code": "920270.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836395.BJ",
+      "canonical_code": "920395.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836414.BJ",
+      "canonical_code": "920414.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836419.BJ",
+      "canonical_code": "920519.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836422.BJ",
+      "canonical_code": "920422.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836433.BJ",
+      "canonical_code": "920433.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836504.BJ",
+      "canonical_code": "920504.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836547.BJ",
+      "canonical_code": "920547.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836675.BJ",
+      "canonical_code": "920675.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836699.BJ",
+      "canonical_code": "920699.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836717.BJ",
+      "canonical_code": "920717.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836720.BJ",
+      "canonical_code": "920720.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836807.BJ",
+      "canonical_code": "920807.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836826.BJ",
+      "canonical_code": "920826.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836871.BJ",
+      "canonical_code": "920871.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836892.BJ",
+      "canonical_code": "920892.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836942.BJ",
+      "canonical_code": "920942.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836957.BJ",
+      "canonical_code": "920957.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "836961.BJ",
+      "canonical_code": "920061.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837006.BJ",
+      "canonical_code": "920006.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
     },
     {
       "source_code": "837023.BJ",
@@ -25,7 +1277,231 @@
       "exchange": "BJ",
       "effective_from": null,
       "effective_to": null,
-      "mapping_source": "BSE historical code migration"
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837046.BJ",
+      "canonical_code": "920046.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837092.BJ",
+      "canonical_code": "920092.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837174.BJ",
+      "canonical_code": "920274.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837212.BJ",
+      "canonical_code": "920212.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837242.BJ",
+      "canonical_code": "920242.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837344.BJ",
+      "canonical_code": "920344.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837403.BJ",
+      "canonical_code": "920403.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837592.BJ",
+      "canonical_code": "920592.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837663.BJ",
+      "canonical_code": "920663.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837748.BJ",
+      "canonical_code": "920748.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "837821.BJ",
+      "canonical_code": "920821.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838030.BJ",
+      "canonical_code": "920030.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838163.BJ",
+      "canonical_code": "920163.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838171.BJ",
+      "canonical_code": "920271.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838227.BJ",
+      "canonical_code": "920227.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838262.BJ",
+      "canonical_code": "920262.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838275.BJ",
+      "canonical_code": "920275.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838402.BJ",
+      "canonical_code": "920402.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838670.BJ",
+      "canonical_code": "920870.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838701.BJ",
+      "canonical_code": "920701.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838810.BJ",
+      "canonical_code": "920810.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838837.BJ",
+      "canonical_code": "920837.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838924.BJ",
+      "canonical_code": "920924.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "838971.BJ",
+      "canonical_code": "920971.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839167.BJ",
+      "canonical_code": "920167.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839273.BJ",
+      "canonical_code": "920273.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839371.BJ",
+      "canonical_code": "920371.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839493.BJ",
+      "canonical_code": "920493.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
     },
     {
       "source_code": "839680.BJ",
@@ -33,7 +1509,487 @@
       "exchange": "BJ",
       "effective_from": null,
       "effective_to": null,
-      "mapping_source": "BSE historical code migration"
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839719.BJ",
+      "canonical_code": "920719.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839725.BJ",
+      "canonical_code": "920725.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839729.BJ",
+      "canonical_code": "920729.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839790.BJ",
+      "canonical_code": "920790.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839792.BJ",
+      "canonical_code": "920792.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "839946.BJ",
+      "canonical_code": "920146.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870199.BJ",
+      "canonical_code": "920199.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870204.BJ",
+      "canonical_code": "920204.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870299.BJ",
+      "canonical_code": "920299.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870357.BJ",
+      "canonical_code": "920357.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870436.BJ",
+      "canonical_code": "920436.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870508.BJ",
+      "canonical_code": "920608.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870656.BJ",
+      "canonical_code": "920656.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870726.BJ",
+      "canonical_code": "920926.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870866.BJ",
+      "canonical_code": "920866.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "870976.BJ",
+      "canonical_code": "920976.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871245.BJ",
+      "canonical_code": "920245.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871263.BJ",
+      "canonical_code": "920363.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871396.BJ",
+      "canonical_code": "920396.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871478.BJ",
+      "canonical_code": "920578.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871553.BJ",
+      "canonical_code": "920553.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871634.BJ",
+      "canonical_code": "920634.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871642.BJ",
+      "canonical_code": "920642.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871694.BJ",
+      "canonical_code": "920694.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871753.BJ",
+      "canonical_code": "920753.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871857.BJ",
+      "canonical_code": "920857.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871970.BJ",
+      "canonical_code": "920970.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "871981.BJ",
+      "canonical_code": "920981.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872190.BJ",
+      "canonical_code": "920190.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872351.BJ",
+      "canonical_code": "920351.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872374.BJ",
+      "canonical_code": "920374.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872392.BJ",
+      "canonical_code": "920392.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872541.BJ",
+      "canonical_code": "920541.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872808.BJ",
+      "canonical_code": "920808.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872895.BJ",
+      "canonical_code": "920895.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872925.BJ",
+      "canonical_code": "920925.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872931.BJ",
+      "canonical_code": "920931.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "872953.BJ",
+      "canonical_code": "920953.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873001.BJ",
+      "canonical_code": "920001.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873122.BJ",
+      "canonical_code": "920122.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873132.BJ",
+      "canonical_code": "920132.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873152.BJ",
+      "canonical_code": "920252.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873167.BJ",
+      "canonical_code": "920367.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873169.BJ",
+      "canonical_code": "920169.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873223.BJ",
+      "canonical_code": "920223.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873305.BJ",
+      "canonical_code": "920505.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873339.BJ",
+      "canonical_code": "920339.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873527.BJ",
+      "canonical_code": "920527.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873570.BJ",
+      "canonical_code": "920570.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873576.BJ",
+      "canonical_code": "920576.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873593.BJ",
+      "canonical_code": "920593.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873665.BJ",
+      "canonical_code": "920665.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873679.BJ",
+      "canonical_code": "920679.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873690.BJ",
+      "canonical_code": "920690.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873693.BJ",
+      "canonical_code": "920693.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873703.BJ",
+      "canonical_code": "920703.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873706.BJ",
+      "canonical_code": "920706.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873726.BJ",
+      "canonical_code": "920026.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873806.BJ",
+      "canonical_code": "920806.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
+    },
+    {
+      "source_code": "873833.BJ",
+      "canonical_code": "920833.BJ",
+      "exchange": "BJ",
+      "effective_from": null,
+      "effective_to": null,
+      "mapping_source": "Beijing Stock Exchange new-old code mapping table"
     }
   ]
 }

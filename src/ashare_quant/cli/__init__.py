@@ -219,6 +219,11 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
         help="Read-only cross-source security alias consistency scan.",
     )
     add_date_range_args(identity_parser)
+    identity_parser.add_argument(
+        "--processed-root",
+        default=None,
+        help="Override the configured processed universe root.",
+    )
 
 
 def add_universe_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1094,7 +1099,9 @@ def run_data_command(args: argparse.Namespace) -> int:
 
     if args.data_command == "security-identity-scan":
         resolver = SecurityIdentityResolver.from_path(settings.security_identity.mapping_path)
-        universe_store = UniverseStore(settings.paths.processed_data)
+        universe_store = UniverseStore(
+            Path(args.processed_root) if args.processed_root else settings.paths.processed_data
+        )
         frames = {
             name: store.read_dataset(get_dataset_spec(name), args.start_date, args.end_date)
             for name in (

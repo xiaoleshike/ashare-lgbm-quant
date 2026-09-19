@@ -15,7 +15,10 @@ from ashare_quant.data.security_identity import (
     canonicalize_security_datasets,
 )
 from ashare_quant.data.storage import ParquetDataStore
-from ashare_quant.features.fundamentals import build_fundamental_features
+from ashare_quant.features.fundamentals import (
+    FINANCIAL_SOURCE_SCHEMA,
+    build_fundamental_features,
+)
 from ashare_quant.features.market import build_market_features
 from ashare_quant.features.registry import FEATURE_REGISTRY, FeatureSpec
 from ashare_quant.features.storage import FeatureStore
@@ -118,13 +121,21 @@ class FeatureBuilder:
             if dataset in _FINANCIAL_DATASETS
         }
         for name in _FINANCIAL_DATASETS:
-            inputs[name] = (
+            source = (
                 self._raw_store.read_dataset(get_dataset_spec(name), None, end_date)
                 if name in enabled_financial_sources
                 else pd.DataFrame()
             )
+            inputs[name] = project_financial_source(source, name)
         inputs["universe"] = self._universe_store.read(history_start, end_date)
         return canonicalize_security_datasets(inputs, self._identity_resolver)
+
+
+def project_financial_source(frame: DataFrame, dataset_name: str) -> DataFrame:
+    """Limit identity validation to fields used by the financial feature contract."""
+
+    schema = FINANCIAL_SOURCE_SCHEMA[dataset_name]
+    return frame.loc[:, [column for column in frame.columns if column in schema]].copy()
 
 
 def build_feature_frame(

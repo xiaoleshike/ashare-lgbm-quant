@@ -169,13 +169,13 @@ def test_universe_builder_covers_core_membership_and_tradability_rules() -> None
     assert validate_universe_frame(frame).ok
 
 
-def test_bse_alias_suspension_and_resume_are_canonicalized() -> None:
+def test_920305_alias_suspension_and_resume_are_canonicalized() -> None:
     trade_dates = ["20250429", "20250430", "20250506"]
     inputs = {
         "stock_basic": pd.DataFrame(
             {
-                "ts_code": ["920680.BJ"],
-                "name": ["Test BSE"],
+                "ts_code": ["920305.BJ"],
+                "name": ["Cloud Data"],
                 "market": ["BSE"],
                 "industry": ["Test"],
                 "list_date": ["20200101"],
@@ -185,35 +185,35 @@ def test_bse_alias_suspension_and_resume_are_canonicalized() -> None:
         "trade_cal": pd.DataFrame({"cal_date": trade_dates, "is_open": [1, 1, 1]}),
         "daily": pd.DataFrame(
             {
-                "ts_code": ["920680.BJ", "920680.BJ"],
+                "ts_code": ["920305.BJ", "920305.BJ"],
                 "trade_date": ["20250429", "20250506"],
-                "open": [9.49, 7.25],
-                "high": [9.49, 7.25],
-                "low": [9.49, 7.25],
-                "close": [9.49, 7.25],
+                "open": [14.09, 12.79],
+                "high": [14.09, 12.79],
+                "low": [14.09, 12.79],
+                "close": [14.09, 12.79],
                 "amount": [1000.0, 1000.0],
             }
         ),
         "daily_basic": pd.DataFrame(columns=["ts_code", "trade_date"]),
         "suspend_d": pd.DataFrame(
             {
-                "ts_code": ["839680.BJ", "839680.BJ"],
+                "ts_code": ["835305.BJ", "835305.BJ"],
                 "trade_date": ["20250430", "20250506"],
                 "suspend_type": ["S", "R"],
             }
         ),
         "stk_limit": pd.DataFrame(
             {
-                "ts_code": ["920680.BJ"],
+                "ts_code": ["920305.BJ"],
                 "trade_date": ["20250430"],
-                "up_limit": [12.33],
-                "down_limit": [6.65],
+                "up_limit": [18.31],
+                "down_limit": [9.87],
             }
         ),
         "namechange": pd.DataFrame(
             {
-                "ts_code": ["920680.BJ"],
-                "name": ["ST Test BSE"],
+                "ts_code": ["920305.BJ"],
+                "name": ["*ST Cloud Data"],
                 "start_date": ["20250506"],
                 "end_date": [None],
                 "ann_date": ["20250506"],

@@ -895,6 +895,63 @@ def test_disabled_fina_indicator_alias_conflict_does_not_block_feature_builder()
     assert "roe" not in frame.columns
 
 
+def test_unused_financial_alias_differences_do_not_block_feature_builder() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs()
+    inputs["income"] = pd.DataFrame(
+        {
+            "ts_code": ["830799.BJ", "920799.BJ"],
+            "ann_date": ["20140830", "20140830"],
+            "f_ann_date": ["20140830", "20140830"],
+            "end_date": ["20130630", "20130630"],
+            "report_type": ["1", "1"],
+            "update_flag": ["1", "1"],
+            "revenue": [100.0, 100.0],
+            "n_income": [10.0, 10.0],
+            "total_profit": [12.0, 12.0],
+            "ebit": [pd.NA, -701_949.1],
+            "ebitda": [pd.NA, -698_224.79],
+        }
+    )
+    builder = FeatureBuilder(
+        FakeRawStore(inputs),
+        FakeUniverseStore(inputs["universe"]),
+        FakeFeatureStore(),
+        settings,
+    )
+
+    frame = builder.preview("20240520", "20240520")
+
+    assert not frame.empty
+
+
+def test_consumed_financial_alias_conflict_fails_closed() -> None:
+    settings = load_settings("config/default.yaml")
+    inputs = feature_fixture_inputs()
+    inputs["income"] = pd.DataFrame(
+        {
+            "ts_code": ["830799.BJ", "920799.BJ"],
+            "ann_date": ["20140830", "20140830"],
+            "f_ann_date": ["20140830", "20140830"],
+            "end_date": ["20130630", "20130630"],
+            "report_type": ["1", "1"],
+            "update_flag": ["1", "1"],
+            "revenue": [100.0, 101.0],
+            "n_income": [10.0, 10.0],
+            "total_profit": [12.0, 12.0],
+        }
+    )
+    builder = FeatureBuilder(
+        FakeRawStore(inputs),
+        FakeUniverseStore(inputs["universe"]),
+        FakeFeatureStore(),
+        settings,
+    )
+
+    with pytest.raises(DataValidationError, match="SECURITY_IDENTITY_COLLISION"):
+        builder.preview("20240520", "20240520")
+
+
 def test_feature_builder_month_chunks_match_one_shot_output() -> None:
     settings = load_settings("config/default.yaml")
     inputs = feature_fixture_inputs(days=150)

@@ -8,7 +8,9 @@ responses only; real API checks must be marked with `@pytest.mark.integration`.
 Raw Tushare Parquet preserves provider `ts_code` values. Security aliases are
 canonicalized only when data enters universe, feature, label, or executable research
 joins. This preserves historical trading-code lineage while providing one stable
-cross-source security identity.
+cross-source security identity. The checked-in mapping is sourced from the complete
+official Beijing Stock Exchange new-old code table and carries a version plus a
+content hash in every processed artifact identity.
 
 `suspend_d.suspend_timing` and `suspend_d.suspend_type` are coerced to nullable
 string dtype before future Parquet writes. An all-null monthly partition therefore
@@ -20,6 +22,7 @@ Run the read-only alias consistency scan with:
 
 ```bash
 ashare-quant --config config/default.yaml data security-identity-scan \
+  --processed-root data/research/RESEARCH_SNAPSHOT \
   --start-date YYYYMMDD --end-date YYYYMMDD
 ```
 

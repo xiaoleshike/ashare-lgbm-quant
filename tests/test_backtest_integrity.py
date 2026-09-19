@@ -82,7 +82,7 @@ def test_suspended_quote_carries_last_close_without_equity_collapse() -> None:
     assert result.accounting_summary["stale_valuation_days"] == 1
 
 
-def test_bse_suspension_uses_last_valid_close_and_resumes_current_valuation() -> None:
+def test_920305_suspension_uses_last_valid_close_and_resumes_current_valuation() -> None:
     dates = (
         "20250424",
         "20250425",
@@ -94,13 +94,13 @@ def test_bse_suspension_uses_last_valid_close_and_resumes_current_valuation() ->
     )
     inputs = _inputs(
         [
-            _price("20250424", 11.80, 11.80),
-            _price("20250425", 11.70, 11.70),
-            _price("20250428", 10.66, 10.66),
-            _price("20250429", 9.49, 9.49),
+            _price("20250424", 27.25, 27.25),
+            _price("20250425", 27.25, 27.25),
+            _price("20250428", 19.08, 19.08),
+            _price("20250429", 14.09, 14.09),
             _price("20250430", np.nan, np.nan, can_sell=False, suspended=True),
-            _price("20250506", 7.25, 7.25),
-            _price("20250507", 7.71, 7.71),
+            _price("20250506", 12.79, 12.79),
+            _price("20250507", 14.18, 14.18),
         ],
         calendar=dates,
     )
@@ -116,9 +116,9 @@ def test_bse_suspension_uses_last_valid_close_and_resumes_current_valuation() ->
     resumed = result.holdings[result.holdings["trade_date"] == "20250506"].iloc[0]
     shares = float(suspended["shares"])
     assert suspended["valuation_status"] == "STALE_SUSPENDED"
-    assert suspended["market_value"] == pytest.approx(shares * 9.49)
+    assert suspended["market_value"] == pytest.approx(shares * 14.09)
     assert resumed["valuation_status"] == "CURRENT"
-    assert resumed["market_value"] == pytest.approx(shares * 7.25)
+    assert resumed["market_value"] == pytest.approx(shares * 12.79)
 
 
 def test_execution_price_loader_joins_raw_alias_to_canonical_universe(tmp_path: Path) -> None:

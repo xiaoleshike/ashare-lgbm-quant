@@ -96,7 +96,7 @@ def test_candidate_inputs_use_canonical_security_identity(tmp_path: Path) -> Non
     manifest = json.loads(
         (tmp_path / "reports" / AS_OF / "candidates_manifest.json").read_text(encoding="utf-8")
     )
-    assert manifest["security_identity_mapping_version"] == "bse_code_aliases_v1"
+    assert manifest["security_identity_mapping_version"] == "bse_code_aliases_v2"
     assert len(manifest["security_identity_mapping_hash"]) == 64
 
 

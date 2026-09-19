@@ -5,10 +5,13 @@ Phase 2 builds `universe_daily`, a daily A-share universe and tradability table 
 ## Security Identity
 
 Cross-source stock joins use the versioned mapping in
-`config/security_identity/bse_code_aliases.json`. Raw Parquet remains the provider
-source of record: a historical `839680.BJ` row is not rewritten. At the
-raw-to-processed boundary the row retains `source_ts_code=839680.BJ` in memory and
-uses `ts_code=920680.BJ` as its canonical security identity.
+`config/security_identity/bse_code_aliases.json`. The mapping is the complete
+explicit Beijing Stock Exchange new-old code table published at
+`https://www.bse.cn/service/code_mapping.html`; it is not derived from code digits.
+Raw Parquet remains the provider source of record: a historical `835305.BJ` row is
+not rewritten. At the raw-to-processed boundary the row retains
+`source_ts_code=835305.BJ` in memory and uses `ts_code=920305.BJ` as its canonical
+security identity.
 
 Mappings are explicit and may be effective-dated. No numeric-prefix or suffix
 heuristic is used. Unknown codes remain unchanged. Canonical duplicates with equal
@@ -26,8 +29,12 @@ Universe manifests record `security_identity_mapping_version` and
 Feature and label builders reuse the resolver for `adj_factor` and their financial
 statement inputs. Disabled, non-PIT-safe sources such as `fina_indicator` are not
 loaded by FeatureBuilder and therefore cannot block enabled feature families on
-fields the model does not consume. Production candidate filtering also canonicalizes `daily`,
-`daily_basic`, and `stk_limit` before joining them to the processed universe.
+fields the model does not consume. Enabled financial statements are projected to
+their declared `FINANCIAL_SOURCE_SCHEMA` before alias collision validation. A
+difference in an unused provider field cannot block unrelated features, while any
+conflict in a consumed value still fails closed. Production candidate filtering
+also canonicalizes `daily`, `daily_basic`, and `stk_limit` before joining them to
+the processed universe.
 
 For `suspend_d`, `S` is an active suspension event and `R` is a resumption event.
 Missing price data is never used to infer suspension.
