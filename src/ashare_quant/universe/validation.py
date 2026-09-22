@@ -76,7 +76,7 @@ def validate_universe_frame(frame: DataFrame) -> UniverseValidationResult:
             errors.append("terminal stocks cannot be is_listed=true")
         if (listing & ~frame["is_listed"].astype(bool)).any():
             errors.append("listing-suspended stocks remain in the listed lifecycle")
-        if ((ordinary | listing) & ~suspended).any():
+        if ((ordinary | listing) & ~terminal & ~suspended).any():
             errors.append("suspension lifecycle state implies is_suspended=true")
 
     if (frame["is_limit_up"].astype(bool) & frame["can_buy"].astype(bool)).any():

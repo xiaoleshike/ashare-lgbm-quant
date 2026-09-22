@@ -8,8 +8,10 @@ import pandas as pd
 import pytest
 
 import ashare_quant.data.research_source_snapshot as snapshot_module
+from ashare_quant.cli import main
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.research_source_snapshot import (
+    ResearchSourceSnapshotResult,
     materialize_research_source_snapshot,
     snapshot_contract,
     validate_research_source_snapshot,
@@ -104,6 +106,49 @@ def test_snapshot_uses_the_same_production_writer_lock(tmp_path: Path) -> None:
             )
     finally:
         release_production_lock(lock)
+
+
+def test_snapshot_cli_delegates_to_validated_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_materialize(**kwargs: object) -> ResearchSourceSnapshotResult:
+        captured.update(kwargs)
+        return ResearchSourceSnapshotResult(
+            snapshot_id="research_source_snapshot_fixture",
+            output_dir=tmp_path / "snapshots" / "research_source_snapshot_fixture",
+            idempotent=False,
+        )
+
+    monkeypatch.setattr("ashare_quant.cli.materialize_research_source_snapshot", fake_materialize)
+    source = tmp_path / "source"
+    snapshots = tmp_path / "snapshots"
+    lock = tmp_path / "runs" / ".production.lock"
+
+    result = main(
+        [
+            "--config",
+            "config/default.yaml",
+            "data",
+            "research-source-snapshot-create",
+            "--source-root",
+            str(source),
+            "--snapshots-root",
+            str(snapshots),
+            "--lifecycle-evidence",
+            "config/security_identity/security_lifecycle_events.json",
+            "--writer-lock-path",
+            str(lock),
+        ]
+    )
+
+    assert result == 0
+    assert captured["source_root"] == source
+    assert captured["snapshots_root"] == snapshots
+    assert captured["writer_lock_path"] == lock
+    assert set(captured["datasets"]) == set(snapshot_contract()["dataset_dependencies"])
+    assert "research_source_snapshot_fixture" in capsys.readouterr().out
 
 
 def test_snapshot_contract_declares_actual_rebuild_dependencies() -> None:

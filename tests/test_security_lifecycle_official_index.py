@@ -112,6 +112,58 @@ def test_verified_index_compiles_typed_partial_runtime_catalog(tmp_path: Path) -
     assert not resolver.is_listing_suspended("600002.SH", "20110104")
 
 
+def test_typed_catalog_preserves_base_event_when_official_index_duplicates_interval(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "factbook.pdf"
+    document.write_bytes(b"synthetic official exchange factbook")
+    package = publish_bulk_official_source_package(
+        source=_source(document),
+        records=[_record("600001.SH")],
+        document=document,
+        reports_root=tmp_path / "reports",
+    )
+    index = OfficialLifecycleIndexService(
+        reports_root=tmp_path / "reports",
+        identity_resolver=SecurityIdentityResolver.empty(),
+        lifecycle_evidence=SecurityLifecycleResolver.empty(),
+        bulk_source_packages=(package,),
+    ).build()
+    base_path = tmp_path / "base.json"
+    base_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_name": "security_lifecycle_events",
+                "policy_version": "base-v1",
+                "completeness": "partial",
+                "events": [
+                    {
+                        "canonical_ts_code": "600001.SH",
+                        "event_type": "LISTING_SUSPENDED",
+                        "effective_from": "20110104",
+                        "effective_to": "20110104",
+                        "evidence_source": "base-source",
+                        "evidence_reference": "base-reference",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = publish_typed_lifecycle_catalog(
+        official_index=index.output_dir,
+        base_catalog=SecurityLifecycleResolver.from_path(base_path),
+        reports_root=tmp_path / "reports",
+        catalog_version="typed-fixture-v1",
+    )
+    events = json.loads((catalog / "events.json").read_text(encoding="utf-8"))["events"]
+
+    assert len(events) == 1
+    assert events[0]["evidence_source"] == "base-source"
+
+
 def test_pre_research_official_start_is_recorded_as_carry_in(tmp_path: Path) -> None:
     document = tmp_path / "factbook.pdf"
     document.write_bytes(b"synthetic official exchange factbook")

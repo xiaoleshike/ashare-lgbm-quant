@@ -34,9 +34,9 @@ type LifecycleClassification = Literal[
     "UNRESOLVED",
 ]
 
-SCANNER_SCHEMA_VERSION = 5
-LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
-CLASSIFICATION_CONTRACT_VERSION = 4
+SCANNER_SCHEMA_VERSION = 6
+LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
+CLASSIFICATION_CONTRACT_VERSION = 5
 ARTIFACT_NAME = "security_lifecycle_scan"
 REQUIRED_ARTIFACTS = frozenset(
     {
@@ -912,6 +912,8 @@ class SecurityLifecycleScanner:
                      'suspend_d:S' evidence
               FROM all_intervals i JOIN open_sessions c
                 ON c.trade_date BETWEEN i.effective_start AND i.effective_end
+              JOIN expected_listed e ON e.canonical_ts_code=i.canonical_ts_code
+                AND e.trade_date=c.trade_date
               LEFT JOIN universe_state u ON u.canonical_ts_code=i.canonical_ts_code
                 AND u.trade_date=c.trade_date
               WHERE i.state='ORDINARY_SUSPENSION'

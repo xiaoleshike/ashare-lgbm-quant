@@ -69,9 +69,35 @@ normalizes alternate provider keys for one observation. A reviewed code transiti
 predecessor, successor, effective date, continuity type, and official evidence package. It is
 published under the research reports root as `security_identity_transitions_v1`; SH/SZ corporate
 events must not be appended to the BSE alias file. When supplied with
-`--identity-transition-artifact`, lifecycle scanner schema v4 stops expecting predecessor-code
+`--identity-transition-artifact`, the current lifecycle scanner stops expecting predecessor-code
 quotes on and after the verified effective date and binds the transition artifact hash into the
 scan identity. Quote history is only a consistency check and never establishes the effective date.
+
+Ordinary-suspension Universe boundary checks apply only to sessions inside the authoritative
+listed lifecycle window. Provider suspension rows from a pre-listing venue history remain source
+evidence, but they do not require an A-share `universe_daily` row to be marked suspended. Terminal
+state continues to take precedence when a verified suspension interval overlaps the terminal
+boundary.
+
+Verified official evidence can be compiled into a partial typed runtime catalog with
+`security-lifecycle-catalog-compile`. If the official index independently verifies the exact same
+security, event type, and interval as the immutable base catalog, compilation retains the base
+record rather than publishing a duplicate runtime event.
+
+Before rebuilding a governed research lineage, capture one coherent physical source generation
+under the production writer lock:
+
+```bash
+ashare-quant --config config/default.yaml data research-source-snapshot-create \
+  --source-root /path/to/canonical/parquet \
+  --snapshots-root data/research/source_snapshots \
+  --lifecycle-evidence /path/to/typed/events.json
+```
+
+The command derives enabled dataset dependencies from configuration and delegates inventory,
+copying, capture proof, validation, and manifest-last publication to the snapshot service. The
+frozen `datasets/` root, not mutable canonical raw, is the input for subsequent Universe and
+lifecycle-scan commands.
 
 When a blocked scan has been triaged, source completeness is investigated separately from lifecycle
 truth. The explicit networked probe is the only lifecycle command that contacts Tushare; it freezes

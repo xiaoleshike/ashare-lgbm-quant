@@ -23,6 +23,10 @@ from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS, get_datas
 from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
 from ashare_quant.data.ingestion import DataIngestionService, GapReport, build_store
 from ashare_quant.data.quality_logging import append_quality_event, append_validation_results
+from ashare_quant.data.research_source_snapshot import (
+    materialize_research_source_snapshot,
+    research_rebuild_datasets,
+)
 from ashare_quant.data.security_identity import (
     SecurityIdentityResolver,
     scan_cross_source_identity,
@@ -348,6 +352,15 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     typed_catalog_parser.add_argument("--base-lifecycle-evidence", required=True)
     typed_catalog_parser.add_argument("--catalog-version", required=True)
     typed_catalog_parser.add_argument("--reports-root", required=True)
+    snapshot_parser = data_subparsers.add_parser(
+        "research-source-snapshot-create",
+        help="Capture an immutable research source snapshot under the production writer lock.",
+    )
+    snapshot_parser.add_argument("--source-root", default=None)
+    snapshot_parser.add_argument("--snapshots-root", required=True)
+    snapshot_parser.add_argument("--lifecycle-evidence", required=True)
+    snapshot_parser.add_argument("--writer-lock-path", default=None)
+    snapshot_parser.add_argument("--source-generation-manifest", default=None)
     hardened_parser = data_subparsers.add_parser(
         "security-lifecycle-resolution-harden",
         help="Split partial source repairs and separate source from lifecycle conclusions.",
@@ -1283,6 +1296,47 @@ def run_data_command(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     configure_logging(settings.logging.level, settings.logging.json_logs)
     store = build_store(args.storage_root, settings)
+
+    if args.data_command == "research-source-snapshot-create":
+        source_root = (
+            Path(args.source_root)
+            if args.source_root is not None
+            else Path(settings.paths.parquet_store)
+        )
+        writer_lock_path = (
+            Path(args.writer_lock_path)
+            if args.writer_lock_path is not None
+            else configured_production_lock_path(settings.paths.runs)
+        )
+        try:
+            identity = SecurityIdentityResolver.from_path(
+                Path(settings.security_identity.mapping_path)
+            )
+            lifecycle = SecurityLifecycleResolver.from_path(Path(args.lifecycle_evidence))
+            snapshot_result = materialize_research_source_snapshot(
+                source_root=source_root,
+                snapshots_root=Path(args.snapshots_root),
+                security_identity_mapping_hash=identity.mapping_hash,
+                lifecycle_evidence_hash=lifecycle.policy_hash,
+                writer_lock_path=writer_lock_path,
+                source_generation_path=(
+                    None
+                    if args.source_generation_manifest is None
+                    else Path(args.source_generation_manifest)
+                ),
+                datasets=research_rebuild_datasets(
+                    include_fundamentals=settings.features.include_fundamentals
+                ),
+            )
+        except (DataValidationError, OSError, ProductionLockError, ValueError) as error:
+            print(f"research source snapshot create failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"research_source_snapshot: snapshot_id={snapshot_result.snapshot_id} "
+            f"output={snapshot_result.output_dir} "
+            f"idempotent={str(snapshot_result.idempotent).lower()}"
+        )
+        return 0
 
     if args.data_command == "security-lifecycle-catalog-compile":
         try:

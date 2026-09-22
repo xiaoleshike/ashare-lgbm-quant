@@ -276,7 +276,7 @@ def publish_typed_lifecycle_catalog(
 
     index_manifest = validate_official_lifecycle_index(official_index)
     events = pd.read_parquet(official_index / "official_events.parquet")
-    rows: list[JsonObject] = [
+    base_rows: list[JsonObject] = [
         {
             "canonical_ts_code": event.canonical_ts_code,
             "event_type": event.event_type,
@@ -287,6 +287,15 @@ def publish_typed_lifecycle_catalog(
         }
         for event in base_catalog.events()
     ]
+    rows_by_identity = {
+        (
+            str(row["canonical_ts_code"]),
+            str(row["event_type"]),
+            str(row["effective_from"]),
+            str(row["effective_to"]),
+        ): row
+        for row in base_rows
+    }
     event_map = {
         "ORDINARY_FULL_DAY_SUSPENSION": "ORDINARY_SUSPENSION",
         "FORMAL_LISTING_SUSPENSION_START": "LISTING_SUSPENDED",
@@ -295,18 +304,25 @@ def publish_typed_lifecycle_catalog(
         event_type = event_map.get(str(row.event_type))
         if str(row.status) != "VERIFIED" or event_type is None:
             continue
-        rows.append(
-            {
-                "canonical_ts_code": str(row.canonical_ts_code),
-                "event_type": event_type,
-                "effective_from": str(row.effective_start),
-                "effective_to": str(row.effective_end),
-                "evidence_source": str(row.package_id),
-                "evidence_reference": str(row.row_identity),
-            }
+        compiled = {
+            "canonical_ts_code": str(row.canonical_ts_code),
+            "event_type": event_type,
+            "effective_from": str(row.effective_start),
+            "effective_to": str(row.effective_end),
+            "evidence_source": str(row.package_id),
+            "evidence_reference": str(row.row_identity),
+        }
+        identity = (
+            str(compiled["canonical_ts_code"]),
+            str(compiled["event_type"]),
+            str(compiled["effective_from"]),
+            str(compiled["effective_to"]),
         )
+        # The base catalog remains immutable provenance when an official index
+        # independently verifies the exact same lifecycle interval.
+        rows_by_identity.setdefault(identity, compiled)
     ordered = sorted(
-        {json.dumps(row, sort_keys=True): row for row in rows}.values(),
+        rows_by_identity.values(),
         key=lambda row: (
             str(row["canonical_ts_code"]),
             str(row["effective_from"]),

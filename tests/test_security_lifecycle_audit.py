@@ -15,6 +15,7 @@ from ashare_quant.data.security_identity_transition import (
 )
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.data.security_lifecycle_audit import (
+    CLASSIFICATION_CONTRACT_VERSION,
     LifecycleAuditPolicy,
     SecurityLifecycleScanner,
     normalize_ordinary_suspension_intervals,
@@ -378,6 +379,45 @@ def test_isolated_missing_quote_is_unresolved_not_raw_data(tmp_path: Path) -> No
     assert selected["blocking"].all()
 
 
+def test_pre_listing_suspend_snapshot_does_not_require_universe_suspension(
+    tmp_path: Path,
+) -> None:
+    scanner = _fixture_scanner(tmp_path, include_unresolved=False)
+    stock_path = scanner.raw_root / "stock_basic" / "data.parquet"
+    stocks = pd.read_parquet(stock_path)
+    stocks.loc[stocks["ts_code"].eq("000005.SZ"), "list_date"] = "20200106"
+    stocks.to_parquet(stock_path, index=False)
+    suspend_path = scanner.raw_root / "suspend_d" / "data.parquet"
+    suspend = pd.read_parquet(suspend_path)
+    suspend = pd.concat(
+        [
+            suspend,
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000005.SZ",
+                        "trade_date": "20200103",
+                        "suspend_type": "S",
+                        "suspend_timing": None,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    suspend.to_parquet(suspend_path, index=False)
+
+    result = scanner.scan(DATES[0], DATES[-1])
+    boundaries = pd.read_parquet(result.output_dir / "boundary_checks.parquet")
+    selected = boundaries[
+        boundaries["canonical_ts_code"].eq("000005.SZ")
+        & boundaries["trade_date"].eq("20200103")
+        & boundaries["boundary_type"].eq("ORDINARY_SUSPENSION_DAILY_STATE")
+    ]
+
+    assert selected.empty
+
+
 def test_scan_artifact_tamper_and_insufficient_coverage_fail_closed(tmp_path: Path) -> None:
     result = _fixture_scanner(tmp_path, include_unresolved=False).scan(DATES[0], DATES[-1])
     manifest_path = result.output_dir / "manifest.json"
@@ -693,7 +733,7 @@ def _policy() -> dict[str, object]:
         "schema_version": 2,
         "artifact_name": "security_lifecycle_policy",
         "policy_version": "fixture-v1",
-        "classification_contract_version": 4,
+        "classification_contract_version": CLASSIFICATION_CONTRACT_VERSION,
         "classification_precedence": [
             "LISTING_SUSPENSION",
             "ORDINARY_SUSPENSION",

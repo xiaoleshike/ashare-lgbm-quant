@@ -367,6 +367,7 @@ def test_terminal_state_takes_precedence_over_suspension() -> None:
     assert bool(row["is_terminal"])
     assert not bool(row["is_listed"])
     assert not bool(row["is_suspended"])
+    assert validate_universe_frame(frame.reset_index()).ok
 
 
 def test_daily_only_candidate_does_not_infer_delist_date_from_last_quote() -> None:
