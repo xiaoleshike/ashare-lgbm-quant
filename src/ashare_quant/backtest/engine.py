@@ -29,6 +29,8 @@ class BacktestInputs:
     calendar: tuple[str, ...]
     benchmark: DataFrame
     identity_transitions: tuple[SecurityIdentityTransition, ...] = ()
+    identity_transition_version: str | None = None
+    identity_transition_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +98,12 @@ def simulate_portfolio(
             f"BACKTEST_DELAYED_EXIT_POLICY_INVALID: policy={delayed_exit_policy}"
         )
     strict = purpose != "diagnostic"
+    if strict and (
+        not inputs.identity_transition_version
+        or not inputs.identity_transition_hash
+        or len(inputs.identity_transition_hash) != 64
+    ):
+        raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONTRACT_REQUIRED")
     calendar = list(inputs.calendar)
     if not calendar:
         raise DataValidationError("BACKTEST_MARKET_DATA_INCOMPLETE: empty trading calendar")

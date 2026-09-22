@@ -23,6 +23,7 @@ from ashare_quant.config.settings import (
 )
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_identity_transition import SecurityIdentityTransitionResolver
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 
 
@@ -164,6 +165,7 @@ def test_execution_price_loader_joins_raw_alias_to_canonical_universe(tmp_path: 
         identity_resolver=SecurityIdentityResolver.from_path(
             Path("config/security_identity/bse_code_aliases.json")
         ),
+        identity_transitions=SecurityIdentityTransitionResolver.empty(),
         ts_codes={"920680.BJ"},
     )
 
@@ -205,6 +207,7 @@ def test_execution_price_loader_applies_authoritative_listing_suspension(tmp_pat
         lifecycle_resolver=SecurityLifecycleResolver.from_path(
             Path("config/security_identity/security_lifecycle_events.json")
         ),
+        identity_transitions=SecurityIdentityTransitionResolver.empty(),
         ts_codes={"300028.SZ"},
     )
 
@@ -248,6 +251,7 @@ def test_execution_price_loader_normalizes_delist_date_as_terminal_boundary(
         "20240110",
         "20240110",
         1e-6,
+        identity_transitions=SecurityIdentityTransitionResolver.empty(),
         ts_codes={"000001.SZ"},
     )
 
@@ -492,6 +496,8 @@ def _inputs(prices: list[dict[str, object]], *, calendar: tuple[str, ...]) -> Ba
         prices=pd.DataFrame(prices),
         calendar=calendar,
         benchmark=pd.DataFrame({"trade_date": calendar, "close": [100.0] * len(calendar)}),
+        identity_transition_version="none",
+        identity_transition_hash="0" * 64,
     )
 
 

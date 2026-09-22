@@ -15,6 +15,10 @@ from ashare_quant.backtest.engine import BacktestInputs
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_identity_transition import (
+    SecurityIdentityTransitionResolver,
+    load_identity_transition_contract,
+)
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 
 type DataFrame = pd.DataFrame
@@ -58,6 +62,10 @@ def load_backtest_inputs(
     price_start = min(start_date, calendar[0])
     price_end = calendar[-1]
     signals = load_scored_signals(processed_root, model, feature_names, start_date, end_date)
+    transitions = load_identity_transition_contract(
+        mode=settings.security_identity.identity_transition_mode,
+        artifact_path=settings.security_identity.identity_transition_path,
+    )
     prices = load_execution_prices(
         raw_root,
         processed_root,
@@ -70,6 +78,7 @@ def load_backtest_inputs(
         lifecycle_resolver=SecurityLifecycleResolver.from_path(
             settings.security_identity.lifecycle_path
         ),
+        identity_transitions=transitions,
     )
     benchmark = load_benchmark(
         raw_root, settings.backtest.benchmark_index_code, price_start, price_end
@@ -79,6 +88,9 @@ def load_backtest_inputs(
         prices=prices,
         calendar=tuple(calendar),
         benchmark=benchmark,
+        identity_transitions=transitions.transition_records(),
+        identity_transition_version=transitions.artifact_version,
+        identity_transition_hash=transitions.artifact_hash,
     )
 
 
@@ -166,6 +178,7 @@ def load_execution_prices(
     *,
     identity_resolver: SecurityIdentityResolver | None = None,
     lifecycle_resolver: SecurityLifecycleResolver | None = None,
+    identity_transitions: SecurityIdentityTransitionResolver,
     ts_codes: Collection[str] | None = None,
 ) -> DataFrame:
     """Load next-open tradability fields without using label outputs."""
@@ -174,11 +187,12 @@ def load_execution_prices(
     limit_glob = raw_root / "stk_limit" / "**" / "*.parquet"
     universe_glob = processed_root / "universe_daily" / "**" / "*.parquet"
     resolver = identity_resolver or SecurityIdentityResolver.empty()
-    canonical_codes = (
-        tuple(sorted({str(code).strip().upper() for code in ts_codes}))
-        if ts_codes is not None
-        else ()
-    )
+    canonical_codes: tuple[str, ...] = ()
+    if ts_codes is not None:
+        canonical_codes = identity_transitions.execution_code_closure(
+            {str(code).strip().upper() for code in ts_codes},
+            end_date=end_date,
+        )
     if ts_codes is not None and not canonical_codes:
         raise DataValidationError("BACKTEST_MARKET_DATA_INCOMPLETE: execution code set is empty")
     universe_code_join = (

@@ -437,3 +437,21 @@ universe_daily
 
 All prior artifacts remain immutable historical evidence. Rebuild into a new isolated processed
 and reports root; never rewrite the old lineage or alter hashes to force compatibility.
+### Typed runtime evidence
+
+`security-lifecycle-catalog-compile` converts only `VERIFIED` official-index rows into an
+immutable, explicitly `partial` runtime catalog. Ordinary suspension and formal listing
+suspension remain distinct. Terminal metadata continues to come from `stock_basic.delist_date`,
+and code transitions remain in the separate identity-transition artifact. A partial catalog
+does not imply full-market lifecycle PASS.
+
+Real stock-level evidence files and official packages are intentionally local and ignored by
+Git. A fresh checkout must receive explicit base-catalog, official-index, and transition-artifact
+paths. Missing files fail closed; an empty catalog is not treated as complete evidence.
+
+### Coherent research snapshots
+
+Snapshot schema v2 captures enabled dependencies while holding the same configured production
+writer lock (`paths.runs/.production.lock`). It compares the complete source inventory before
+and after copying, records a generation proof, then independently validates copied bytes. A
+research-only lock cannot establish source consistency.

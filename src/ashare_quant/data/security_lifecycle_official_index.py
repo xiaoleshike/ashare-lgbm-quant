@@ -285,6 +285,45 @@ def validate_official_lifecycle_index(path: Path) -> JsonObject:
     for name, expected in hashes.items():
         if not isinstance(expected, str) or file_sha256(path / name) != expected:
             raise DataValidationError(f"SECURITY_LIFECYCLE_OFFICIAL_INDEX_HASH_MISMATCH: {name}")
+    summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
+    inventory = json.loads((path / "source_inventory.json").read_text(encoding="utf-8"))
+    events = pd.read_parquet(path / "official_events.parquet")
+    if (
+        not isinstance(summary, dict)
+        or summary.get("index_id") != path.name
+        or summary.get("counts") != manifest.get("counts")
+        or not isinstance(inventory, dict)
+        or not isinstance(inventory.get("sources"), list)
+    ):
+        raise DataValidationError("SECURITY_LIFECYCLE_OFFICIAL_INDEX_INVALID")
+    logical = manifest.get("logical_identity")
+    if (
+        not isinstance(logical, dict)
+        or logical.get("official_events_hash") != _frame_hash(events)
+        or f"security_lifecycle_official_index_{canonical_payload_hash(logical)[:24]}" != path.name
+    ):
+        raise DataValidationError("SECURITY_LIFECYCLE_OFFICIAL_INDEX_IDENTITY_MISMATCH")
+    reports_root = path.parent.parent
+    for source in cast(list[JsonObject], inventory["sources"]):
+        kind = str(source.get("source_kind", ""))
+        package_id = str(source.get("package_id", ""))
+        expected_hash = str(source.get("package_hash", ""))
+        if kind == "BULK_OFFICIAL_SOURCE":
+            validated, _ = validate_bulk_official_source_package(
+                reports_root / "security_lifecycle_bulk_source" / package_id
+            )
+            actual_hash = str(validated["package_hash"])
+        elif kind == "INDIVIDUAL_OFFICIAL_EVIDENCE":
+            validated = validate_official_evidence_package(
+                reports_root / "security_lifecycle_evidence" / package_id
+            )
+            actual_hash = str(validated["package_hash"])
+        elif kind == "EXISTING_V3":
+            actual_hash = expected_hash
+        else:
+            raise DataValidationError("SECURITY_LIFECYCLE_OFFICIAL_INDEX_SOURCE_INVALID")
+        if actual_hash != expected_hash:
+            raise DataValidationError("SECURITY_LIFECYCLE_OFFICIAL_INDEX_SOURCE_HASH_MISMATCH")
     return cast(JsonObject, manifest)
 
 

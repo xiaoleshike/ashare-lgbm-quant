@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 import pandas as pd
 
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.utils.manifest import atomic_write_json
 
 type DataFrame = pd.DataFrame
-type LifecycleEventType = Literal["LISTING_SUSPENDED"]
+type JsonObject = dict[str, Any]
+type LifecycleEventType = Literal["ORDINARY_SUSPENSION", "LISTING_SUSPENDED"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +80,7 @@ class SecurityLifecycleResolver:
             ) from error
         if not isinstance(payload, dict):
             raise DataValidationError("SECURITY_LIFECYCLE_POLICY_INVALID: root must be an object")
-        if payload.get("schema_version") != 1:
+        if payload.get("schema_version") not in {1, 2}:
             raise DataValidationError(
                 "SECURITY_LIFECYCLE_POLICY_INVALID: unsupported schema_version"
             )
@@ -130,7 +135,20 @@ class SecurityLifecycleResolver:
 
         code = str(ts_code).strip().upper()
         date = _date(str(trade_date), "trade_date")
-        return any(event.applies(code, date) for event in self._by_code.get(code, ()))
+        return any(
+            event.event_type == "LISTING_SUSPENDED" and event.applies(code, date)
+            for event in self._by_code.get(code, ())
+        )
+
+    def is_ordinary_suspended(self, ts_code: str, trade_date: str) -> bool:
+        """Return whether verified full-day ordinary evidence applies on this date."""
+
+        code = str(ts_code).strip().upper()
+        date = _date(str(trade_date), "trade_date")
+        return any(
+            event.event_type == "ORDINARY_SUSPENSION" and event.applies(code, date)
+            for event in self._by_code.get(code, ())
+        )
 
     def apply_suspension(self, frame: DataFrame) -> DataFrame:
         """Overlay lifecycle suspension evidence on canonical market rows."""
@@ -156,8 +174,10 @@ class SecurityLifecycleResolver:
         working["is_suspended"] = working["is_suspended"].fillna(False).astype(bool) | lifecycle
         return working
 
-    def suspension_keys(self, trade_dates: list[str]) -> DataFrame:
-        """Expand explicit intervals to canonical security/date keys."""
+    def suspension_keys(
+        self, trade_dates: list[str], *, event_type: LifecycleEventType | None = None
+    ) -> DataFrame:
+        """Expand typed verified intervals to canonical security/date keys."""
 
         if not trade_dates or not self._events:
             return pd.DataFrame(columns=["ts_code", "trade_date"])
@@ -165,7 +185,7 @@ class SecurityLifecycleResolver:
         rows = [
             {"ts_code": event.canonical_ts_code, "trade_date": trade_date}
             for event in self._events
-            if event.event_type == "LISTING_SUSPENDED"
+            if event_type is None or event.event_type == event_type
             for trade_date in dates
             if event.effective_from <= trade_date <= event.effective_to
         ]
@@ -204,7 +224,15 @@ def _parse_event(value: object) -> SecurityLifecycleEvent:
     effective_to = _date(str(value.get("effective_to", "")), "effective_to")
     source = str(value.get("evidence_source", "")).strip()
     reference = str(value.get("evidence_reference", "")).strip()
-    if not code or "." not in code or event_type != "LISTING_SUSPENDED":
+    if (
+        not code
+        or "." not in code
+        or event_type
+        not in {
+            "ORDINARY_SUSPENSION",
+            "LISTING_SUSPENDED",
+        }
+    ):
         raise DataValidationError("SECURITY_LIFECYCLE_POLICY_INVALID: invalid event identity")
     if effective_from > effective_to:
         raise DataValidationError("SECURITY_LIFECYCLE_POLICY_INVALID: reversed effective interval")
@@ -212,7 +240,7 @@ def _parse_event(value: object) -> SecurityLifecycleEvent:
         raise DataValidationError("SECURITY_LIFECYCLE_POLICY_INVALID: evidence is required")
     return SecurityLifecycleEvent(
         canonical_ts_code=code,
-        event_type="LISTING_SUSPENDED",
+        event_type=event_type,  # type: ignore[arg-type]
         effective_from=effective_from,
         effective_to=effective_to,
         evidence_source=source,
@@ -221,6 +249,163 @@ def _parse_event(value: object) -> SecurityLifecycleEvent:
 
 
 def _date(value: str, field: str) -> str:
-    if len(value) != 8 or not value.isdigit():
+    from datetime import datetime
+
+    try:
+        valid = datetime.strptime(value, "%Y%m%d").strftime("%Y%m%d") == value
+    except ValueError:
+        valid = False
+    if not valid:
         raise DataValidationError(f"SECURITY_LIFECYCLE_POLICY_INVALID: {field} must be YYYYMMDD")
     return value
+
+
+def publish_typed_lifecycle_catalog(
+    *,
+    official_index: Path,
+    base_catalog: SecurityLifecycleResolver,
+    reports_root: Path,
+    catalog_version: str,
+) -> Path:
+    """Compile VERIFIED ordinary/listing evidence into one partial runtime catalog."""
+
+    from ashare_quant.data.security_lifecycle_audit import canonical_payload_hash, file_sha256
+    from ashare_quant.data.security_lifecycle_official_index import (
+        validate_official_lifecycle_index,
+    )
+
+    index_manifest = validate_official_lifecycle_index(official_index)
+    events = pd.read_parquet(official_index / "official_events.parquet")
+    rows: list[JsonObject] = [
+        {
+            "canonical_ts_code": event.canonical_ts_code,
+            "event_type": event.event_type,
+            "effective_from": event.effective_from,
+            "effective_to": event.effective_to,
+            "evidence_source": event.evidence_source,
+            "evidence_reference": event.evidence_reference,
+        }
+        for event in base_catalog.events()
+    ]
+    event_map = {
+        "ORDINARY_FULL_DAY_SUSPENSION": "ORDINARY_SUSPENSION",
+        "FORMAL_LISTING_SUSPENSION_START": "LISTING_SUSPENDED",
+    }
+    for row in events.itertuples(index=False):
+        event_type = event_map.get(str(row.event_type))
+        if str(row.status) != "VERIFIED" or event_type is None:
+            continue
+        rows.append(
+            {
+                "canonical_ts_code": str(row.canonical_ts_code),
+                "event_type": event_type,
+                "effective_from": str(row.effective_start),
+                "effective_to": str(row.effective_end),
+                "evidence_source": str(row.package_id),
+                "evidence_reference": str(row.row_identity),
+            }
+        )
+    ordered = sorted(
+        {json.dumps(row, sort_keys=True): row for row in rows}.values(),
+        key=lambda row: (
+            str(row["canonical_ts_code"]),
+            str(row["effective_from"]),
+            str(row["event_type"]),
+        ),
+    )
+    payload: JsonObject = {
+        "schema_version": 2,
+        "artifact_name": "security_lifecycle_events",
+        "policy_version": catalog_version,
+        "completeness": "partial",
+        "events": ordered,
+    }
+    resolver = SecurityLifecycleResolver(
+        policy_version=catalog_version,
+        policy_hash="0" * 64,
+        events=tuple(_parse_event(row) for row in ordered),
+    )
+    logical = {
+        "catalog_version": catalog_version,
+        "base_catalog_hash": base_catalog.policy_hash,
+        "official_index_id": index_manifest["index_id"],
+        "official_index_manifest_hash": file_sha256(official_index / "manifest.json"),
+        "events_hash": canonical_payload_hash(ordered),
+        "event_count": resolver.event_count,
+        "completeness": "partial",
+    }
+    catalog_id = f"security_lifecycle_typed_catalog_{canonical_payload_hash(logical)[:24]}"
+    output = reports_root / "security_lifecycle_typed_catalog" / catalog_id
+    if output.exists():
+        validate_typed_lifecycle_catalog(output, official_index=official_index)
+        return output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=output.parent, prefix=f".{catalog_id}.staging-"))
+    try:
+        atomic_write_json(staging / "events.json", payload)
+        atomic_write_json(
+            staging / "manifest.json",
+            {
+                "schema_version": 1,
+                "artifact_name": "security_lifecycle_typed_catalog",
+                "catalog_id": catalog_id,
+                "logical_identity": logical,
+                "artifact_hashes": {"events.json": file_sha256(staging / "events.json")},
+            },
+        )
+        _validate_typed_catalog_contents(
+            staging, expected_id=catalog_id, official_index=official_index
+        )
+        os.replace(staging, output)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+    return output
+
+
+def validate_typed_lifecycle_catalog(path: Path, *, official_index: Path) -> JsonObject:
+    """Validate catalog bytes, logical identity and its source official index."""
+
+    return _validate_typed_catalog_contents(
+        path, expected_id=path.name, official_index=official_index
+    )
+
+
+def _validate_typed_catalog_contents(
+    path: Path, *, expected_id: str, official_index: Path
+) -> JsonObject:
+    from ashare_quant.data.security_lifecycle_audit import canonical_payload_hash, file_sha256
+    from ashare_quant.data.security_lifecycle_official_index import (
+        validate_official_lifecycle_index,
+    )
+
+    try:
+        manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+        payload = json.loads((path / "events.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_INVALID") from error
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(payload, dict)
+        or manifest.get("catalog_id") != expected_id
+        or manifest.get("artifact_hashes") != {"events.json": file_sha256(path / "events.json")}
+        or payload.get("schema_version") != 2
+        or payload.get("completeness") != "partial"
+    ):
+        raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_INVALID")
+    source = validate_official_lifecycle_index(official_index)
+    logical = cast(JsonObject, manifest.get("logical_identity", {}))
+    if (
+        logical.get("official_index_id") != source.get("index_id")
+        or logical.get("official_index_manifest_hash")
+        != file_sha256(official_index / "manifest.json")
+        or logical.get("events_hash") != canonical_payload_hash(payload.get("events"))
+        or f"security_lifecycle_typed_catalog_{canonical_payload_hash(logical)[:24]}" != expected_id
+    ):
+        raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_IDENTITY_MISMATCH")
+    SecurityLifecycleResolver(
+        policy_version=str(payload.get("policy_version", "")),
+        policy_hash=file_sha256(path / "events.json"),
+        events=tuple(_parse_event(row) for row in cast(list[object], payload.get("events", []))),
+    )
+    return cast(JsonObject, manifest)

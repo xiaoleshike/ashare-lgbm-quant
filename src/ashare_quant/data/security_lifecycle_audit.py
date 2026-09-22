@@ -34,9 +34,9 @@ type LifecycleClassification = Literal[
     "UNRESOLVED",
 ]
 
-SCANNER_SCHEMA_VERSION = 4
-LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3})
-CLASSIFICATION_CONTRACT_VERSION = 3
+SCANNER_SCHEMA_VERSION = 5
+LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
+CLASSIFICATION_CONTRACT_VERSION = 4
 ARTIFACT_NAME = "security_lifecycle_scan"
 REQUIRED_ARTIFACTS = frozenset(
     {
@@ -273,7 +273,7 @@ class SecurityLifecycleScanner:
         identity_resolver: SecurityIdentityResolver,
         lifecycle_evidence: SecurityLifecycleResolver,
         lifecycle_policy: LifecycleAuditPolicy,
-        identity_transitions: SecurityIdentityTransitionResolver | None = None,
+        identity_transitions: SecurityIdentityTransitionResolver,
         supersedes_scan_manifest: Path | None = None,
         supersession_reason: str | None = None,
     ) -> None:
@@ -283,9 +283,7 @@ class SecurityLifecycleScanner:
         self.identity = identity_resolver
         self.evidence = lifecycle_evidence
         self.policy = lifecycle_policy
-        self.identity_transitions = (
-            identity_transitions or SecurityIdentityTransitionResolver.empty()
-        )
+        self.identity_transitions = identity_transitions
         self.identity_transitions.validate_alias_coexistence(identity_resolver)
         self.supersedes_scan_manifest = supersedes_scan_manifest
         self.supersession_reason = supersession_reason
@@ -529,7 +527,9 @@ class SecurityLifecycleScanner:
                         ),
                     }
                     for event in self.evidence.events()
-                    if event.effective_to >= start_date and event.effective_from <= end_date
+                    if event.event_type == "LISTING_SUSPENDED"
+                    and event.effective_to >= start_date
+                    and event.effective_from <= end_date
                 ]
             )
             interval_columns = [
@@ -546,7 +546,9 @@ class SecurityLifecycleScanner:
             valid_quote_keys = frozenset(
                 (str(row.canonical_ts_code), str(row.trade_date))
                 for row in con.execute(
-                    "SELECT canonical_ts_code,trade_date FROM daily_canonical WHERE valid_quote"
+                    "SELECT d.canonical_ts_code,d.trade_date FROM daily_canonical d "
+                    "JOIN (SELECT DISTINCT canonical_ts_code,trade_date FROM suspend_events) s "
+                    "USING(canonical_ts_code,trade_date) WHERE d.valid_quote"
                 )
                 .fetchdf()
                 .itertuples(index=False)
@@ -565,6 +567,30 @@ class SecurityLifecycleScanner:
                 valid_quote_keys=valid_quote_keys,
                 stronger_evidence_keys=stronger_evidence_keys,
             )
+            verified_ordinary = pd.DataFrame(
+                [
+                    {
+                        "canonical_ts_code": event.canonical_ts_code,
+                        "state": "ORDINARY_SUSPENSION",
+                        "effective_start": max(event.effective_from, start_date),
+                        "effective_end": min(event.effective_to, end_date),
+                        "start_source": "VERIFIED_LIFECYCLE_EVIDENCE",
+                        "end_source": "VERIFIED_LIFECYCLE_EVIDENCE",
+                        "evidence_hash": canonical_payload_hash(
+                            {
+                                "source": event.evidence_source,
+                                "reference": event.evidence_reference,
+                            }
+                        ),
+                    }
+                    for event in self.evidence.events()
+                    if event.event_type == "ORDINARY_SUSPENSION"
+                    and event.effective_to >= start_date
+                    and event.effective_from <= end_date
+                ],
+                columns=interval_columns,
+            )
+            ordinary = pd.concat([ordinary, verified_ordinary], ignore_index=True).drop_duplicates()
             intervals = pd.concat([ordinary, listing], ignore_index=True)
             con.register("lifecycle_intervals_input", intervals)
             classified_daily = self._classify_daily(con)
@@ -732,21 +758,21 @@ class SecurityLifecycleScanner:
               ON upper(trim(CAST(s.ts_code AS VARCHAR)))=a.source_code
              AND a.effective_from IS NULL AND a.effective_to IS NULL"""
         )
+        con.execute(
+            """CREATE TEMP TABLE daily_security_bounds AS
+            SELECT canonical_ts_code,min(trade_date) AS first_daily_date,
+                   max(trade_date) AS last_daily_date
+            FROM daily_canonical GROUP BY 1"""
+        )
         con.execute(  # noqa: S608 - validated local paths and YYYYMMDD bounds only
             """CREATE TEMP TABLE securities AS
-            WITH daily_bounds AS (
-              SELECT canonical_ts_code, min(trade_date) AS first_daily_date
-              FROM daily_canonical GROUP BY 1
-            ), stock AS (
+            WITH stock AS (
               SELECT canonical_ts_code, min(list_date) AS list_date,
                      max(delist_date) AS delist_date
               FROM stock_source GROUP BY 1
             )
-            SELECT coalesce(s.canonical_ts_code,d.canonical_ts_code) AS canonical_ts_code,
-                   coalesce(s.list_date,d.first_daily_date) AS list_date,
-                   s.delist_date
-            FROM stock s FULL OUTER JOIN daily_bounds d USING(canonical_ts_code)
-            WHERE coalesce(s.list_date,d.first_daily_date) IS NOT NULL"""
+            SELECT canonical_ts_code,list_date,delist_date FROM stock
+            WHERE list_date IS NOT NULL"""
         )
         con.execute(
             """CREATE TEMP TABLE expected_listed AS
@@ -987,6 +1013,34 @@ class SecurityLifecycleScanner:
                      'BOUNDARY_INCONSISTENCY',TRUE,
                      'canonical daily rows contain conflicting executable prices',source_ts_codes
               FROM daily_canonical WHERE quote_conflict
+            ), transition_successor_coverage AS (
+              SELECT t.successor_ts_code AS canonical_ts_code,t.effective_date AS trade_date,
+                     'IDENTITY_SUCCESSOR_COVERAGE',
+                     'BOUNDARY_INCONSISTENCY',TRUE,
+                     'identity transition successor lacks authoritative stock_basic metadata',
+                     t.evidence_package_id
+              FROM security_identity_transitions t
+              LEFT JOIN stock_source s ON s.canonical_ts_code=t.successor_ts_code
+              WHERE s.canonical_ts_code IS NULL
+            ), transition_double_count AS (
+              SELECT t.predecessor_ts_code AS canonical_ts_code,d1.trade_date,
+                     'IDENTITY_TRANSITION_DOUBLE_QUOTE',
+                     'BOUNDARY_INCONSISTENCY',TRUE,
+                     'predecessor and successor both have valid canonical quotes after transition',
+                     t.evidence_package_id
+              FROM security_identity_transitions t
+              JOIN daily_canonical d1 ON d1.canonical_ts_code=t.predecessor_ts_code
+                AND d1.trade_date>=t.effective_date AND d1.valid_quote
+              JOIN daily_canonical d2 ON d2.canonical_ts_code=t.successor_ts_code
+                AND d2.trade_date=d1.trade_date AND d2.valid_quote
+            ), listing_metadata_missing AS (
+              SELECT d.canonical_ts_code,d.first_daily_date AS trade_date,
+                     'LISTING_METADATA_MISSING','BOUNDARY_INCONSISTENCY',TRUE,
+                     'daily history exists without authoritative stock_basic listing metadata',
+                     'stock_basic/daily identity accounting'
+              FROM daily_security_bounds d
+              LEFT JOIN stock_source s USING(canonical_ts_code)
+              WHERE s.canonical_ts_code IS NULL
             )
             SELECT * FROM ordinary_mismatch
             UNION ALL SELECT * FROM listing_boundary_mismatch
@@ -995,6 +1049,9 @@ class SecurityLifecycleScanner:
             UNION ALL SELECT * FROM post_terminal
             UNION ALL SELECT * FROM listing_start_mismatch
             UNION ALL SELECT * FROM quote_conflicts
+            UNION ALL SELECT * FROM transition_successor_coverage
+            UNION ALL SELECT * FROM transition_double_count
+            UNION ALL SELECT * FROM listing_metadata_missing
             ORDER BY 1,2,3"""
         ).fetchdf()
         checks.columns = columns
@@ -1150,7 +1207,192 @@ def validate_security_lifecycle_artifact(path: Path) -> JsonObject:
     expected_id = f"security_lifecycle_{canonical_payload_hash(logical)[:24]}"
     if expected_id != manifest.get("scan_id"):
         raise DataValidationError("SECURITY_LIFECYCLE_SCAN_ID_MISMATCH")
+    if schema_version == SCANNER_SCHEMA_VERSION:
+        _validate_lifecycle_business_contents(path, manifest)
     return manifest
+
+
+def _validate_lifecycle_business_contents(path: Path, manifest: JsonObject) -> None:
+    """Recompute evidence-grade gate semantics from immutable child artifacts."""
+
+    summary = _read_json(path / "summary.json", "lifecycle scan summary")
+    counts = manifest.get("counts")
+    required_counts = {
+        "canonical_securities",
+        "open_sessions",
+        "listed_session_candidates",
+        "valid_price_rows",
+        "missing_price_candidates",
+        "ordinary_suspension",
+        "ordinary_suspension_intervals",
+        "listing_suspension",
+        "listing_suspension_intervals",
+        "terminal_delisting",
+        "terminal_delisting_intervals",
+        "security_alias",
+        "security_alias_intervals",
+        "missing_raw_data",
+        "missing_raw_data_intervals",
+        "unresolved",
+        "unresolved_intervals",
+        "policy_collisions",
+        "boundary_inconsistencies",
+        "boundary_warnings",
+        "boundary_info",
+        "blocking_raw_data_gaps",
+    }
+    if (
+        not isinstance(counts, dict)
+        or not required_counts.issubset(counts)
+        or any(
+            isinstance(counts[key], bool) or not isinstance(counts[key], int)
+            for key in required_counts
+        )
+        or any(int(counts[key]) < 0 for key in required_counts)
+    ):
+        raise DataValidationError("SECURITY_LIFECYCLE_COUNTS_INVALID")
+    if summary.get("counts") != counts or summary.get("status") != manifest.get("status"):
+        raise DataValidationError("SECURITY_LIFECYCLE_STATUS_MISMATCH")
+    for key in (
+        "scan_id",
+        "start_date",
+        "end_date",
+        "policy_version",
+        "policy_hash",
+        "lifecycle_evidence_version",
+        "lifecycle_evidence_hash",
+        "security_identity_mapping_version",
+        "security_identity_mapping_hash",
+        "security_identity_transition_version",
+        "security_identity_transition_hash",
+    ):
+        if summary.get(key) != manifest.get(key):
+            raise DataValidationError("SECURITY_LIFECYCLE_SUMMARY_MISMATCH")
+
+    classified = pd.read_parquet(path / "classified_gaps.parquet")
+    unresolved = pd.read_parquet(path / "unresolved.parquet")
+    boundaries = pd.read_parquet(path / "boundary_checks.parquet")
+    raw_gaps = pd.read_parquet(path / "raw_data_gaps.parquet")
+    required_gap_columns = {
+        "canonical_ts_code",
+        "gap_start",
+        "gap_end",
+        "session_count",
+        "classification",
+        "blocking",
+    }
+    if not required_gap_columns.issubset(classified.columns):
+        raise DataValidationError("SECURITY_LIFECYCLE_CLASSIFIED_GAPS_INVALID")
+    if classified.duplicated(
+        ["canonical_ts_code", "gap_start", "gap_end", "classification"], keep=False
+    ).any():
+        raise DataValidationError("SECURITY_LIFECYCLE_CLASSIFIED_GAPS_DUPLICATE")
+    for row in classified.itertuples(index=False):
+        if (
+            not _is_real_date(str(row.gap_start))
+            or not _is_real_date(str(row.gap_end))
+            or str(row.gap_start) > str(row.gap_end)
+            or isinstance(row.session_count, bool)
+            or int(cast(Any, row).session_count) <= 0
+        ):
+            raise DataValidationError("SECURITY_LIFECYCLE_CLASSIFIED_GAPS_INVALID")
+    for _, group in classified.groupby("canonical_ts_code", sort=False):
+        ordered = group.sort_values(["gap_start", "gap_end"])
+        previous_end: str | None = None
+        for row in ordered.itertuples(index=False):
+            if previous_end is not None and str(row.gap_start) <= previous_end:
+                raise DataValidationError("SECURITY_LIFECYCLE_CLASSIFIED_GAPS_OVERLAP")
+            previous_end = str(row.gap_end)
+
+    recomputed: dict[str, int] = {}
+    for classification in (
+        "ORDINARY_SUSPENSION",
+        "LISTING_SUSPENSION",
+        "TERMINAL_DELISTING",
+        "SECURITY_ALIAS",
+        "MISSING_RAW_DATA",
+        "UNRESOLVED",
+    ):
+        selected = classified[classified["classification"].astype(str).eq(classification)]
+        key = classification.lower()
+        recomputed[key] = int(selected["session_count"].astype(int).sum())
+        recomputed[f"{key}_intervals"] = int(len(selected))
+    gap_classifications = {
+        "ORDINARY_SUSPENSION",
+        "LISTING_SUSPENSION",
+        "MISSING_RAW_DATA",
+        "UNRESOLVED",
+    }
+    recomputed["missing_price_candidates"] = int(
+        classified.loc[
+            classified["classification"].astype(str).isin(gap_classifications),
+            "session_count",
+        ]
+        .astype(int)
+        .sum()
+    )
+    recomputed["policy_collisions"] = int(
+        boundaries["status"].astype(str).eq("POLICY_COLLISION").sum()
+    )
+    recomputed["boundary_inconsistencies"] = int(
+        (
+            boundaries["status"].astype(str).eq("BOUNDARY_INCONSISTENCY")
+            & boundaries["blocking"].fillna(False).astype(bool)
+        ).sum()
+    )
+    recomputed["boundary_warnings"] = int(boundaries["status"].astype(str).eq("WARNING").sum())
+    recomputed["boundary_info"] = int(boundaries["status"].astype(str).eq("INFO").sum())
+    recomputed["blocking_raw_data_gaps"] = int(
+        raw_gaps["blocking"].fillna(False).astype(bool).sum()
+    )
+    if any(int(counts[key]) != value for key, value in recomputed.items()):
+        raise DataValidationError("SECURITY_LIFECYCLE_COUNTS_MISMATCH")
+    expected_unresolved = classified[classified["blocking"].fillna(False).astype(bool)].reset_index(
+        drop=True
+    )
+    if not _frames_equal_by_value(unresolved, expected_unresolved):
+        raise DataValidationError("SECURITY_LIFECYCLE_UNRESOLVED_MISMATCH")
+    expected_status = _scan_status(cast(JsonObject, counts))
+    if expected_status != manifest.get("status"):
+        raise DataValidationError("SECURITY_LIFECYCLE_STATUS_MISMATCH")
+
+    logical = cast(JsonObject, manifest["logical_identity"])
+    logical_pairs = {
+        "scanner_schema_version": manifest["schema_version"],
+        "start_date": manifest["start_date"],
+        "end_date": manifest["end_date"],
+        "source_inventory_hash": manifest["source_inventory_hash"],
+        "security_identity_mapping_version": manifest["security_identity_mapping_version"],
+        "security_identity_mapping_hash": manifest["security_identity_mapping_hash"],
+        "security_identity_transition_version": manifest["security_identity_transition_version"],
+        "security_identity_transition_hash": manifest["security_identity_transition_hash"],
+        "lifecycle_policy_version": manifest["policy_version"],
+        "lifecycle_policy_hash": manifest["policy_hash"],
+        "lifecycle_evidence_version": manifest["lifecycle_evidence_version"],
+        "lifecycle_evidence_hash": manifest["lifecycle_evidence_hash"],
+    }
+    if any(logical.get(key) != value for key, value in logical_pairs.items()):
+        raise DataValidationError("SECURITY_LIFECYCLE_LOGICAL_IDENTITY_MISMATCH")
+
+
+def _frames_equal_by_value(left: DataFrame, right: DataFrame) -> bool:
+    if set(left.columns) != set(right.columns) or len(left) != len(right):
+        return False
+    columns = sorted(left.columns)
+    left_rows = (
+        left[columns].fillna("<NULL>").astype(str).sort_values(columns).reset_index(drop=True)
+    )
+    right_rows = (
+        right[columns].fillna("<NULL>").astype(str).sort_values(columns).reset_index(drop=True)
+    )
+    return left_rows.equals(right_rows)
+
+
+def _is_real_date(value: str) -> bool:
+    try:
+        return datetime.strptime(value, "%Y%m%d").strftime("%Y%m%d") == value
+    except ValueError:
+        return False
 
 
 def validate_pass_lifecycle_scan(
@@ -1198,7 +1440,9 @@ def validate_pass_lifecycle_scan(
         or manifest.get("security_identity_mapping_hash") != identity_resolver.mapping_hash
     ):
         raise DataValidationError("SECURITY_LIFECYCLE_SOURCE_MISMATCH: identity mapping")
-    if identity_transitions is not None and (
+    if identity_transitions is None:
+        raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONTRACT_REQUIRED")
+    if (
         manifest.get("security_identity_transition_version")
         != identity_transitions.artifact_version
         or manifest.get("security_identity_transition_hash") != identity_transitions.artifact_hash

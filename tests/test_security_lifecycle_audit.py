@@ -306,6 +306,7 @@ def test_pass_scan_is_idempotent_portable_and_gate_valid(tmp_path: Path) -> None
         identity_resolver=first.identity,
         lifecycle_evidence=first.evidence,
         lifecycle_policy=first.policy,
+        identity_transitions=first.identity_transitions,
     )
     assert validated["scan_id"] == first_result.scan_id
 
@@ -324,6 +325,7 @@ def test_supersession_is_append_only_and_publishes_comparison(tmp_path: Path) ->
         identity_resolver=first.identity,
         lifecycle_evidence=first.evidence,
         lifecycle_policy=LifecycleAuditPolicy.from_path(policy_path),
+        identity_transitions=SecurityIdentityTransitionResolver.empty(),
         supersedes_scan_manifest=first_result.output_dir / "manifest.json",
         supersession_reason="SUSPEND_D_SEMANTICS_RECALIBRATION",
     )
@@ -408,6 +410,44 @@ def test_pass_gate_rejects_current_source_drift(tmp_path: Path) -> None:
         )
 
 
+def test_root_status_cannot_override_blocked_child_evidence(tmp_path: Path) -> None:
+    result = _fixture_scanner(tmp_path, include_unresolved=True).scan(DATES[0], DATES[-1])
+    manifest_path = result.output_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["status"] = "PASS"
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(DataValidationError, match="STATUS_MISMATCH"):
+        validate_security_lifecycle_artifact(result.output_dir)
+
+
+@pytest.mark.parametrize("mutation", ["missing_counts", "negative_count"])
+def test_scan_gate_rejects_invalid_mandatory_counts(tmp_path: Path, mutation: str) -> None:
+    result = _fixture_scanner(tmp_path, include_unresolved=False).scan(DATES[0], DATES[-1])
+    manifest_path = result.output_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "missing_counts":
+        manifest.pop("counts")
+    else:
+        manifest["counts"]["unresolved"] = -1
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(DataValidationError, match="COUNTS_INVALID"):
+        validate_security_lifecycle_artifact(result.output_dir)
+
+
+def test_pass_scan_requires_explicit_no_transition_contract(tmp_path: Path) -> None:
+    scanner = _fixture_scanner(tmp_path, include_unresolved=False)
+    result = scanner.scan(DATES[0], DATES[-1])
+
+    with pytest.raises(DataValidationError, match="TRANSITION_CONTRACT_REQUIRED"):
+        validate_pass_lifecycle_scan(
+            result.output_dir / "manifest.json",
+            required_start=DATES[0],
+            required_end=DATES[-1],
+        )
+
+
 def test_explicit_alias_is_resolved_and_unknown_code_is_not_guessed(tmp_path: Path) -> None:
     scanner = _fixture_scanner(tmp_path, include_unresolved=False)
     mapping_path = tmp_path / "mapping.json"
@@ -472,6 +512,7 @@ def test_source_or_policy_change_changes_scan_identity(tmp_path: Path) -> None:
         identity_resolver=first.identity,
         lifecycle_evidence=first.evidence,
         lifecycle_policy=LifecycleAuditPolicy.from_path(tmp_path / "first" / "policy-v2.json"),
+        identity_transitions=SecurityIdentityTransitionResolver.empty(),
     )
 
     assert changed_policy.scan(DATES[0], DATES[-1]).scan_id != first_id
@@ -616,6 +657,7 @@ def _fixture_scanner(
         identity_resolver=SecurityIdentityResolver.from_path(mapping_path),
         lifecycle_evidence=SecurityLifecycleResolver.from_path(evidence_path),
         lifecycle_policy=LifecycleAuditPolicy.from_path(policy_path),
+        identity_transitions=SecurityIdentityTransitionResolver.empty(),
     )
 
 
@@ -632,6 +674,7 @@ def _copy_fixture_scanner(source: Path, target: Path) -> SecurityLifecycleScanne
         identity_resolver=SecurityIdentityResolver.from_path(target / "mapping.json"),
         lifecycle_evidence=SecurityLifecycleResolver.from_path(target / "evidence.json"),
         lifecycle_policy=LifecycleAuditPolicy.from_path(target / "policy.json"),
+        identity_transitions=SecurityIdentityTransitionResolver.empty(),
     )
 
 
@@ -650,7 +693,7 @@ def _policy() -> dict[str, object]:
         "schema_version": 2,
         "artifact_name": "security_lifecycle_policy",
         "policy_version": "fixture-v1",
-        "classification_contract_version": 3,
+        "classification_contract_version": 4,
         "classification_precedence": [
             "LISTING_SUSPENSION",
             "ORDINARY_SUSPENSION",

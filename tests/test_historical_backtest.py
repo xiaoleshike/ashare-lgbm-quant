@@ -264,7 +264,14 @@ def _inputs() -> BacktestInputs:
     benchmark = pd.DataFrame(
         {"trade_date": list(calendar), "close": [100, 101, 102, 103, 104, 105]}
     )
-    return BacktestInputs(signals, pd.DataFrame(price_rows), calendar, benchmark)
+    return BacktestInputs(
+        signals,
+        pd.DataFrame(price_rows),
+        calendar,
+        benchmark,
+        identity_transition_version="none",
+        identity_transition_hash="0" * 64,
+    )
 
 
 def _write_labels(processed_root: Path) -> None:

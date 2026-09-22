@@ -198,17 +198,20 @@ def prepare_universe_inputs(
     prepared["_daily_with_liquidity"] = add_liquidity_features(daily)
     prepared["_daily_basic_normalized"] = normalize_daily_basic(prepared["daily_basic"])
     suspend_keys = normalize_suspend_keys(prepared["suspend_d"])
-    lifecycle_keys = lifecycle.suspension_keys(
-        open_trade_dates(
-            prepared["trade_cal"],
-            None,
-            str(prepared["trade_cal"]["cal_date"].max()),
-        )
+    dates = open_trade_dates(
+        prepared["trade_cal"],
+        None,
+        str(prepared["trade_cal"]["cal_date"].max()),
     )
-    prepared["_ordinary_suspend_keys"] = suspend_keys
-    prepared["_listing_suspend_keys"] = lifecycle_keys
+    verified_ordinary = lifecycle.suspension_keys(dates, event_type="ORDINARY_SUSPENSION")
+    listing_keys = lifecycle.suspension_keys(dates, event_type="LISTING_SUSPENDED")
+    ordinary_keys = pd.concat(
+        [suspend_keys, verified_ordinary], ignore_index=True
+    ).drop_duplicates()
+    prepared["_ordinary_suspend_keys"] = ordinary_keys
+    prepared["_listing_suspend_keys"] = listing_keys
     prepared["_suspend_keys"] = pd.concat(
-        [suspend_keys, lifecycle_keys], ignore_index=True
+        [ordinary_keys, listing_keys], ignore_index=True
     ).drop_duplicates()
     prepared["_limit_prices"] = normalize_limit_prices(prepared["stk_limit"])
     prepared["_candidates"] = build_candidates(prepared["stock_basic"], daily)

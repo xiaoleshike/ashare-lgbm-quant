@@ -177,7 +177,14 @@ def make_inputs(
     benchmark = pd.DataFrame(
         {"trade_date": list(calendar), "close": [100.0, 101.0, 102.0, 103.0, 104.0]}
     )
-    return BacktestInputs(signals=signals, prices=prices, calendar=calendar, benchmark=benchmark)
+    return BacktestInputs(
+        signals=signals,
+        prices=prices,
+        calendar=calendar,
+        benchmark=benchmark,
+        identity_transition_version="none",
+        identity_transition_hash="0" * 64,
+    )
 
 
 def make_settings(

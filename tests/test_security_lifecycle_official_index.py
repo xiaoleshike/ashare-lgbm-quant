@@ -7,7 +7,11 @@ import pandas as pd
 import pytest
 
 from ashare_quant.data.security_identity import SecurityIdentityResolver
-from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
+from ashare_quant.data.security_lifecycle import (
+    SecurityLifecycleResolver,
+    publish_typed_lifecycle_catalog,
+    validate_typed_lifecycle_catalog,
+)
 from ashare_quant.data.security_lifecycle_audit import file_sha256
 from ashare_quant.data.security_lifecycle_official_index import (
     OfficialLifecycleIndexService,
@@ -73,6 +77,39 @@ def test_one_bulk_package_indexes_multiple_securities(tmp_path: Path) -> None:
     assert manifest["counts"]["events"] == 2
     assert set(events["canonical_ts_code"]) == {"600001.SH", "600002.SH"}
     assert not events["carry_in"].astype(bool).any()
+
+
+def test_verified_index_compiles_typed_partial_runtime_catalog(tmp_path: Path) -> None:
+    document = tmp_path / "factbook.pdf"
+    document.write_bytes(b"synthetic official exchange factbook")
+    package = publish_bulk_official_source_package(
+        source=_source(document),
+        records=[
+            _record("600001.SH"),
+            _record("600002.SH", event_type="ORDINARY_FULL_DAY_SUSPENSION"),
+        ],
+        document=document,
+        reports_root=tmp_path / "reports",
+    )
+    index = OfficialLifecycleIndexService(
+        reports_root=tmp_path / "reports",
+        identity_resolver=SecurityIdentityResolver.empty(),
+        lifecycle_evidence=SecurityLifecycleResolver.empty(),
+        bulk_source_packages=(package,),
+    ).build()
+
+    catalog = publish_typed_lifecycle_catalog(
+        official_index=index.output_dir,
+        base_catalog=SecurityLifecycleResolver.empty(),
+        reports_root=tmp_path / "reports",
+        catalog_version="typed-fixture-v1",
+    )
+    validate_typed_lifecycle_catalog(catalog, official_index=index.output_dir)
+    resolver = SecurityLifecycleResolver.from_path(catalog / "events.json")
+
+    assert resolver.is_listing_suspended("600001.SH", "20110104")
+    assert resolver.is_ordinary_suspended("600002.SH", "20110104")
+    assert not resolver.is_listing_suspended("600002.SH", "20110104")
 
 
 def test_pre_research_official_start_is_recorded_as_carry_in(tmp_path: Path) -> None:

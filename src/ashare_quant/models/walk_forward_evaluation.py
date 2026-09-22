@@ -23,6 +23,10 @@ from ashare_quant.backtest.executable_validation import REQUIRED_TOP_N, _signals
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_identity_transition import (
+    SecurityIdentityTransitionResolver,
+    load_identity_transition_contract,
+)
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.data.security_lifecycle_audit import (
     LifecycleAuditPolicy,
@@ -132,6 +136,17 @@ class RankerFoldExecutor:
         self.processed_root = processed_root
         self.settings = settings
         self._runtime: Any | None = None
+        self._identity_transitions: SecurityIdentityTransitionResolver | None = (
+            load_identity_transition_contract(
+                mode=settings.security_identity.identity_transition_mode,
+                artifact_path=settings.security_identity.identity_transition_path,
+            )
+        )
+
+    def bind_identity_transitions(self, resolver: SecurityIdentityTransitionResolver) -> None:
+        """Bind one root-preflight-validated transition contract for every fold."""
+
+        self._identity_transitions = resolver
 
     def validate_sources(self, plan: JsonObject) -> JsonObject:
         """Verify current processed manifests against the frozen experiment plan."""
@@ -178,6 +193,9 @@ class RankerFoldExecutor:
         lifecycle = SecurityLifecycleResolver.from_path(
             self.settings.security_identity.lifecycle_path
         )
+        transitions = self._identity_transitions
+        if require_executable and transitions is None:
+            raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONTRACT_REQUIRED")
         return {
             "training_compute": runtime.identity_payload(),
             "lightgbm_version": runtime.lightgbm_version,
@@ -199,6 +217,9 @@ class RankerFoldExecutor:
                 **lifecycle.provenance(),
             },
             "cost_policy_hash": cost_policy.policy_hash,
+            "security_identity_transitions": (
+                transitions.provenance() if transitions is not None else None
+            ),
             "data_logic": {
                 "prediction_universe": "signal_date_universe_left_join_features_v1",
                 "metric_universe": "frozen_predictions_left_join_mature_labels_v1",
@@ -275,11 +296,27 @@ class RankerFoldExecutor:
         validation_predictions = np.asarray(model.predict(validation.features), dtype=float)
         evaluation_predictions = np.asarray(model.predict(evaluation.features), dtype=float)
         predictions = _build_prediction_frame(evaluation.frame, evaluation_predictions)
+        label_cutoff = _governed_execution_cutoff(execution_contract["execution_tail"])
+        label_calendar = load_calendar(
+            self.raw_root,
+            str(predictions["trade_date"].astype(str).min()),
+            label_cutoff,
+            None,
+            maximum_date=label_cutoff,
+        )
         labeled_evaluation = loader.attach_evaluation_labels(
             predictions,
             self.settings.ranker.relevance_grades,
+            trade_calendar=label_calendar,
+            maturity_cutoff=label_cutoff,
         )
         ranking = _ranking_metrics(evaluation, labeled_evaluation, self.settings)
+        ranking["sample_selection_audit"] = {
+            "contract": "labeled_subset_audit_v1",
+            "horizon": horizon,
+            "train": train.sample_selection_by_date.to_dict("records"),
+            "validation": validation.sample_selection_by_date.to_dict("records"),
+        }
         executable = (
             self._executable_metrics(predictions, horizon, execution_contract)
             if require_executable
@@ -345,6 +382,9 @@ class RankerFoldExecutor:
         lifecycle = SecurityLifecycleResolver.from_path(
             self.settings.security_identity.lifecycle_path
         )
+        transitions = self._identity_transitions
+        if transitions is None:
+            raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONTRACT_REQUIRED")
         evaluation_end_index = full_calendar.index(dates[-1])
         tail_sessions = EXECUTION_TAIL_LOAD_CHUNK_SESSIONS
         while True:
@@ -360,6 +400,7 @@ class RankerFoldExecutor:
                 self.settings.universe.price_tolerance,
                 identity_resolver=identity,
                 lifecycle_resolver=lifecycle,
+                identity_transitions=transitions,
                 ts_codes=execution_codes,
             )
             benchmark = load_benchmark(
@@ -370,6 +411,9 @@ class RankerFoldExecutor:
                 prices=prices,
                 calendar=tuple(calendar),
                 benchmark=benchmark,
+                identity_transitions=transitions.transition_records(),
+                identity_transition_version=transitions.artifact_version,
+                identity_transition_hash=transitions.artifact_hash,
             )
             try:
                 results = tuple(
@@ -560,6 +604,8 @@ class MultiFoldEvaluationRunner:
         feature_provenance_path: Path,
         require_executable: bool = True,
         lifecycle_scan_manifest: Path | None = None,
+        identity_transition_artifact: Path | None = None,
+        explicit_no_identity_transitions: bool = False,
     ) -> WalkForwardEvaluationResult:
         plan = _load_json(experiment_manifest, "horizon experiment manifest")
         experiment = _select_experiment(plan, experiment_id)
@@ -593,6 +639,25 @@ class MultiFoldEvaluationRunner:
                 start_date=str(fold["evaluation_start"]),
                 end_date=evaluation_information_end,
             )
+        if require_executable and self.lifecycle_audit_required and lifecycle_scan_manifest is None:
+            raise DataValidationError("SECURITY_LIFECYCLE_AUDIT_REQUIRED")
+        transitions: SecurityIdentityTransitionResolver | None = None
+        if require_executable and self.lifecycle_audit_required:
+            if identity_transition_artifact is not None and explicit_no_identity_transitions:
+                raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONTRACT_INVALID")
+            if identity_transition_artifact is None and not explicit_no_identity_transitions:
+                raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONTRACT_REQUIRED")
+            transitions = load_identity_transition_contract(
+                mode="artifact" if identity_transition_artifact is not None else "none",
+                artifact_path=identity_transition_artifact,
+            )
+            if not isinstance(self.executor, RankerFoldExecutor):
+                raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONTRACT_REQUIRED")
+            identity_resolver = SecurityIdentityResolver.from_path(
+                self.settings.security_identity.mapping_path
+            )
+            transitions.validate_alias_coexistence(identity_resolver)
+            self.executor.bind_identity_transitions(transitions)
         execution_contract = self.executor.execution_contract(
             horizon=horizon,
             require_executable=require_executable,
@@ -621,6 +686,7 @@ class MultiFoldEvaluationRunner:
                 identity_resolver=identity_resolver,
                 lifecycle_evidence=lifecycle_evidence,
                 lifecycle_policy=lifecycle_policy,
+                identity_transitions=transitions,
             )
             execution_contract = {
                 **execution_contract,
@@ -630,6 +696,10 @@ class MultiFoldEvaluationRunner:
                     "lifecycle_policy_hash": audit["policy_hash"],
                     "lifecycle_evidence_hash": audit["lifecycle_evidence_hash"],
                     "source_inventory_hash": audit["source_inventory_hash"],
+                    "security_identity_transition_version": audit[
+                        "security_identity_transition_version"
+                    ],
+                    "security_identity_transition_hash": audit["security_identity_transition_hash"],
                 },
             }
         identities = _experiment_identities(

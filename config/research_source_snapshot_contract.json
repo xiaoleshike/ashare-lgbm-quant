@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "contract_version": "research_source_snapshot_v1_physical_copy",
+  "schema_version": 2,
+  "contract_version": "research_source_snapshot_v2_coherent_generation",
   "snapshot_mechanism": "PHYSICAL_COPY_ATOMIC",
   "dataset_dependencies": [
     "adj_factor",
@@ -17,7 +17,8 @@
     "suspend_d",
     "trade_cal"
   ],
-  "integrity": "SHA256 per relative file plus deterministic dataset fingerprint",
-  "publication": "physical copy to staging, verify source stability and copied bytes, atomic rename, manifest last",
+  "capture_consistency": "shared production writer lock plus before/after complete inventory",
+  "integrity": "SHA256 per relative file plus deterministic dataset fingerprint and generation proof",
+  "publication": "physical copy to staging under writer lock, verify whole inventory and copied bytes, atomic rename, manifest last",
   "logical_identity_excludes": ["mtime", "hostname", "pid", "absolute_path"]
 }

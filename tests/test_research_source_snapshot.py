@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import ashare_quant.data.research_source_snapshot as snapshot_module
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.research_source_snapshot import (
     materialize_research_source_snapshot,
@@ -14,6 +15,7 @@ from ashare_quant.data.research_source_snapshot import (
     validate_research_source_snapshot,
 )
 from ashare_quant.orchestration import (
+    ProductionLockError,
     acquire_production_lock,
     production_lock_path,
     release_production_lock,
@@ -28,6 +30,7 @@ def test_physical_snapshot_survives_mutable_source_update(tmp_path: Path) -> Non
         snapshots_root=tmp_path / "research_snapshots",
         security_identity_mapping_hash="mapping-hash",
         lifecycle_evidence_hash="evidence-hash",
+        writer_lock_path=tmp_path / "runs" / ".production.lock",
         datasets=("daily",),
     )
     frozen = result.output_dir / "datasets" / "daily" / "part.parquet"
@@ -48,6 +51,7 @@ def test_manifest_only_reference_is_not_a_reproducible_snapshot(tmp_path: Path) 
         snapshots_root=tmp_path / "snapshots",
         security_identity_mapping_hash="mapping-hash",
         lifecycle_evidence_hash="evidence-hash",
+        writer_lock_path=tmp_path / "runs" / ".production.lock",
         datasets=("daily",),
     )
     shutil.rmtree(result.output_dir / "datasets")
@@ -67,6 +71,7 @@ def test_snapshot_identity_ignores_source_absolute_path(tmp_path: Path) -> None:
         snapshots_root=tmp_path / "snapshots-one",
         security_identity_mapping_hash="mapping-hash",
         lifecycle_evidence_hash="evidence-hash",
+        writer_lock_path=tmp_path / "runs-one" / ".production.lock",
         datasets=("daily",),
     )
     two = materialize_research_source_snapshot(
@@ -74,32 +79,31 @@ def test_snapshot_identity_ignores_source_absolute_path(tmp_path: Path) -> None:
         snapshots_root=tmp_path / "snapshots-two",
         security_identity_mapping_hash="mapping-hash",
         lifecycle_evidence_hash="evidence-hash",
+        writer_lock_path=tmp_path / "runs-two" / ".production.lock",
         datasets=("daily",),
     )
 
     assert one.snapshot_id == two.snapshot_id
 
 
-def test_production_lock_and_research_snapshot_roots_are_independent(tmp_path: Path) -> None:
+def test_snapshot_uses_the_same_production_writer_lock(tmp_path: Path) -> None:
     production_state = tmp_path / "production" / "paper_trading"
     source = tmp_path / "production" / "raw"
     _dataset(source, "daily", ["20240102"])
-    lock = acquire_production_lock(
-        production_lock_path(production_state), command="production fixture"
-    )
+    writer_lock = production_lock_path(production_state)
+    lock = acquire_production_lock(writer_lock, command="production fixture")
     try:
-        result = materialize_research_source_snapshot(
-            source_root=source,
-            snapshots_root=tmp_path / "research" / "snapshots",
-            security_identity_mapping_hash="mapping-hash",
-            lifecycle_evidence_hash="evidence-hash",
-            datasets=("daily",),
-        )
+        with pytest.raises(ProductionLockError, match="another production run is active"):
+            materialize_research_source_snapshot(
+                source_root=source,
+                snapshots_root=tmp_path / "research" / "snapshots",
+                security_identity_mapping_hash="mapping-hash",
+                lifecycle_evidence_hash="evidence-hash",
+                writer_lock_path=writer_lock,
+                datasets=("daily",),
+            )
     finally:
         release_production_lock(lock)
-
-    assert result.output_dir.is_dir()
-    assert result.output_dir.parent == tmp_path / "research" / "snapshots"
 
 
 def test_snapshot_contract_declares_actual_rebuild_dependencies() -> None:
@@ -125,6 +129,35 @@ def test_snapshot_contract_declares_actual_rebuild_dependencies() -> None:
         )["contract_version"]
         == contract["contract_version"]
     )
+
+
+def test_snapshot_rejects_mixed_source_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    _dataset(source, "daily", ["20240102"])
+    original = snapshot_module._source_inventory
+    calls = 0
+
+    def changing_inventory(root: Path, datasets: tuple[str, ...]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        inventory = original(root, datasets)
+        if calls == 2:
+            inventory["datasets"][0]["generation_fixture"] = "changed"  # type: ignore[index]
+        return inventory
+
+    monkeypatch.setattr(snapshot_module, "_source_inventory", changing_inventory)
+
+    with pytest.raises(DataValidationError, match="MIXED_GENERATION"):
+        materialize_research_source_snapshot(
+            source_root=source,
+            snapshots_root=tmp_path / "snapshots",
+            security_identity_mapping_hash="mapping-hash",
+            lifecycle_evidence_hash="evidence-hash",
+            writer_lock_path=tmp_path / "runs" / ".production.lock",
+            datasets=("daily",),
+        )
 
 
 def _dataset(root: Path, dataset: str, dates: list[str]) -> None:

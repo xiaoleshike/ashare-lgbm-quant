@@ -108,6 +108,41 @@ def test_lifecycle_policy_rejects_overlapping_intervals(tmp_path: Path) -> None:
         SecurityLifecycleResolver.from_path(path)
 
 
+def test_typed_ordinary_and_listing_evidence_remain_distinct(tmp_path: Path) -> None:
+    path = tmp_path / "typed-events.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_name": "security_lifecycle_events",
+                "policy_version": "typed-fixture-v1",
+                "completeness": "partial",
+                "events": [
+                    {
+                        **_event("20240102", "20240102"),
+                        "event_type": "ORDINARY_SUSPENSION",
+                    },
+                    {
+                        **_event("20240102", "20240105"),
+                        "canonical_ts_code": "000002.SZ",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolver = SecurityLifecycleResolver.from_path(path)
+
+    assert resolver.is_ordinary_suspended("000001.SZ", "20240102")
+    assert not resolver.is_listing_suspended("000001.SZ", "20240102")
+    assert resolver.is_listing_suspended("000002.SZ", "20240103")
+    ordinary = resolver.suspension_keys(["20240102", "20240103"], event_type="ORDINARY_SUSPENSION")
+    listing = resolver.suspension_keys(["20240102", "20240103"], event_type="LISTING_SUSPENDED")
+    assert set(ordinary["ts_code"]) == {"000001.SZ"}
+    assert set(listing["ts_code"]) == {"000002.SZ"}
+
+
 def _event(start: str, end: str) -> dict[str, str]:
     return {
         "canonical_ts_code": "000001.SZ",

@@ -21,6 +21,7 @@ from ashare_quant.backtest.provenance import (
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_identity_transition import load_identity_transition_contract
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.models.challenger_evaluation import (
     _load_predictions,
@@ -103,6 +104,10 @@ class ExecutableOOSValidationEngine:
         )
         if not calendar or requested_dates[0] not in calendar:
             raise DataValidationError("executable validation has no authoritative trade calendar")
+        transitions = load_identity_transition_contract(
+            mode=self.settings.security_identity.identity_transition_mode,
+            artifact_path=self.settings.security_identity.identity_transition_path,
+        )
         prices = load_execution_prices(
             self.raw_root,
             self.processed_root,
@@ -115,6 +120,7 @@ class ExecutableOOSValidationEngine:
             lifecycle_resolver=SecurityLifecycleResolver.from_path(
                 self.settings.security_identity.lifecycle_path
             ),
+            identity_transitions=transitions,
         )
         maximum_price_date = str(prices["trade_date"].astype(str).max())
         calendar = [date for date in calendar if date <= maximum_price_date]
@@ -162,6 +168,9 @@ class ExecutableOOSValidationEngine:
                         prices=prices,
                         calendar=tuple(calendar),
                         benchmark=benchmark,
+                        identity_transitions=transitions.transition_records(),
+                        identity_transition_version=transitions.artifact_version,
+                        identity_transition_hash=transitions.artifact_hash,
                     ),
                     top_n=value,
                     settings=execution,

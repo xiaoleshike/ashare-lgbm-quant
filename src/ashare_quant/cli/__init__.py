@@ -28,11 +28,14 @@ from ashare_quant.data.security_identity import (
     scan_cross_source_identity,
 )
 from ashare_quant.data.security_identity_transition import (
-    SecurityIdentityTransitionResolver,
+    load_identity_transition_contract,
     publish_security_identity_transitions,
     publish_transition_evidence_package,
 )
-from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
+from ashare_quant.data.security_lifecycle import (
+    SecurityLifecycleResolver,
+    publish_typed_lifecycle_catalog,
+)
 from ashare_quant.data.security_lifecycle_audit import (
     LifecycleAuditPolicy,
     SecurityLifecycleScanner,
@@ -113,7 +116,7 @@ from ashare_quant.orchestration import (
     FreshnessService,
     GateResult,
     ProductionLockError,
-    production_lock_path,
+    configured_production_lock_path,
     production_runs_root,
     resolve_completed_trading_date,
     run_with_production_lock,
@@ -263,10 +266,16 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     lifecycle_parser.add_argument("--reports-root", required=True)
     lifecycle_parser.add_argument("--lifecycle-policy", default=None)
     lifecycle_parser.add_argument("--lifecycle-evidence", default=None)
-    lifecycle_parser.add_argument(
+    lifecycle_transition_group = lifecycle_parser.add_mutually_exclusive_group(required=True)
+    lifecycle_transition_group.add_argument(
         "--identity-transition-artifact",
         default=None,
-        help="Optional completed security identity-transition artifact directory.",
+        help="Completed security identity-transition artifact directory.",
+    )
+    lifecycle_transition_group.add_argument(
+        "--no-identity-transitions",
+        action="store_true",
+        help="Publish the scan against an explicit no-transition contract.",
     )
     lifecycle_parser.add_argument(
         "--supersedes-scan-manifest",
@@ -331,6 +340,14 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     official_index_parser.add_argument("--lifecycle-evidence", default=None)
     official_index_parser.add_argument("--bulk-source-package", action="append", default=[])
     official_index_parser.add_argument("--official-evidence-package", action="append", default=[])
+    typed_catalog_parser = data_subparsers.add_parser(
+        "security-lifecycle-catalog-compile",
+        help="Compile verified official evidence into a partial typed runtime catalog.",
+    )
+    typed_catalog_parser.add_argument("--official-index", required=True)
+    typed_catalog_parser.add_argument("--base-lifecycle-evidence", required=True)
+    typed_catalog_parser.add_argument("--catalog-version", required=True)
+    typed_catalog_parser.add_argument("--reports-root", required=True)
     hardened_parser = data_subparsers.add_parser(
         "security-lifecycle-resolution-harden",
         help="Split partial source repairs and separate source from lifecycle conclusions.",
@@ -693,6 +710,17 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "--lifecycle-scan-manifest",
         default=None,
         help="Required PASS lifecycle scan manifest for executable evidence.",
+    )
+    transition_group = walk_forward_run.add_mutually_exclusive_group()
+    transition_group.add_argument(
+        "--identity-transition-artifact",
+        default=None,
+        help="Validated identity-transition artifact used by executable evidence.",
+    )
+    transition_group.add_argument(
+        "--no-identity-transitions",
+        action="store_true",
+        help="Explicitly assert the validated lifecycle scan uses the no-transition contract.",
     )
     walk_forward_run.add_argument(
         "--ranking-only",
@@ -1256,6 +1284,22 @@ def run_data_command(args: argparse.Namespace) -> int:
     configure_logging(settings.logging.level, settings.logging.json_logs)
     store = build_store(args.storage_root, settings)
 
+    if args.data_command == "security-lifecycle-catalog-compile":
+        try:
+            output = publish_typed_lifecycle_catalog(
+                official_index=Path(args.official_index),
+                base_catalog=SecurityLifecycleResolver.from_path(
+                    Path(args.base_lifecycle_evidence)
+                ),
+                reports_root=Path(args.reports_root),
+                catalog_version=args.catalog_version,
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"security lifecycle catalog compile failed: {error}", file=sys.stderr)
+            return 2
+        print(f"security_lifecycle_typed_catalog: output={output}")
+        return 0
+
     if args.data_command == "security-identity-transition-evidence-freeze":
         try:
             evidence = json.loads(Path(args.evidence_json).read_text(encoding="utf-8"))
@@ -1532,12 +1576,13 @@ def run_data_command(args: argparse.Namespace) -> int:
                 ),
                 lifecycle_evidence=SecurityLifecycleResolver.from_path(evidence_path),
                 lifecycle_policy=LifecycleAuditPolicy.from_path(policy_path),
-                identity_transitions=(
-                    SecurityIdentityTransitionResolver.from_path(
+                identity_transitions=load_identity_transition_contract(
+                    mode=("artifact" if args.identity_transition_artifact is not None else "none"),
+                    artifact_path=(
                         Path(args.identity_transition_artifact)
-                    )
-                    if args.identity_transition_artifact is not None
-                    else None
+                        if args.identity_transition_artifact is not None
+                        else None
+                    ),
                 ),
                 supersedes_scan_manifest=(
                     Path(args.supersedes_scan_manifest)
@@ -2515,6 +2560,12 @@ def run_models_command(args: argparse.Namespace) -> int:
                     if args.lifecycle_scan_manifest is None
                     else Path(args.lifecycle_scan_manifest)
                 ),
+                identity_transition_artifact=(
+                    None
+                    if args.identity_transition_artifact is None
+                    else Path(args.identity_transition_artifact)
+                ),
+                explicit_no_identity_transitions=args.no_identity_transitions,
             )
         except (DataValidationError, OSError, ValueError) as error:
             print(f"walk-forward execution failed: {error}", file=sys.stderr)
@@ -3007,7 +3058,7 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
     configure_logging(settings.logging.level, settings.logging.json_logs)
     config_path = Path(effective_config_path(args.config))
     runs_root = production_runs_root(settings.paths.paper_trading)
-    lock_path = production_lock_path(settings.paths.paper_trading)
+    lock_path = configured_production_lock_path(settings.paths.runs)
     raw_store = build_store(None, settings)
     universe_store = UniverseStore(settings.paths.processed_data)
     feature_store = FeatureStore(settings.paths.processed_data)
@@ -3287,7 +3338,7 @@ def run_paper_trading_command(args: argparse.Namespace) -> int:
 
     return run_production_cli_command(
         operation,
-        lock_path=production_lock_path(settings.paths.paper_trading),
+        lock_path=configured_production_lock_path(settings.paths.runs),
         command=f"ashare-quant paper-trading {args.paper_trading_command}",
     )
 

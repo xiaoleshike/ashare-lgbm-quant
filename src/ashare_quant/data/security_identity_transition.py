@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -152,6 +153,21 @@ class SecurityIdentityTransitionResolver:
         item = self._by_predecessor.get(_code(ts_code))
         return item is None or trade_date < item.effective_date
 
+    def execution_code_closure(self, ts_codes: set[str], *, end_date: str) -> tuple[str, ...]:
+        """Include every effective successor needed at an execution-price boundary."""
+
+        selected = {_code(code) for code in ts_codes}
+        pending = list(selected)
+        while pending:
+            current = pending.pop()
+            item = self._by_predecessor.get(current)
+            if item is None or item.effective_date > end_date:
+                continue
+            if item.successor_ts_code not in selected:
+                selected.add(item.successor_ts_code)
+                pending.append(item.successor_ts_code)
+        return tuple(sorted(selected))
+
     def provenance(self) -> JsonObject:
         """Return stable transition provenance for scan/execution identities."""
 
@@ -186,17 +202,25 @@ class SecurityIdentityTransitionResolver:
                 item.predecessor_ts_code == item.successor_ts_code
                 or item.transition_type not in TRANSITION_TYPES
                 or item.continuity_type not in CONTINUITY_TYPES
-                or len(item.effective_date) != 8
-                or not item.effective_date.isdigit()
+                or not _is_date(item.effective_date)
                 or not item.evidence_package_id
-                or len(item.evidence_package_hash) != 64
-                or (item.share_conversion_ratio is not None and item.share_conversion_ratio <= 0)
+                or not _is_sha256(item.evidence_package_hash)
+                or (
+                    item.share_conversion_ratio is not None
+                    and (
+                        isinstance(item.share_conversion_ratio, bool)
+                        or not math.isfinite(item.share_conversion_ratio)
+                        or item.share_conversion_ratio <= 0
+                    )
+                )
             ):
                 raise DataValidationError("SECURITY_IDENTITY_TRANSITION_INVALID")
+            if not _valid_type_continuity(item.transition_type, item.continuity_type):
+                raise DataValidationError("SECURITY_IDENTITY_TRANSITION_INVALID: semantics")
             previous = successors.get(item.successor_ts_code)
             if previous is not None and previous.predecessor_ts_code != item.predecessor_ts_code:
                 raise DataValidationError(
-                    "SECURITY_IDENTITY_TRANSITION_CONFLICT: multiple predecessors"
+                    "SECURITY_IDENTITY_TRANSITION_UNSUPPORTED_TOPOLOGY: multiple predecessors"
                 )
             successors[item.successor_ts_code] = item
         for predecessor in self._by_predecessor:
@@ -206,7 +230,31 @@ class SecurityIdentityTransitionResolver:
                 if current in seen:
                     raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONFLICT: cycle")
                 seen.add(current)
-                current = self._by_predecessor[current].successor_ts_code
+                transition = self._by_predecessor[current]
+                successor = transition.successor_ts_code
+                if successor in seen:
+                    raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONFLICT: cycle")
+                next_transition = self._by_predecessor.get(successor)
+                if (
+                    next_transition is not None
+                    and next_transition.effective_date < transition.effective_date
+                ):
+                    raise DataValidationError(
+                        "SECURITY_IDENTITY_TRANSITION_CONFLICT: transition chain is out of order"
+                    )
+                current = successor
+
+
+def load_identity_transition_contract(
+    *, mode: str, artifact_path: Path | None
+) -> SecurityIdentityTransitionResolver:
+    """Resolve an explicit configured artifact or explicit no-transition contract."""
+
+    if mode == "artifact" and artifact_path is not None:
+        return SecurityIdentityTransitionResolver.from_path(artifact_path)
+    if mode == "none" and artifact_path is None:
+        return SecurityIdentityTransitionResolver.empty()
+    raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONTRACT_INVALID")
 
 
 def publish_transition_evidence_package(
@@ -366,6 +414,7 @@ def publish_security_identity_transitions(
                 "completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
             },
         )
+        _validate_transition_artifact_contents(staging, expected_artifact_id=artifact_id)
         os.replace(staging, output)
     finally:
         if staging.exists():
@@ -377,12 +426,18 @@ def publish_security_identity_transitions(
 def validate_security_identity_transition_artifact(path: Path) -> JsonObject:
     """Validate one complete transition graph artifact."""
 
+    return _validate_transition_artifact_contents(path, expected_artifact_id=path.name)
+
+
+def _validate_transition_artifact_contents(path: Path, *, expected_artifact_id: str) -> JsonObject:
+    """Validate an artifact in staging or at its immutable final path."""
+
     manifest = _read_json(path / "manifest.json", "SECURITY_IDENTITY_TRANSITION_INVALID")
     payload = _read_json(path / "transitions.json", "SECURITY_IDENTITY_TRANSITION_INVALID")
     if (
         manifest.get("schema_version") != TRANSITION_SCHEMA_VERSION
         or manifest.get("artifact_name") != TRANSITION_ARTIFACT_NAME
-        or manifest.get("artifact_id") != path.name
+        or manifest.get("artifact_id") != expected_artifact_id
         or payload.get("artifact_name") != TRANSITION_ARTIFACT_NAME
         or payload.get("transition_version") != manifest.get("transition_version")
     ):
@@ -406,6 +461,29 @@ def validate_security_identity_transition_artifact(path: Path) -> JsonObject:
     }
     if logical != manifest.get("logical_identity"):
         raise DataValidationError("SECURITY_IDENTITY_TRANSITION_IDENTITY_MISMATCH")
+    expected_id = f"security_identity_transitions_{canonical_payload_hash(logical)[:24]}"
+    if expected_id != expected_artifact_id:
+        raise DataValidationError("SECURITY_IDENTITY_TRANSITION_IDENTITY_MISMATCH")
+    evidence_root = path.parent.parent / "security_identity_transition_evidence"
+    if path.name.startswith("."):
+        evidence_root = path.parent.parent / "security_identity_transition_evidence"
+    for row, item in zip(rows, parsed, strict=True):
+        package = evidence_root / item.evidence_package_id
+        evidence, package_hash = validate_transition_evidence_package(package)
+        if package_hash != item.evidence_package_hash:
+            raise DataValidationError("SECURITY_IDENTITY_TRANSITION_EVIDENCE_HASH_MISMATCH")
+        for field in (
+            "predecessor_ts_code",
+            "successor_ts_code",
+            "predecessor_name",
+            "successor_name",
+            "transition_type",
+            "effective_date",
+            "continuity_type",
+            "share_conversion_ratio",
+        ):
+            if row.get(field) != evidence.get(field):
+                raise DataValidationError("SECURITY_IDENTITY_TRANSITION_EVIDENCE_IDENTITY_MISMATCH")
     return manifest
 
 
@@ -436,6 +514,8 @@ def _normalize_evidence(evidence: JsonObject, document: Path) -> JsonObject:
     if not any(host == suffix or host.endswith(f".{suffix}") for suffix in OFFICIAL_HOST_SUFFIXES):
         raise DataValidationError("SECURITY_IDENTITY_TRANSITION_EVIDENCE_SOURCE_INVALID")
     ratio = evidence.get("share_conversion_ratio")
+    if isinstance(ratio, bool):
+        raise DataValidationError("SECURITY_IDENTITY_TRANSITION_EVIDENCE_INVALID")
     normalized: JsonObject = {
         **{key: evidence[key] for key in required},
         "predecessor_ts_code": _code(str(evidence["predecessor_ts_code"])),
@@ -488,6 +568,25 @@ def _code(value: str) -> str:
     return code
 
 
+def _is_date(value: str) -> bool:
+    try:
+        return datetime.strptime(value, "%Y%m%d").strftime("%Y%m%d") == value
+    except ValueError:
+        return False
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value.lower())
+
+
+def _valid_type_continuity(transition_type: str, continuity_type: str) -> bool:
+    if transition_type == "CODE_CHANGE_CONTINUITY":
+        return continuity_type == "SAME_LISTED_ENTITY"
+    if transition_type in {"MERGER_SUCCESSOR", "SHARE_CONVERSION"}:
+        return continuity_type == "SUCCESSOR_ENTITY"
+    return transition_type == "RESTRUCTURING_CODE_CHANGE"
+
+
 def _read_json(path: Path, message: str) -> JsonObject:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -501,7 +600,16 @@ def _read_json(path: Path, message: str) -> JsonObject:
 def canonical_payload_hash(payload: object) -> str:
     """Hash a JSON-compatible logical payload without path or time metadata."""
 
-    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise DataValidationError("CANONICAL_JSON_INVALID") from error
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 

@@ -12,6 +12,11 @@ import pytest
 from ashare_quant.backtest.executable_validation import _signals
 from ashare_quant.config.settings import AppSettings, PathSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_identity_transition import (
+    SecurityIdentityTransition,
+    SecurityIdentityTransitionResolver,
+)
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.models.compute.benchmark import TrainingBackendBenchmarkService
 from ashare_quant.models.feature_lists import feature_list_hash
@@ -545,6 +550,262 @@ def test_walk_forward_executable_metrics_carries_suspension_to_resume(
     assert metrics["execution_tail"]["actual_execution_end"] == "20170329"
 
 
+def test_ranker_executor_passes_bound_transition_to_simulator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dates = ("20240102", "20240103", "20240104", "20240105")
+    prices = pd.DataFrame(
+        [
+            {
+                "trade_date": date,
+                "ts_code": code,
+                "open": 10.0,
+                "close": 10.0,
+                "can_buy": True,
+                "can_sell": True,
+                "is_suspended": False,
+                "is_listed": True,
+                "delist_date": None,
+            }
+            for date, code in zip(
+                dates,
+                ("000001.SZ", "000001.SZ", "001001.SZ", "001001.SZ"),
+                strict=True,
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.load_calendar",
+        lambda *args, **kwargs: list(dates),
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.load_execution_prices",
+        lambda *args, **kwargs: prices,
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.load_benchmark",
+        lambda *args, **kwargs: pd.DataFrame({"trade_date": dates, "close": [100.0] * len(dates)}),
+    )
+    transition = SecurityIdentityTransition(
+        predecessor_ts_code="000001.SZ",
+        successor_ts_code="001001.SZ",
+        predecessor_name="old",
+        successor_name="new",
+        transition_type="CODE_CHANGE_CONTINUITY",
+        effective_date="20240104",
+        continuity_type="SAME_LISTED_ENTITY",
+        share_conversion_ratio=1.0,
+        evidence_package_id="fixture",
+        evidence_package_hash="a" * 64,
+    )
+    executor = RankerFoldExecutor(
+        raw_root=tmp_path / "raw",
+        processed_root=tmp_path / "processed",
+        settings=AppSettings.model_validate(
+            {
+                "backtest": {
+                    "initial_cash": 1000.0,
+                    "commission": 0.0,
+                    "stamp_duty": 0.0,
+                    "slippage": 0.0,
+                }
+            }
+        ),
+    )
+    executor.bind_identity_transitions(
+        SecurityIdentityTransitionResolver(
+            artifact_version="fixture-v1",
+            artifact_hash="b" * 64,
+            transitions=(transition,),
+        )
+    )
+    contract = {
+        "execution_tail": {
+            "policy_version": EXECUTION_TAIL_POLICY_VERSION,
+            "policy": EXECUTION_TAIL_POLICY,
+            "sell_delay_alert_sessions": 20,
+            "processed_data_end": dates[-1],
+            "prospective_lockbox_start_exclusive": "20250101",
+            "unresolved_at_cutoff": "fail_closed",
+            **SecurityLifecycleResolver.empty().provenance(),
+        }
+    }
+
+    with pytest.raises(DataValidationError, match="CORPORATE_ACTION_EXECUTION_UNSUPPORTED"):
+        executor._executable_metrics(
+            pd.DataFrame(
+                {
+                    "trade_date": [dates[0]],
+                    "ts_code": ["000001.SZ"],
+                    "prediction_score": [1.0],
+                }
+            ),
+            5,
+            contract,
+        )
+
+
+def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan, provenance = _research_fixture(tmp_path)
+    dates = ("20200102", "20200103", "20200106", "20200107", "20200108", "20200109", "20200110")
+    prices = pd.DataFrame(
+        [
+            {
+                "trade_date": date,
+                "ts_code": "000001.SZ" if date < "20200106" else "001001.SZ",
+                "open": 10.0,
+                "close": 10.0,
+                "can_buy": True,
+                "can_sell": True,
+                "is_suspended": False,
+                "is_listed": True,
+                "delist_date": None,
+            }
+            for date in dates
+        ]
+    )
+    transition = SecurityIdentityTransition(
+        predecessor_ts_code="000001.SZ",
+        successor_ts_code="001001.SZ",
+        predecessor_name="old",
+        successor_name="new",
+        transition_type="CODE_CHANGE_CONTINUITY",
+        effective_date="20200106",
+        continuity_type="SAME_LISTED_ENTITY",
+        share_conversion_ratio=1.0,
+        evidence_package_id="fixture",
+        evidence_package_hash="a" * 64,
+    )
+    transitions = SecurityIdentityTransitionResolver(
+        artifact_version="fixture-v1",
+        artifact_hash="b" * 64,
+        transitions=(transition,),
+    )
+    executor = RankerFoldExecutor(
+        raw_root=tmp_path / "raw",
+        processed_root=tmp_path / "processed",
+        settings=AppSettings.model_validate(
+            {
+                "backtest": {
+                    "initial_cash": 1000.0,
+                    "commission": 0.0,
+                    "stamp_duty": 0.0,
+                    "slippage": 0.0,
+                }
+            }
+        ),
+    )
+    execution_contract = {
+        "training_compute": {
+            "requested_device_type": "cpu",
+            "effective_device_type": "cpu",
+            "lightgbm_version": "fixture",
+        },
+        "lightgbm_version": "fixture",
+        "evaluation_contract_version": 4,
+        "accounting_schema_version": 2,
+        "require_executable": True,
+        "holding_period_days": 5,
+        "cost_policy_hash": "fixture",
+        "prospective_lockbox_start": "20250101",
+        "execution_tail_policy": EXECUTION_TAIL_POLICY_VERSION,
+        "execution_tail": {
+            "policy_version": EXECUTION_TAIL_POLICY_VERSION,
+            "policy": EXECUTION_TAIL_POLICY,
+            "sell_delay_alert_sessions": 20,
+            "processed_data_end": dates[-1],
+            "prospective_lockbox_start_exclusive": "20250101",
+            "unresolved_at_cutoff": "fail_closed",
+            **SecurityLifecycleResolver.empty().provenance(),
+        },
+    }
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.load_identity_transition_contract",
+        lambda **kwargs: transitions,
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.SecurityIdentityResolver.from_path",
+        lambda path: SecurityIdentityResolver.empty(),
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.SecurityLifecycleResolver.from_path",
+        lambda path: SecurityLifecycleResolver.empty(),
+    )
+
+    def validate_scan(*args: object, **kwargs: object) -> dict[str, object]:
+        observed["preflight_transitions"] = kwargs["identity_transitions"]
+        return {
+            "scan_id": "fixture-scan",
+            "policy_hash": "c" * 64,
+            "lifecycle_evidence_hash": "d" * 64,
+            "source_inventory_hash": "e" * 64,
+            "security_identity_transition_version": transitions.artifact_version,
+            "security_identity_transition_hash": transitions.artifact_hash,
+        }
+
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.validate_pass_lifecycle_scan", validate_scan
+    )
+    monkeypatch.setattr(executor, "validate_sources", lambda plan: {})
+    monkeypatch.setattr(executor, "mature_information_end", lambda date, horizon: date)
+    monkeypatch.setattr(executor, "execution_contract", lambda **kwargs: execution_contract)
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.load_calendar",
+        lambda *args, **kwargs: list(dates),
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.load_execution_prices",
+        lambda *args, **kwargs: prices,
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.load_benchmark",
+        lambda *args, **kwargs: pd.DataFrame({"trade_date": dates, "close": [100.0] * len(dates)}),
+    )
+
+    def execute(**kwargs: object) -> FoldExecutionResult:
+        observed["executor_transitions"] = executor._identity_transitions
+        executor._executable_metrics(
+            pd.DataFrame(
+                {
+                    "trade_date": [dates[0]],
+                    "ts_code": ["000001.SZ"],
+                    "prediction_score": [1.0],
+                }
+            ),
+            5,
+            execution_contract,
+        )
+        raise AssertionError("simulator must reject a predecessor position crossing transition")
+
+    monkeypatch.setattr(executor, "execute", execute)
+    lifecycle_manifest = tmp_path / "fixture-scan" / "manifest.json"
+    lifecycle_manifest.parent.mkdir()
+    lifecycle_manifest.write_text("{}", encoding="utf-8")
+    runner = MultiFoldEvaluationRunner(
+        reports_root=tmp_path / "reports",
+        settings=executor.settings,
+        executor=executor,
+    )
+
+    with pytest.raises(DataValidationError, match="CORPORATE_ACTION_EXECUTION_UNSUPPORTED"):
+        runner.run(
+            experiment_manifest=plan,
+            experiment_id="h5_fixture",
+            feature_provenance_path=provenance,
+            lifecycle_scan_manifest=lifecycle_manifest,
+            identity_transition_artifact=tmp_path / "fixture-transitions",
+        )
+
+    assert observed == {
+        "preflight_transitions": transitions,
+        "executor_transitions": transitions,
+    }
+
+
 def test_walk_forward_execution_tail_extends_by_chunks_until_authoritative_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -720,6 +981,31 @@ def test_executable_multi_fold_requires_lifecycle_audit_by_default(tmp_path: Pat
             experiment_id="h5_fixture",
             feature_provenance_path=provenance,
         )
+
+
+def test_executable_multi_fold_requires_transition_contract_before_any_fold(
+    tmp_path: Path,
+) -> None:
+    plan, provenance = _research_fixture(tmp_path)
+    executor = FakeExecutor()
+    runner = MultiFoldEvaluationRunner(
+        reports_root=tmp_path / "reports",
+        settings=AppSettings.model_validate({}),
+        executor=executor,
+    )
+
+    with pytest.raises(
+        DataValidationError,
+        match="SECURITY_IDENTITY_TRANSITION_CONTRACT_REQUIRED",
+    ):
+        runner.run(
+            experiment_manifest=plan,
+            experiment_id="h5_fixture",
+            feature_provenance_path=provenance,
+            lifecycle_scan_manifest=tmp_path / "not-read-before-transition-contract.json",
+        )
+
+    assert executor.calls == []
 
 
 def test_backend_benchmark_source_consumes_latest_selection_fold_without_model_copy(

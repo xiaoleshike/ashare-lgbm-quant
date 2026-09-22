@@ -45,6 +45,8 @@ def test_unknown_conversion_resolves_identity_but_blocks_execution() -> None:
             {"trade_date": ["20240102", "20240103", "20240104", "20240105"], "close": [100.0] * 4}
         ),
         identity_transitions=(transition,),
+        identity_transition_version="fixture-v1",
+        identity_transition_hash="b" * 64,
     )
 
     with pytest.raises(DataValidationError, match="CORPORATE_ACTION_EXECUTION_UNSUPPORTED"):
@@ -110,6 +112,58 @@ def test_transition_graph_coexists_with_unrelated_bse_alias(tmp_path: Path) -> N
     resolver.validate_alias_coexistence(SecurityIdentityResolver.from_path(mapping))
 
 
+@pytest.mark.parametrize(
+    ("effective_date", "ratio"),
+    [
+        ("20240230", 1.0),
+        ("20240104", 0.0),
+        ("20240104", -1.0),
+        ("20240104", float("nan")),
+        ("20240104", float("inf")),
+        ("20240104", True),
+    ],
+)
+def test_transition_rejects_invalid_dates_and_ratios(effective_date: str, ratio: float) -> None:
+    with pytest.raises(DataValidationError, match="SECURITY_IDENTITY_TRANSITION_INVALID"):
+        _resolver((_transition("000001.SZ", "001001.SZ", effective_date, ratio),))
+
+
+def test_transition_chain_requires_monotonic_effective_dates() -> None:
+    with pytest.raises(DataValidationError, match="out of order"):
+        _resolver(
+            (
+                _transition("000001.SZ", "001001.SZ", "20240105", 1.0),
+                _transition("001001.SZ", "002001.SZ", "20240104", 1.0),
+            )
+        )
+
+
+def test_execution_code_closure_includes_effective_successor_chain() -> None:
+    resolver = _resolver(
+        (
+            _transition("000001.SZ", "001001.SZ", "20240103", 1.0),
+            _transition("001001.SZ", "002001.SZ", "20240105", 1.0),
+        )
+    )
+
+    assert resolver.execution_code_closure({"000001.SZ"}, end_date="20240104") == (
+        "000001.SZ",
+        "001001.SZ",
+    )
+    assert resolver.execution_code_closure({"000001.SZ"}, end_date="20240105") == (
+        "000001.SZ",
+        "001001.SZ",
+        "002001.SZ",
+    )
+
+
+def test_canonical_payload_rejects_non_finite_json() -> None:
+    from ashare_quant.data.security_identity_transition import canonical_payload_hash
+
+    with pytest.raises(DataValidationError, match="CANONICAL_JSON_INVALID"):
+        canonical_payload_hash({"ratio": float("nan")})
+
+
 def test_official_transition_package_and_catalog_are_hash_validated(tmp_path: Path) -> None:
     document = tmp_path / "official.pdf"
     document.write_bytes(b"official fixture")
@@ -131,6 +185,8 @@ def test_official_transition_package_and_catalog_are_hash_validated(tmp_path: Pa
     frozen.write_bytes(b"tampered")
     with pytest.raises(DataValidationError, match="HASH_MISMATCH"):
         validate_transition_evidence_package(package)
+    with pytest.raises(DataValidationError, match="HASH_MISMATCH"):
+        SecurityIdentityTransitionResolver.from_path(catalog)
 
 
 def _transition(

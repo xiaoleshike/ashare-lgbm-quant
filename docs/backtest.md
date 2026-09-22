@@ -139,3 +139,7 @@ ashare-quant --config config/default.yaml backtest invalidate \
 
 Records are published under `reports/backtest_invalidations/`. Exact repeats are idempotent;
 different review content creates a different immutable identity.
+Strict backtests carry an explicit identity-transition version/hash even when the reviewed
+contract states that no transitions exist. A missing contract is an error. A predecessor
+position crossing a known effective transition fails closed; it is never silently renamed,
+sold, converted, or written off.

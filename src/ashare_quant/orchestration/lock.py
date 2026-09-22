@@ -35,6 +35,12 @@ def production_lock_path(state_root: Path) -> Path:
     return production_runs_root(state_root) / DEFAULT_PRODUCTION_LOCK_PATH.name
 
 
+def configured_production_lock_path(runs_root: Path) -> Path:
+    """Resolve the production lock from the explicit project runs root."""
+
+    return Path(runs_root) / DEFAULT_PRODUCTION_LOCK_PATH.name
+
+
 @dataclass(frozen=True, slots=True)
 class ProductionLockOwner:
     """Metadata describing the process that acquired the production lock."""

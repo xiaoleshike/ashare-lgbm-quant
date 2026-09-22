@@ -23,6 +23,7 @@ class PathSettings(BaseModel):
     models: Path = Path("models")
     backtests: Path = Path("backtests")
     paper_trading: Path = Path("paper_trading")
+    runs: Path = Path("runs")
     data_quality_logs: Path = Path("logs/data_quality")
 
 
@@ -89,6 +90,21 @@ class SecurityIdentitySettings(BaseModel):
     mapping_path: Path = Path("config/security_identity/bse_code_aliases.json")
     lifecycle_path: Path = Path("config/security_identity/security_lifecycle_events.json")
     lifecycle_policy_path: Path = Path("config/security_identity/security_lifecycle_policy.json")
+    identity_transition_mode: Literal["artifact", "none"] = "none"
+    identity_transition_path: Path | None = None
+
+    @model_validator(mode="after")
+    def validate_identity_transition_contract(self) -> SecurityIdentitySettings:
+        """Require an explicit artifact path or an explicit no-transition contract."""
+
+        if self.identity_transition_mode == "artifact" and self.identity_transition_path is None:
+            raise ValueError("security_identity.identity_transition_path is required")
+        if self.identity_transition_mode == "none" and self.identity_transition_path is not None:
+            raise ValueError(
+                "security_identity.identity_transition_path requires "
+                "identity_transition_mode=artifact"
+            )
+        return self
 
 
 class HistoricalBacktestPeriodSettings(BaseModel):

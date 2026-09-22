@@ -96,6 +96,127 @@ def test_ranker_prediction_universe_does_not_depend_on_forward_labels(tmp_path: 
     pd.testing.assert_frame_equal(before.coverage_by_date, after.coverage_by_date)
 
 
+def test_evaluation_label_maturity_uses_calendar_horizon_and_cutoff(tmp_path: Path) -> None:
+    processed = tmp_path / "processed"
+    features = pd.DataFrame({"trade_date": ["20240102"], "ts_code": ["000001.SZ"], "ret_1d": [1.0]})
+    universe = features[["trade_date", "ts_code"]].assign(in_model_universe=True)
+    labels = features[["trade_date", "ts_code"]].assign(
+        horizon=5,
+        entry_date="20240103",
+        exit_date="20240110",
+        future_excess_ret=0.0,
+        is_label_available=True,
+        label_unavailable_reason="",
+    )
+    write_parquet(processed / "features_daily/data.parquet", features)
+    write_parquet(processed / "universe_daily/data.parquet", universe)
+    write_parquet(processed / "labels_forward/data.parquet", labels)
+    loader = RankerDataLoader(processed, horizon=5, minimum_group_size=1)
+    predictions = pd.DataFrame(
+        {"trade_date": ["20240102"], "ts_code": ["000001.SZ"], "prediction_score": [0.5]}
+    )
+    calendar = ("20240102", "20240103", "20240104", "20240105", "20240108", "20240109", "20240110")
+
+    attached = loader.attach_evaluation_labels(
+        predictions,
+        5,
+        trade_calendar=calendar,
+        maturity_cutoff="20240110",
+    )
+
+    assert bool(attached.loc[0, "is_label_mature"])
+    assert bool(attached.loc[0, "is_label_available"])
+    assert attached.loc[0, "expected_exit_date"] == "20240110"
+    assert int(attached.loc[0, "relevance"]) == 4
+
+
+def test_available_label_with_invalid_or_future_exit_fails_closed(tmp_path: Path) -> None:
+    processed = tmp_path / "processed"
+    features = pd.DataFrame({"trade_date": ["20240102"], "ts_code": ["000001.SZ"], "ret_1d": [1.0]})
+    write_parquet(processed / "features_daily/data.parquet", features)
+    write_parquet(
+        processed / "universe_daily/data.parquet",
+        features[["trade_date", "ts_code"]].assign(in_model_universe=True),
+    )
+    write_parquet(
+        processed / "labels_forward/data.parquet",
+        features[["trade_date", "ts_code"]].assign(
+            horizon=5,
+            entry_date="20240103",
+            exit_date="20240111",
+            future_excess_ret=0.01,
+            is_label_available=True,
+            label_unavailable_reason="",
+        ),
+    )
+    loader = RankerDataLoader(processed, horizon=5, minimum_group_size=1)
+
+    with pytest.raises(DataValidationError, match="AVAILABLE_BEFORE_MATURITY"):
+        loader.attach_evaluation_labels(
+            pd.DataFrame(
+                {
+                    "trade_date": ["20240102"],
+                    "ts_code": ["000001.SZ"],
+                    "prediction_score": [0.5],
+                }
+            ),
+            5,
+            trade_calendar=(
+                "20240102",
+                "20240103",
+                "20240104",
+                "20240105",
+                "20240108",
+                "20240109",
+                "20240110",
+            ),
+            maturity_cutoff="20240110",
+        )
+
+
+def test_missing_evaluation_label_remains_null_not_zero(tmp_path: Path) -> None:
+    processed = tmp_path / "processed"
+    features = pd.DataFrame({"trade_date": ["20240102"], "ts_code": ["000001.SZ"], "ret_1d": [1.0]})
+    write_parquet(processed / "features_daily/data.parquet", features)
+    write_parquet(
+        processed / "universe_daily/data.parquet",
+        features[["trade_date", "ts_code"]].assign(in_model_universe=True),
+    )
+    write_parquet(
+        processed / "labels_forward/data.parquet",
+        pd.DataFrame(
+            columns=[
+                "trade_date",
+                "ts_code",
+                "horizon",
+                "entry_date",
+                "exit_date",
+                "future_excess_ret",
+                "is_label_available",
+                "label_unavailable_reason",
+            ]
+        ),
+    )
+    loader = RankerDataLoader(processed, horizon=5, minimum_group_size=1)
+    attached = loader.attach_evaluation_labels(
+        pd.DataFrame(
+            {
+                "trade_date": ["20240102"],
+                "ts_code": ["000001.SZ"],
+                "prediction_score": [0.5],
+            }
+        ),
+        5,
+        trade_calendar=("20240102", "20240103"),
+        maturity_cutoff="20240103",
+    )
+
+    assert not bool(attached.loc[0, "is_label_available"])
+    assert pd.isna(attached.loc[0, "future_excess_ret_5d"])
+    assert pd.isna(attached.loc[0, "relevance"])
+    assert attached.loc[0, "label_unavailable_reason"] == "missing_label_row"
+
+
 def test_ndcg_and_ranker_metrics_are_perfect_for_perfect_ordering() -> None:
     frame = pd.DataFrame(
         {

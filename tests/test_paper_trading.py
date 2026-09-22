@@ -492,6 +492,7 @@ def _write_paper_cli_config(root: Path) -> Path:
                 f"  models: {root / 'models'}",
                 f"  reports: {root / 'reports'}",
                 f"  paper_trading: {root / 'paper'}",
+                f"  runs: {root / 'runs'}",
                 "paper_trading:",
                 "  portfolios:",
                 "    - portfolio_id: alpha",

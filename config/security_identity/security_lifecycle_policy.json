@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "artifact_name": "security_lifecycle_policy",
-  "policy_version": "security_lifecycle_audit_v2_1_daily_snapshots",
-  "classification_contract_version": 3,
+  "policy_version": "security_lifecycle_audit_v2_2_content_verified",
+  "classification_contract_version": 4,
   "ordinary_suspension": {
     "source": "Tushare suspend_d",
     "full_session_suspend_type": "S",

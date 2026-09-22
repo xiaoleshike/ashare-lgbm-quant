@@ -269,3 +269,14 @@ ashare-quant --config config/default.yaml models \
 
 The same command with `--backend cuda` is valid only after the explicit CUDA capability probe
 succeeds. Compare the resulting immutable artifacts with `compare-training-backends`.
+Evidence-grade `walk-forward-run` requires a PASS lifecycle scan and one explicit identity
+transition contract. Supply either `--identity-transition-artifact PATH` or, only when the scan
+uses the same reviewed empty contract, `--no-identity-transitions`. The runner validates the
+version/hash before fitting a fold and binds it into execution identity. Crossing a known
+transition remains blocked with `CORPORATE_ACTION_EXECUTION_UNSUPPORTED`; share conversion is
+not implemented by this contract.
+
+Training uses the mature, available labeled subset and publishes per-date selection counts.
+Scoring remains label-free. Evaluation-label maturity requires a valid exchange-session
+sequence, T+1 entry, the configured H-session endpoint, an actual exit no earlier than that
+endpoint, and an exit no later than the governed cutoff.
