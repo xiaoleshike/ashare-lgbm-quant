@@ -21,6 +21,7 @@ from ashare_quant.backtest.provenance import (
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.models.challenger_evaluation import (
     _load_predictions,
     _require_identical_prediction_keys,
@@ -110,6 +111,9 @@ class ExecutableOOSValidationEngine:
             self.settings.universe.price_tolerance,
             identity_resolver=SecurityIdentityResolver.from_path(
                 self.settings.security_identity.mapping_path
+            ),
+            lifecycle_resolver=SecurityLifecycleResolver.from_path(
+                self.settings.security_identity.lifecycle_path
             ),
         )
         maximum_price_date = str(prices["trade_date"].astype(str).max())

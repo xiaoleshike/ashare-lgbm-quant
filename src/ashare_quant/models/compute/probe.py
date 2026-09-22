@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol, cast
 
 import numpy as np
@@ -25,6 +28,25 @@ class LightGBMModule(Protocol):
 
 
 SmokeTrainer = Callable[[LightGBMModule, int], None]
+
+
+def lightgbm_build_identity(version: str) -> str:
+    """Return a path-independent identity for the loaded LightGBM binary."""
+
+    try:
+        basic = importlib.import_module("lightgbm.basic")
+        library = vars(basic)["_LIB"]
+        library_path = Path(str(library._name))  # noqa: SLF001
+        library_hash = (
+            hashlib.sha256(library_path.read_bytes()).hexdigest()
+            if library_path.is_file()
+            else None
+        )
+    except (ImportError, OSError, AttributeError, KeyError):
+        library_hash = None
+    payload = {"lightgbm_version": version, "loaded_library_sha256": library_hash}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def probe_training_backend(

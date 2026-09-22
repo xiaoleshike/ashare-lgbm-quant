@@ -63,6 +63,39 @@ def test_ranker_loader_builds_contiguous_date_groups_and_relevance(tmp_path: Pat
     assert dataset.frame["trade_date"].is_monotonic_increasing
 
 
+def test_ranker_prediction_universe_does_not_depend_on_forward_labels(tmp_path: Path) -> None:
+    processed = tmp_path / "processed"
+    features = pd.DataFrame(
+        {
+            "trade_date": ["20240102"] * 4,
+            "ts_code": [f"{index:06d}.SZ" for index in range(4)],
+            "ret_1d": np.arange(4, dtype=float),
+        }
+    )
+    universe = features.loc[:, ["trade_date", "ts_code"]].assign(in_model_universe=True)
+    labels = features.loc[:, ["trade_date", "ts_code"]].assign(
+        horizon=5,
+        exit_date="20240110",
+        future_excess_ret=np.arange(4, dtype=float) / 100,
+        is_label_available=True,
+        label_unavailable_reason="",
+    )
+    write_parquet(processed / "features_daily/data.parquet", features)
+    write_parquet(processed / "universe_daily/data.parquet", universe)
+    write_parquet(processed / "labels_forward/data.parquet", labels)
+    loader = RankerDataLoader(processed, horizon=5, minimum_group_size=3)
+
+    before = loader.load_prediction_universe("20240102", "20240102", ("ret_1d",))
+    labels.loc[:, "is_label_available"] = False
+    labels.loc[:, "future_excess_ret"] = np.nan
+    labels.loc[:, "label_unavailable_reason"] = "missing_exit_price"
+    write_parquet(processed / "labels_forward/data.parquet", labels)
+    after = loader.load_prediction_universe("20240102", "20240102", ("ret_1d",))
+
+    pd.testing.assert_frame_equal(before.frame, after.frame)
+    pd.testing.assert_frame_equal(before.coverage_by_date, after.coverage_by_date)
+
+
 def test_ndcg_and_ranker_metrics_are_perfect_for_perfect_ordering() -> None:
     frame = pd.DataFrame(
         {

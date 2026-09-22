@@ -265,6 +265,8 @@ class ProductionDailyStageExecutor:
             extra={
                 "security_identity_mapping_version": (result.security_identity_mapping_version),
                 "security_identity_mapping_hash": result.security_identity_mapping_hash,
+                "security_lifecycle_policy_version": result.security_lifecycle_policy_version,
+                "security_lifecycle_policy_hash": result.security_lifecycle_policy_hash,
             },
         )
         return StageResult(

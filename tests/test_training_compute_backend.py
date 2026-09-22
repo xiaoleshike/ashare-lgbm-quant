@@ -24,7 +24,10 @@ from ashare_quant.models.compute.backend import (
     resolve_training_backend,
     training_backend_parameters,
 )
-from ashare_quant.models.compute.benchmark import TrainingBackendBenchmarkService
+from ashare_quant.models.compute.benchmark import (
+    BenchmarkSource,
+    TrainingBackendBenchmarkService,
+)
 from ashare_quant.models.compute.probe import probe_training_backend
 from ashare_quant.models.compute.schemas import (
     ProbeStatus,
@@ -32,6 +35,7 @@ from ashare_quant.models.compute.schemas import (
     TrainingBackendProbeResult,
     TrainingRuntimeMetadata,
 )
+from ashare_quant.models.feature_lists import feature_list_hash
 from ashare_quant.models.ranker import (
     fit_ranker,
     ranker_parameters,
@@ -204,6 +208,7 @@ def _benchmark(
     output = root / "reports/training_backend_benchmarks" / benchmark_id
     common = {
         "source_identity": "s" * 64,
+        "actual_data_identity_hash": "a" * 64,
         "feature_hash": feature_hash,
         "fold_identity": "d" * 64,
         "horizon": 10,
@@ -213,14 +218,19 @@ def _benchmark(
         "validation_end": "20221231",
         "semantic_parameter_hash": "p" * 64,
         "random_seed": 42,
+        "lightgbm_version": "4.fixture",
+        "lightgbm_build_identity": "b" * 64,
     }
     common.update(identity_updates or {})
     atomic_write_json(
         output / "benchmark.json",
         {
+            "schema_version": 2,
+            "artifact_name": "training_backend_benchmark",
             "benchmark_id": benchmark_id,
             "effective_device_type": backend,
             "training_wall_seconds": 2.0 if backend == "cpu" else 1.0,
+            "status": "COMPLETED",
             **common,
         },
     )
@@ -244,10 +254,23 @@ def _benchmark(
             "prediction": predictions,
         }
     ).to_parquet(output / "predictions.parquet", index=False)
-    files = ("benchmark.json", "metrics.json", "predictions.parquet")
+    atomic_write_json(
+        output / "environment.json",
+        {"lightgbm_version": "4.fixture", "lightgbm_build_identity": "b" * 64},
+    )
+    (output / "report.md").write_text("# fixture\n", encoding="utf-8")
+    files = (
+        "benchmark.json",
+        "metrics.json",
+        "environment.json",
+        "predictions.parquet",
+        "report.md",
+    )
     atomic_write_json(
         output / "manifest.json",
         {
+            "schema_version": 2,
+            "artifact_name": "training_backend_benchmark_manifest",
             "identity": benchmark_id,
             "manifest_written_last": True,
             "file_hashes": {name: file_sha256(output / name) for name in files},
@@ -268,6 +291,8 @@ def test_benchmark_comparison_checks_correctness_independently_of_speed(tmp_path
     assert repeated.idempotent is True
     comparison = json.loads((passed.output_dir / "comparison.json").read_text())
     assert comparison["prediction_pearson"] == pytest.approx(1.0)
+    assert comparison["daily_prediction_consistency"]["spearman_minimum"] == pytest.approx(1.0)
+    assert comparison["daily_top_n_overlap"]["10"]["minimum"] == pytest.approx(1.0)
     assert comparison["training_speedup"] == pytest.approx(2.0)
 
 
@@ -289,6 +314,8 @@ def test_benchmark_metric_failure_is_not_overridden_by_speedup(tmp_path: Path) -
         {"train_end": "20201231"},
         {"random_seed": 7},
         {"semantic_parameter_hash": "x" * 64},
+        {"lightgbm_version": "different"},
+        {"lightgbm_build_identity": "x" * 64},
     ],
 )
 def test_benchmark_rejects_different_source_or_parameter_identity(
@@ -317,6 +344,108 @@ def test_benchmark_ndcg_delta_can_fail_consistency(tmp_path: Path) -> None:
     result = service.compare(cpu_benchmark_id="cpu", cuda_benchmark_id="cuda")
 
     assert result.status == "FAIL"
+
+
+def test_benchmark_manifest_requires_exact_files_and_unique_finite_predictions(
+    tmp_path: Path,
+) -> None:
+    service = TrainingBackendBenchmarkService(_settings(tmp_path))
+    _benchmark(tmp_path, "cpu", "cpu", [1.0, 2.0, 3.0])
+    output = tmp_path / "reports/training_backend_benchmarks/cpu"
+    manifest = json.loads((output / "manifest.json").read_text())
+    manifest["file_hashes"].pop("report.md")
+    atomic_write_json(output / "manifest.json", manifest)
+    with pytest.raises(DataValidationError, match="lacks file hashes"):
+        service._validate_existing(output, "cpu")
+
+    _benchmark(tmp_path, "duplicate", "cpu", [1.0, 2.0, 3.0])
+    duplicate = tmp_path / "reports/training_backend_benchmarks/duplicate"
+    predictions = pd.read_parquet(duplicate / "predictions.parquet")
+    predictions.loc[1, ["trade_date", "ts_code"]] = predictions.loc[0, ["trade_date", "ts_code"]]
+    predictions.to_parquet(duplicate / "predictions.parquet", index=False)
+    duplicate_manifest = json.loads((duplicate / "manifest.json").read_text())
+    duplicate_manifest["file_hashes"]["predictions.parquet"] = file_sha256(
+        duplicate / "predictions.parquet"
+    )
+    atomic_write_json(duplicate / "manifest.json", duplicate_manifest)
+    with pytest.raises(DataValidationError, match="duplicated"):
+        service._validate_existing(duplicate, "duplicate")
+
+
+def test_fold_benchmark_reads_only_train_and_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    service = TrainingBackendBenchmarkService(settings)
+    semantic = ranker_semantic_parameters(settings.ranker)
+    source = BenchmarkSource(
+        source_kind="walk_forward_fold",
+        source_id="run:fold",
+        features=("f1",),
+        feature_hash=feature_list_hash(("f1",)),
+        train_start="20200101",
+        train_end="20201231",
+        validation_start="20210101",
+        validation_end="20211231",
+        horizon=5,
+        semantic_parameters=semantic,
+        fold_identity="d" * 64,
+        source_identity="s" * 64,
+        lineage={"fold_id": "fold"},
+    )
+    calls: list[tuple[str, str]] = []
+    frame = pd.DataFrame(
+        {
+            "trade_date": ["20210104"] * 3,
+            "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "f1": np.asarray([1.0, 2.0, 3.0], dtype=np.float32),
+            "future_excess_ret_5d": [0.01, 0.02, 0.03],
+            "relevance": np.asarray([0, 1, 2], dtype=np.int32),
+        }
+    )
+
+    class FakeLoader:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        def load(
+            self,
+            start_date: str,
+            end_date: str,
+            _features: tuple[str, ...],
+            _grades: int,
+        ) -> RankerDataset:
+            calls.append((start_date, end_date))
+            return RankerDataset(frame.copy(), ("f1",))
+
+    class FakeModel:
+        def predict(self, values: object) -> np.ndarray:
+            return np.arange(len(values), dtype=float)
+
+    monkeypatch.setattr(service, "_walk_forward_source", lambda *_args: source)
+    monkeypatch.setattr("ashare_quant.models.compute.benchmark.RankerDataLoader", FakeLoader)
+    monkeypatch.setattr(
+        "ashare_quant.models.compute.benchmark.resolve_training_backend",
+        lambda _settings: _runtime("cpu"),
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.compute.benchmark.fit_ranker",
+        lambda *_args, **_kwargs: FakeModel(),
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.compute.benchmark.feature_importance", lambda *_args: []
+    )
+
+    result = service.run(
+        backend="cpu",
+        walk_forward_run_id="run",
+        fold_id="fold",
+        feature_provenance_path=tmp_path / "feature_set.json",
+    )
+
+    assert result.status == "COMPLETED"
+    assert calls == [("20200101", "20201231"), ("20210101", "20211231")]
 
 
 def test_training_backend_status_cli_exit_codes(monkeypatch: pytest.MonkeyPatch) -> None:

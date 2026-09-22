@@ -27,6 +27,14 @@ missing open, and limit-down conditions. An unsellable position remains owned an
 value. Exceeding `sell_delay_max_days` makes evidence-grade validation fail with
 `BACKTEST_UNRESOLVED_POSITION`; it does not write the position down to zero.
 
+The shared engine also exposes an explicit `carry_to_calendar_end` policy for governed historical
+walk-forward evidence. In that mode `sell_delay_max_days` is an alert threshold rather than a
+write-off or immediate failure threshold. The position remains valued at its last valid close and
+is sold at the first authoritative tradable open. The walk-forward caller supplies a separately
+versioned, bounded execution tail; an open position at that cutoff still fails with
+`BACKTEST_UNRESOLVED_POSITION`. Ordinary backtests and retraining executable validation retain the
+default `fail_at_alert` behavior.
+
 ## Valuation
 
 Every open position records a deterministic `position_id`, last valid close, last valid price date,
@@ -46,9 +54,31 @@ observed market-data date is coverage metadata, not a delisting date. Missing qu
 suspension, and exceeding the sell-delay threshold do not prove delisting and cannot authorize a
 terminal write-off.
 
+An authoritative `stock_basic.delist_date` is the first session on which the security is no longer
+listed: listing eligibility therefore requires `trade_date < delist_date`. The execution loader
+normalizes legacy processed snapshots to this boundary before terminal handling. This does not infer
+delisting from quote absence; a terminal write-off still requires the explicit delisting date.
+
 A missing quote is not a suspension. Only explicit point-in-time suspension evidence
 permits `STALE_SUSPENDED` valuation using the last valid close. Otherwise an
 evidence-grade run raises `BACKTEST_MARKET_DATA_INCOMPLETE`.
+
+Exchange decisions that suspend a security's listing are separate from ordinary daily
+`suspend_d` events. They are represented by the versioned
+`config/security_identity/security_lifecycle_events.json` evidence catalog and apply only over its explicit
+effective interval. Universe construction and execution-price loading share this policy. Its hash
+is evidence provenance; quote absence, a long gap, or a delisting date never creates an interval.
+For example, the policy records the exchange decisions for the 2019 and 2020 suspended-listing
+cohorts, including `300028.SZ`, `300216.SZ`, and `300431.SZ`, through the session before each
+security's delisting-board trading began or authoritative delisting became effective. Missing quotes
+do not create lifecycle events.
+
+Security-code continuity does not by itself authorize portfolio accounting. A position held under
+a predecessor code at an effective transition date raises
+`CORPORATE_ACTION_EXECUTION_UNSUPPORTED` until the engine has explicit, evidence-backed share
+conversion and successor-price handling. This applies even when an official document states a 1:1
+quantity relationship: the identity fact is resolved, but execution support is a separate reviewed
+contract. The engine never silently renames, sells, or writes off such a position.
 
 The engine checks nonnegative cash/equity for the unlevered strategy, finite values, equity
 reconciliation, nonnegative shares and costs, sell quantity, duplicate positions, and complete

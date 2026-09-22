@@ -87,6 +87,8 @@ class SecurityIdentitySettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     mapping_path: Path = Path("config/security_identity/bse_code_aliases.json")
+    lifecycle_path: Path = Path("config/security_identity/security_lifecycle_events.json")
+    lifecycle_policy_path: Path = Path("config/security_identity/security_lifecycle_policy.json")
 
 
 class HistoricalBacktestPeriodSettings(BaseModel):

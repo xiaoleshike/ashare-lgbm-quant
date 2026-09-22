@@ -41,6 +41,21 @@ class RankerDataset:
         return self.frame.groupby("trade_date", sort=False).size().astype(int).tolist()
 
 
+@dataclass(slots=True)
+class RankerPredictionDataset:
+    """Label-free signal-date universe and its observable feature coverage."""
+
+    frame: DataFrame
+    feature_names: tuple[str, ...]
+    coverage_by_date: DataFrame
+
+    @property
+    def features(self) -> DataFrame:
+        """Return the float32 scoring matrix in governed feature order."""
+
+        return self.frame.loc[:, list(self.feature_names)]
+
+
 class RankerDataLoader:
     """Load eligible 5-day labels and selected features with DuckDB column pruning."""
 
@@ -103,6 +118,124 @@ class RankerDataLoader:
         frame["relevance"] = relevance.clip(0, relevance_grades - 1).astype("int32")
         return RankerDataset(frame=frame, feature_names=tuple(feature_names))
 
+    def load_prediction_universe(
+        self,
+        start_date: str,
+        end_date: str,
+        feature_names: Sequence[str],
+    ) -> RankerPredictionDataset:
+        """Load signal-date candidates without consulting forward labels."""
+
+        selected = ",\n".join(f'f."{name}"' for name in feature_names)
+        query = f"""
+            SELECT
+                CAST(u.trade_date AS VARCHAR) AS trade_date,
+                CAST(u.ts_code AS VARCHAR) AS ts_code,
+                f.ts_code IS NOT NULL AS feature_row_present,
+                {selected}
+            FROM read_parquet('{self.universe_glob.as_posix()}', hive_partitioning=false) AS u
+            LEFT JOIN read_parquet('{self.feature_glob.as_posix()}', hive_partitioning=false) AS f
+                ON CAST(u.trade_date AS VARCHAR) = CAST(f.trade_date AS VARCHAR)
+               AND CAST(u.ts_code AS VARCHAR) = CAST(f.ts_code AS VARCHAR)
+            WHERE CAST(u.trade_date AS VARCHAR) BETWEEN ? AND ?
+              AND CAST(u.in_model_universe AS BOOLEAN)
+            ORDER BY u.trade_date, u.ts_code
+        """  # noqa: S608 -- feature identifiers are validated against the static registry
+        with duckdb.connect() as connection:
+            expected = connection.execute(query, [start_date, end_date]).fetch_df()
+        if expected.empty:
+            raise DataValidationError(
+                f"ranker prediction universe is empty for {start_date}..{end_date}"
+            )
+        _require_unique_keys(expected, "prediction universe")
+        expected["feature_row_present"] = expected["feature_row_present"].fillna(False).astype(bool)
+        coverage = (
+            expected.groupby("trade_date", sort=True)
+            .agg(
+                expected_universe_rows=("ts_code", "size"),
+                feature_rows_present=("feature_row_present", "sum"),
+            )
+            .reset_index()
+        )
+        frame = expected.loc[expected["feature_row_present"]].drop(columns=["feature_row_present"])
+        if frame.empty:
+            raise DataValidationError("walk-forward prediction universe has no feature rows")
+        for feature in feature_names:
+            values = pd.to_numeric(frame[feature], errors="coerce")
+            frame[feature] = values.replace([np.inf, -np.inf], np.nan).astype("float32")
+        return RankerPredictionDataset(
+            frame=frame.reset_index(drop=True),
+            feature_names=tuple(feature_names),
+            coverage_by_date=coverage,
+        )
+
+    def attach_evaluation_labels(
+        self,
+        predictions: DataFrame,
+        relevance_grades: int,
+    ) -> DataFrame:
+        """Left-join labels after prediction keys and scores have been frozen."""
+
+        required = {"trade_date", "ts_code", "prediction_score"}
+        if not required.issubset(predictions.columns):
+            raise DataValidationError(
+                f"evaluation predictions are missing columns: {sorted(required - set(predictions))}"
+            )
+        _require_unique_keys(predictions, "evaluation predictions")
+        scores = pd.to_numeric(predictions["prediction_score"], errors="coerce")
+        if not np.isfinite(scores.to_numpy(dtype=float)).all():
+            raise DataValidationError("walk-forward predictions contain non-finite scores")
+        start_date = str(predictions["trade_date"].astype(str).min())
+        end_date = str(predictions["trade_date"].astype(str).max())
+        query = f"""
+            SELECT
+                CAST(trade_date AS VARCHAR) AS trade_date,
+                CAST(ts_code AS VARCHAR) AS ts_code,
+                CAST(exit_date AS VARCHAR) AS exit_date,
+                CAST(future_excess_ret AS DOUBLE) AS future_excess_ret_5d,
+                CAST(is_label_available AS BOOLEAN) AS is_label_available,
+                CAST(label_unavailable_reason AS VARCHAR) AS label_unavailable_reason
+            FROM read_parquet('{self.label_glob.as_posix()}', hive_partitioning=false)
+            WHERE CAST(horizon AS INTEGER) = ?
+              AND CAST(trade_date AS VARCHAR) BETWEEN ? AND ?
+            ORDER BY trade_date, ts_code
+        """  # noqa: S608 -- local configured Parquet path
+        with duckdb.connect() as connection:
+            labels = connection.execute(query, [self.horizon, start_date, end_date]).fetch_df()
+        if not labels.empty:
+            _require_unique_keys(labels, "evaluation labels")
+        merged = predictions.merge(
+            labels,
+            on=["trade_date", "ts_code"],
+            how="left",
+            validate="one_to_one",
+        )
+        label_exists = merged["is_label_available"].notna()
+        exit_date = merged["exit_date"].fillna("").astype(str)
+        merged["is_label_mature"] = label_exists & exit_date.str.fullmatch(r"\d{8}")
+        available = merged["is_label_available"].fillna(False).astype(bool)
+        returns = pd.to_numeric(merged["future_excess_ret_5d"], errors="coerce")
+        merged["is_label_available"] = available & np.isfinite(returns)
+        merged["future_excess_ret_5d"] = returns
+        merged.loc[~merged["is_label_available"], "future_excess_ret_5d"] = np.nan
+        reason = merged["label_unavailable_reason"].fillna("").astype(str)
+        reason = reason.mask(~label_exists, "missing_label_row")
+        reason = reason.mask(
+            label_exists & ~merged["is_label_available"] & reason.eq(""), "invalid_label"
+        )
+        merged["label_unavailable_reason"] = reason
+        merged["relevance"] = pd.Series(pd.NA, index=merged.index, dtype="Int32")
+        metric_rows = merged["is_label_available"]
+        if metric_rows.any():
+            percentile = (
+                merged.loc[metric_rows]
+                .groupby("trade_date", sort=False)["future_excess_ret_5d"]
+                .rank(method="average", pct=True)
+            )
+            relevance = (np.ceil(percentile * relevance_grades) - 1).clip(0, relevance_grades - 1)
+            merged.loc[metric_rows, "relevance"] = relevance.astype("int32")
+        return merged
+
     def _validate_inputs(self) -> None:
         for name, directory in (
             ("features_daily", self.processed_root / "features_daily"),
@@ -111,3 +244,10 @@ class RankerDataLoader:
         ):
             if not list(directory.glob("**/*.parquet")):
                 raise DataValidationError(f"{name} is required for Ranker experiments")
+
+
+def _require_unique_keys(frame: DataFrame, description: str) -> None:
+    duplicates = frame.duplicated(subset=["trade_date", "ts_code"], keep=False)
+    if duplicates.any():
+        sample = frame.loc[duplicates, ["trade_date", "ts_code"]].head(5).to_dict("records")
+        raise DataValidationError(f"{description} has duplicate security keys: {sample}")

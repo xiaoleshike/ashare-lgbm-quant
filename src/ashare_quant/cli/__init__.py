@@ -27,6 +27,33 @@ from ashare_quant.data.security_identity import (
     SecurityIdentityResolver,
     scan_cross_source_identity,
 )
+from ashare_quant.data.security_identity_transition import (
+    SecurityIdentityTransitionResolver,
+    publish_security_identity_transitions,
+    publish_transition_evidence_package,
+)
+from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
+from ashare_quant.data.security_lifecycle_audit import (
+    LifecycleAuditPolicy,
+    SecurityLifecycleScanner,
+)
+from ashare_quant.data.security_lifecycle_evidence_closure import (
+    SecurityLifecycleEvidenceClosureService,
+)
+from ashare_quant.data.security_lifecycle_official_index import (
+    OfficialLifecycleIndexService,
+    publish_bulk_official_source_package,
+)
+from ashare_quant.data.security_lifecycle_resolution import SecurityLifecycleResolutionService
+from ashare_quant.data.security_lifecycle_resolution_hardened import (
+    HardenedLifecycleResolutionService,
+)
+from ashare_quant.data.security_lifecycle_source_probe import SecurityLifecycleSourceProbe
+from ashare_quant.data.security_lifecycle_transition_closure import (
+    SecurityLifecycleTransitionClosureService,
+)
+from ashare_quant.data.security_lifecycle_triage import SecurityLifecycleTriageService
+from ashare_quant.data.tushare_client import TushareClient, TushareClientConfig
 from ashare_quant.data.validation import DataValidator, ValidationResult
 from ashare_quant.diagnostics import FeatureDiagnosticPipeline
 from ashare_quant.diagnostics.pipeline import ChronologicalSplit
@@ -86,6 +113,8 @@ from ashare_quant.orchestration import (
     FreshnessService,
     GateResult,
     ProductionLockError,
+    production_lock_path,
+    production_runs_root,
     resolve_completed_trading_date,
     run_with_production_lock,
 )
@@ -224,6 +253,123 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
         default=None,
         help="Override the configured processed universe root.",
     )
+    lifecycle_parser = data_subparsers.add_parser(
+        "security-lifecycle-scan",
+        help="Read-only authoritative full-market lifecycle completeness audit.",
+    )
+    lifecycle_parser.add_argument("--start-date", required=True, help="Inclusive YYYYMMDD date.")
+    lifecycle_parser.add_argument("--end-date", required=True, help="Inclusive YYYYMMDD date.")
+    lifecycle_parser.add_argument("--processed-root", required=True)
+    lifecycle_parser.add_argument("--reports-root", required=True)
+    lifecycle_parser.add_argument("--lifecycle-policy", default=None)
+    lifecycle_parser.add_argument("--lifecycle-evidence", default=None)
+    lifecycle_parser.add_argument(
+        "--identity-transition-artifact",
+        default=None,
+        help="Optional completed security identity-transition artifact directory.",
+    )
+    lifecycle_parser.add_argument(
+        "--supersedes-scan-manifest",
+        default=None,
+        help="Optional immutable prior scan manifest for a machine-readable comparison.",
+    )
+    lifecycle_parser.add_argument(
+        "--supersession-reason",
+        choices=["SUSPEND_D_SEMANTICS_RECALIBRATION"],
+        default=None,
+    )
+    triage_parser = data_subparsers.add_parser(
+        "security-lifecycle-triage",
+        help="Read-only deterministic triage of one blocked lifecycle scan.",
+    )
+    triage_parser.add_argument("--lifecycle-scan-manifest", required=True)
+    triage_parser.add_argument("--processed-root", required=True)
+    triage_parser.add_argument("--reports-root", required=True)
+    triage_parser.add_argument("--lifecycle-policy", default=None)
+    triage_parser.add_argument("--lifecycle-evidence", default=None)
+    source_probe_parser = data_subparsers.add_parser(
+        "security-lifecycle-source-probe",
+        help="Explicit networked Tushare completeness probe for lifecycle triage residuals.",
+    )
+    source_probe_parser.add_argument("--triage-manifest", required=True)
+    source_probe_parser.add_argument("--reports-root", required=True)
+    source_probe_parser.add_argument(
+        "--buffer-sessions",
+        type=int,
+        default=5,
+        help="Open-session context included before and after each residual interval.",
+    )
+    resolution_parser = data_subparsers.add_parser(
+        "security-lifecycle-resolve",
+        help="Freeze D.3 provider and official-evidence resolution without repairing data.",
+    )
+    resolution_parser.add_argument("--lifecycle-scan-manifest", required=True)
+    resolution_parser.add_argument("--triage-manifest", required=True)
+    resolution_parser.add_argument("--provider-probe-manifest", required=True)
+    resolution_parser.add_argument("--reports-root", required=True)
+    resolution_parser.add_argument("--lifecycle-policy", default=None)
+    resolution_parser.add_argument("--lifecycle-evidence", default=None)
+    resolution_parser.add_argument(
+        "--official-evidence-package",
+        action="append",
+        default=[],
+        help="Repeatable immutable official-evidence package directory.",
+    )
+    bulk_parser = data_subparsers.add_parser(
+        "security-lifecycle-bulk-source-freeze",
+        help="Freeze one reviewed official bulk document and its normalized rows.",
+    )
+    bulk_parser.add_argument("--source-json", required=True)
+    bulk_parser.add_argument("--records-json", required=True)
+    bulk_parser.add_argument("--document", required=True)
+    bulk_parser.add_argument("--reports-root", required=True)
+    official_index_parser = data_subparsers.add_parser(
+        "security-lifecycle-official-index",
+        help="Build an immutable normalized index from reviewed official evidence.",
+    )
+    official_index_parser.add_argument("--reports-root", required=True)
+    official_index_parser.add_argument("--lifecycle-evidence", default=None)
+    official_index_parser.add_argument("--bulk-source-package", action="append", default=[])
+    official_index_parser.add_argument("--official-evidence-package", action="append", default=[])
+    hardened_parser = data_subparsers.add_parser(
+        "security-lifecycle-resolution-harden",
+        help="Split partial source repairs and separate source from lifecycle conclusions.",
+    )
+    hardened_parser.add_argument("--triage-manifest", required=True)
+    hardened_parser.add_argument("--provider-probe-manifest", required=True)
+    hardened_parser.add_argument("--d3-resolution-manifest", required=True)
+    hardened_parser.add_argument("--official-index-manifest", required=True)
+    hardened_parser.add_argument("--reports-root", required=True)
+    closure_parser = data_subparsers.add_parser(
+        "security-lifecycle-evidence-close",
+        help="Reconcile official evidence against an immutable D.3.1 unresolved queue.",
+    )
+    closure_parser.add_argument("--baseline-hardened-manifest", required=True)
+    closure_parser.add_argument("--current-hardened-manifest", required=True)
+    closure_parser.add_argument("--official-index-manifest", required=True)
+    closure_parser.add_argument("--triage-manifest", required=True)
+    closure_parser.add_argument("--reports-root", required=True)
+    transition_evidence_parser = data_subparsers.add_parser(
+        "security-identity-transition-evidence-freeze",
+        help="Freeze one reviewed official security-code transition document.",
+    )
+    transition_evidence_parser.add_argument("--evidence-json", required=True)
+    transition_evidence_parser.add_argument("--document", required=True)
+    transition_evidence_parser.add_argument("--reports-root", required=True)
+    transition_build_parser = data_subparsers.add_parser(
+        "security-identity-transition-build",
+        help="Build an immutable identity-transition graph from verified evidence.",
+    )
+    transition_build_parser.add_argument("--evidence-package", action="append", required=True)
+    transition_build_parser.add_argument("--transition-version", required=True)
+    transition_build_parser.add_argument("--reports-root", required=True)
+    transition_close_parser = data_subparsers.add_parser(
+        "security-lifecycle-transition-close",
+        help="Resolve D.3.2 residual sessions explained by verified code transitions.",
+    )
+    transition_close_parser.add_argument("--d32-closure-manifest", required=True)
+    transition_close_parser.add_argument("--identity-transition-artifact", required=True)
+    transition_close_parser.add_argument("--reports-root", required=True)
 
 
 def add_universe_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -391,7 +537,15 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         help="Run an isolated CPU or CUDA benchmark from an immutable model experiment.",
     )
     backend_benchmark.add_argument("--backend", required=True, choices=("cpu", "cuda"))
-    backend_benchmark.add_argument("--experiment-id", required=True)
+    benchmark_source = backend_benchmark.add_mutually_exclusive_group(required=True)
+    benchmark_source.add_argument("--experiment-id")
+    benchmark_source.add_argument("--walk-forward-run-id")
+    backend_benchmark.add_argument(
+        "--fold-id",
+        default=None,
+        help="Selection-period fold; defaults deterministically to the latest eligible fold.",
+    )
+    backend_benchmark.add_argument("--feature-provenance", default=None)
     backend_compare = commands.add_parser(
         "compare-training-backends",
         help="Compare exact-identity CPU and CUDA benchmark artifacts.",
@@ -535,6 +689,11 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     walk_forward_run.add_argument("--experiment-id", required=True)
     walk_forward_run.add_argument("--experiment-manifest", required=True)
     walk_forward_run.add_argument("--feature-provenance", required=True)
+    walk_forward_run.add_argument(
+        "--lifecycle-scan-manifest",
+        default=None,
+        help="Required PASS lifecycle scan manifest for executable evidence.",
+    )
     walk_forward_run.add_argument(
         "--ranking-only",
         action="store_true",
@@ -1097,6 +1256,312 @@ def run_data_command(args: argparse.Namespace) -> int:
     configure_logging(settings.logging.level, settings.logging.json_logs)
     store = build_store(args.storage_root, settings)
 
+    if args.data_command == "security-identity-transition-evidence-freeze":
+        try:
+            evidence = json.loads(Path(args.evidence_json).read_text(encoding="utf-8"))
+            if not isinstance(evidence, dict):
+                raise DataValidationError("SECURITY_IDENTITY_TRANSITION_EVIDENCE_INVALID")
+            output = publish_transition_evidence_package(
+                evidence=evidence,
+                document=Path(args.document),
+                reports_root=Path(args.reports_root),
+            )
+        except (DataValidationError, OSError, ValueError, json.JSONDecodeError) as error:
+            print(f"security identity transition evidence freeze failed: {error}", file=sys.stderr)
+            return 2
+        print(f"security_identity_transition_evidence: output={output}")
+        return 0
+
+    if args.data_command == "security-identity-transition-build":
+        try:
+            output = publish_security_identity_transitions(
+                evidence_packages=tuple(Path(value) for value in args.evidence_package),
+                reports_root=Path(args.reports_root),
+                transition_version=args.transition_version,
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"security identity transition build failed: {error}", file=sys.stderr)
+            return 2
+        print(f"security_identity_transitions: output={output}")
+        return 0
+
+    if args.data_command == "security-lifecycle-transition-close":
+        try:
+            transition_closure = SecurityLifecycleTransitionClosureService(
+                d32_closure_manifest=Path(args.d32_closure_manifest),
+                identity_transition_artifact=Path(args.identity_transition_artifact),
+                raw_root=store.root,
+                reports_root=Path(args.reports_root),
+            ).run()
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"security lifecycle transition closure failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            "security_lifecycle_transition_closure: "
+            f"closure_id={transition_closure.closure_id} "
+            f"unresolved={transition_closure.counts.get('still_unresolved', 0)} "
+            f"idempotent={transition_closure.idempotent} "
+            f"output={transition_closure.output_dir}"
+        )
+        return 0
+
+    if args.data_command == "security-lifecycle-evidence-close":
+        try:
+            closure_result = SecurityLifecycleEvidenceClosureService(
+                baseline_hardened_manifest=Path(args.baseline_hardened_manifest),
+                current_hardened_manifest=Path(args.current_hardened_manifest),
+                official_index_manifest=Path(args.official_index_manifest),
+                triage_manifest=Path(args.triage_manifest),
+                raw_root=store.root,
+                reports_root=Path(args.reports_root),
+            ).run()
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"security lifecycle evidence closure failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            "security_lifecycle_evidence_closure: "
+            f"closure_id={closure_result.closure_id} "
+            f"input_segments={closure_result.counts.get('input_segments', 0)} "
+            f"unresolved={closure_result.counts.get('still_unresolved', 0)} "
+            f"idempotent={closure_result.idempotent} output={closure_result.output_dir}"
+        )
+        return 0
+
+    if args.data_command == "security-lifecycle-bulk-source-freeze":
+        try:
+            source = json.loads(Path(args.source_json).read_text(encoding="utf-8"))
+            records = json.loads(Path(args.records_json).read_text(encoding="utf-8"))
+            if not isinstance(source, dict) or not isinstance(records, list):
+                raise DataValidationError("SECURITY_LIFECYCLE_BULK_SOURCE_INPUT_INVALID")
+            output = publish_bulk_official_source_package(
+                source=source,
+                records=records,
+                document=Path(args.document),
+                reports_root=Path(args.reports_root),
+            )
+        except (DataValidationError, OSError, ValueError, json.JSONDecodeError) as error:
+            print(f"security lifecycle bulk source freeze failed: {error}", file=sys.stderr)
+            return 2
+        print(f"security_lifecycle_bulk_source: output={output}")
+        return 0
+
+    if args.data_command == "security-lifecycle-official-index":
+        evidence_path = Path(
+            args.lifecycle_evidence
+            if args.lifecycle_evidence is not None
+            else settings.security_identity.lifecycle_path
+        )
+        try:
+            official_index_result = OfficialLifecycleIndexService(
+                reports_root=Path(args.reports_root),
+                identity_resolver=SecurityIdentityResolver.from_path(
+                    settings.security_identity.mapping_path
+                ),
+                lifecycle_evidence=SecurityLifecycleResolver.from_path(evidence_path),
+                bulk_source_packages=tuple(Path(value) for value in args.bulk_source_package),
+                official_evidence_packages=tuple(
+                    Path(value) for value in args.official_evidence_package
+                ),
+            ).build()
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"security lifecycle official index failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            "security_lifecycle_official_index: "
+            f"index_id={official_index_result.index_id} "
+            f"events={official_index_result.counts.get('events', 0)} "
+            f"idempotent={official_index_result.idempotent} "
+            f"output={official_index_result.output_dir}"
+        )
+        return 0
+
+    if args.data_command == "security-lifecycle-resolution-harden":
+        try:
+            hardened_result = HardenedLifecycleResolutionService(
+                triage_manifest=Path(args.triage_manifest),
+                provider_probe_manifest=Path(args.provider_probe_manifest),
+                d3_resolution_manifest=Path(args.d3_resolution_manifest),
+                official_index_manifest=Path(args.official_index_manifest),
+                raw_root=store.root,
+                reports_root=Path(args.reports_root),
+                identity_resolver=SecurityIdentityResolver.from_path(
+                    settings.security_identity.mapping_path
+                ),
+            ).run()
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"security lifecycle resolution hardening failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            "security_lifecycle_resolution_hardened: "
+            f"resolution_id={hardened_result.resolution_id} "
+            f"parents={hardened_result.counts.get('parent_intervals', 0)} "
+            f"segments={hardened_result.counts.get('child_segments', 0)} "
+            f"unresolved={hardened_result.counts.get('still_unresolved', 0)} "
+            f"idempotent={hardened_result.idempotent} "
+            f"output={hardened_result.output_dir}"
+        )
+        return 0
+
+    if args.data_command == "security-lifecycle-resolve":
+        policy_path = Path(
+            args.lifecycle_policy
+            if args.lifecycle_policy is not None
+            else settings.security_identity.lifecycle_policy_path
+        )
+        evidence_path = Path(
+            args.lifecycle_evidence
+            if args.lifecycle_evidence is not None
+            else settings.security_identity.lifecycle_path
+        )
+        try:
+            resolution = SecurityLifecycleResolutionService(
+                lifecycle_scan_manifest=Path(args.lifecycle_scan_manifest),
+                triage_manifest=Path(args.triage_manifest),
+                provider_probe_manifest=Path(args.provider_probe_manifest),
+                reports_root=Path(args.reports_root),
+                identity_resolver=SecurityIdentityResolver.from_path(
+                    settings.security_identity.mapping_path
+                ),
+                lifecycle_policy=LifecycleAuditPolicy.from_path(policy_path),
+                lifecycle_evidence=SecurityLifecycleResolver.from_path(evidence_path),
+                official_evidence_packages=tuple(
+                    Path(value) for value in args.official_evidence_package
+                ),
+            ).run()
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"security lifecycle resolution failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"security_lifecycle_resolution: resolution_id={resolution.resolution_id} "
+            f"intervals={resolution.counts.get('intervals', 0)} "
+            f"sessions={resolution.counts.get('sessions', 0)} "
+            f"repair_required={resolution.counts.get('repair_required', 0)} "
+            f"still_unresolved={resolution.counts.get('still_unresolved', 0)} "
+            f"idempotent={resolution.idempotent} output={resolution.output_dir}"
+        )
+        return 0
+
+    if args.data_command == "security-lifecycle-source-probe":
+        try:
+            source_probe = SecurityLifecycleSourceProbe(
+                triage_manifest=Path(args.triage_manifest),
+                raw_root=store.root,
+                reports_root=Path(args.reports_root),
+                identity_resolver=SecurityIdentityResolver.from_path(
+                    settings.security_identity.mapping_path
+                ),
+                provider_client=TushareClient(
+                    token=settings.tushare_token,
+                    config=TushareClientConfig(
+                        retry_attempts=settings.data.retry_attempts,
+                        rate_limit_per_minute=settings.data.rate_limit_per_minute,
+                        request_interval_seconds=settings.data.request_interval_seconds,
+                        backoff_base_seconds=settings.data.backoff_base_seconds,
+                        backoff_max_seconds=settings.data.backoff_max_seconds,
+                        endpoint_rate_limits_per_minute=dict(
+                            settings.data.endpoint_rate_limits_per_minute
+                        ),
+                    ),
+                ),
+                buffer_sessions=args.buffer_sessions,
+            ).run()
+        except (DataIngestionError, DataValidationError, OSError, ValueError) as error:
+            print(f"security lifecycle source probe failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"security_lifecycle_source_probe: probe_id={source_probe.probe_id} "
+            f"intervals={source_probe.counts.get('intervals_probed', 0)} "
+            f"requests={source_probe.counts.get('api_requests', 0)} "
+            f"failures={source_probe.counts.get('request_failures', 0)} "
+            f"idempotent={source_probe.idempotent} output={source_probe.output_dir}"
+        )
+        return 0 if source_probe.counts.get("request_failures", 0) == 0 else 1
+
+    if args.data_command == "security-lifecycle-triage":
+        policy_path = Path(
+            args.lifecycle_policy
+            if args.lifecycle_policy is not None
+            else settings.security_identity.lifecycle_policy_path
+        )
+        evidence_path = Path(
+            args.lifecycle_evidence
+            if args.lifecycle_evidence is not None
+            else settings.security_identity.lifecycle_path
+        )
+        try:
+            triage_result = SecurityLifecycleTriageService(
+                lifecycle_scan_manifest=Path(args.lifecycle_scan_manifest),
+                raw_root=store.root,
+                processed_root=Path(args.processed_root),
+                reports_root=Path(args.reports_root),
+                identity_resolver=SecurityIdentityResolver.from_path(
+                    settings.security_identity.mapping_path
+                ),
+                lifecycle_evidence=SecurityLifecycleResolver.from_path(evidence_path),
+                lifecycle_policy=LifecycleAuditPolicy.from_path(policy_path),
+            ).run()
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"security lifecycle triage failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"security_lifecycle_triage: triage_id={triage_result.triage_id} "
+            f"intervals={triage_result.counts.get('unresolved_intervals', 0)} "
+            f"securities={triage_result.counts.get('unresolved_securities', 0)} "
+            f"idempotent={triage_result.idempotent} output={triage_result.output_dir}"
+        )
+        return 0
+
+    if args.data_command == "security-lifecycle-scan":
+        policy_path = Path(
+            args.lifecycle_policy
+            if args.lifecycle_policy is not None
+            else settings.security_identity.lifecycle_policy_path
+        )
+        evidence_path = Path(
+            args.lifecycle_evidence
+            if args.lifecycle_evidence is not None
+            else settings.security_identity.lifecycle_path
+        )
+        try:
+            lifecycle_result = SecurityLifecycleScanner(
+                raw_root=store.root,
+                processed_root=Path(args.processed_root),
+                reports_root=Path(args.reports_root),
+                identity_resolver=SecurityIdentityResolver.from_path(
+                    settings.security_identity.mapping_path
+                ),
+                lifecycle_evidence=SecurityLifecycleResolver.from_path(evidence_path),
+                lifecycle_policy=LifecycleAuditPolicy.from_path(policy_path),
+                identity_transitions=(
+                    SecurityIdentityTransitionResolver.from_path(
+                        Path(args.identity_transition_artifact)
+                    )
+                    if args.identity_transition_artifact is not None
+                    else None
+                ),
+                supersedes_scan_manifest=(
+                    Path(args.supersedes_scan_manifest)
+                    if args.supersedes_scan_manifest is not None
+                    else None
+                ),
+                supersession_reason=args.supersession_reason,
+            ).scan(args.start_date, args.end_date)
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"security lifecycle scan failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"security_lifecycle_scan: scan_id={lifecycle_result.scan_id} "
+            f"status={lifecycle_result.status} "
+            f"missing={lifecycle_result.counts.get('missing_price_candidates', 0)} "
+            f"unresolved={lifecycle_result.counts.get('unresolved', 0)} "
+            f"policy_collisions={lifecycle_result.counts.get('policy_collisions', 0)} "
+            "boundary_inconsistencies="
+            f"{lifecycle_result.counts.get('boundary_inconsistencies', 0)} "
+            f"raw_data_gaps={lifecycle_result.counts.get('blocking_raw_data_gaps', 0)} "
+            f"idempotent={lifecycle_result.idempotent} output={lifecycle_result.output_dir}"
+        )
+        return 0 if lifecycle_result.status == "PASS" else 1
+
     if args.data_command == "security-identity-scan":
         resolver = SecurityIdentityResolver.from_path(settings.security_identity.mapping_path)
         universe_store = UniverseStore(
@@ -1273,6 +1738,10 @@ def run_universe_command(args: argparse.Namespace) -> int:
                         build_result.security_identity_mapping_version
                     ),
                     "security_identity_mapping_hash": build_result.security_identity_mapping_hash,
+                    "security_lifecycle_policy_version": (
+                        build_result.security_lifecycle_policy_version
+                    ),
+                    "security_lifecycle_policy_hash": build_result.security_lifecycle_policy_hash,
                 },
             )
         return 0 if build_result.validation.ok else 1
@@ -1576,7 +2045,13 @@ def run_models_command(args: argparse.Namespace) -> int:
         try:
             if args.models_command == "benchmark-training-backend":
                 benchmark_result = benchmark.run(
-                    backend=args.backend, experiment_id=args.experiment_id
+                    backend=args.backend,
+                    experiment_id=args.experiment_id,
+                    walk_forward_run_id=args.walk_forward_run_id,
+                    fold_id=args.fold_id,
+                    feature_provenance_path=(
+                        None if args.feature_provenance is None else Path(args.feature_provenance)
+                    ),
                 )
                 print(
                     "training_backend_benchmark: "
@@ -2027,6 +2502,7 @@ def run_models_command(args: argparse.Namespace) -> int:
                 processed_root=processed_root,
                 settings=settings,
             ),
+            lifecycle_audit_required=True,
         )
         try:
             walk_forward_evaluation_result = multi_fold_runner.run(
@@ -2034,6 +2510,11 @@ def run_models_command(args: argparse.Namespace) -> int:
                 experiment_id=args.experiment_id,
                 feature_provenance_path=Path(args.feature_provenance),
                 require_executable=not args.ranking_only,
+                lifecycle_scan_manifest=(
+                    None
+                    if args.lifecycle_scan_manifest is None
+                    else Path(args.lifecycle_scan_manifest)
+                ),
             )
         except (DataValidationError, OSError, ValueError) as error:
             print(f"walk-forward execution failed: {error}", file=sys.stderr)
@@ -2525,6 +3006,8 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     configure_logging(settings.logging.level, settings.logging.json_logs)
     config_path = Path(effective_config_path(args.config))
+    runs_root = production_runs_root(settings.paths.paper_trading)
+    lock_path = production_lock_path(settings.paths.paper_trading)
     raw_store = build_store(None, settings)
     universe_store = UniverseStore(settings.paths.processed_data)
     feature_store = FeatureStore(settings.paths.processed_data)
@@ -2644,12 +3127,15 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
                 ),
                 promotion_policy_path=_promotion_policy_path(config_path),
             ),
+            runs_root=runs_root,
+            lock_path=lock_path,
         )
         scheduler = ProductionScheduler(
             settings=settings,
             raw_store=raw_store,
             pipeline=pipeline,
             reports_root=reports_root,
+            runs_root=runs_root,
         )
         try:
             scheduler_result = scheduler.run(args.as_of, dry_run=args.dry_run)
@@ -2686,6 +3172,8 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
             settings=settings,
             config_path=config_path,
             raw_store=raw_store,
+            runs_root=runs_root,
+            lock_path=lock_path,
         )
         try:
             update_result = updater.run()
@@ -2714,6 +3202,8 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
         config_path=config_path,
         processed_root=settings.paths.processed_data,
         readiness_executor=lambda gate, as_of: execute_readiness_gate(freshness, gate, as_of),
+        runs_root=runs_root,
+        lock_path=lock_path,
     )
     try:
         daily_result = orchestrator.run(args.as_of)
@@ -2797,6 +3287,7 @@ def run_paper_trading_command(args: argparse.Namespace) -> int:
 
     return run_production_cli_command(
         operation,
+        lock_path=production_lock_path(settings.paths.paper_trading),
         command=f"ashare-quant paper-trading {args.paper_trading_command}",
     )
 

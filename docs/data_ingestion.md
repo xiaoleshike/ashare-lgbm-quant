@@ -26,6 +26,137 @@ ashare-quant --config config/default.yaml data security-identity-scan \
   --start-date YYYYMMDD --end-date YYYYMMDD
 ```
 
+Security identity and security lifecycle are separate controls. After alias validation, run the
+offline lifecycle completeness audit against the exact processed research snapshot:
+
+```bash
+ashare-quant --config config/default.yaml \
+  data --storage-root data_on_sata/parquet security-lifecycle-scan \
+  --start-date 20100101 \
+  --end-date 20260710 \
+  --processed-root "$RESEARCH_PROCESSED" \
+  --reports-root "$RESEARCH_REPORTS" \
+  --lifecycle-policy config/security_identity/security_lifecycle_policy.json \
+  --lifecycle-evidence config/security_identity/security_lifecycle_events.json
+```
+
+The command is deterministic, offline, and read-only for raw and processed data. It publishes an
+immutable report under `reports_root/security_lifecycle/<scan_id>/`. A missing quote is only an
+investigation candidate: it does not prove suspension or delisting. Ordinary suspension requires
+`suspend_d`; historical listing suspension requires frozen verified evidence; terminal state
+requires `stock_basic.delist_date`. Whole-market raw-data loss and unresolved security-specific
+gaps remain blocking even though they have been classified.
+
+`suspend_d` is interpreted as daily suspension/resumption evidence. An untimed `S` proves only
+that session's full-day suspension; it does not open a persistent state until a later `R`.
+Consecutive open sessions with explicit untimed `S` snapshots are compressed into one reporting
+interval. A timed `S` is intraday evidence and cannot explain an entirely missing daily quote.
+`R` is resume-day boundary evidence: a missing local S/R pair is diagnostic unless an actual quote
+gap remains unexplained. Same-day S/R records are evaluated with timing, quote, universe, and
+stronger lifecycle evidence and are not policy collisions merely because both row types exist.
+
+The project-wide terminal contract treats `stock_basic.delist_date` as the first non-listed date:
+UniverseBuilder uses `trade_date < delist_date`, the execution loader forces `is_listed=false` for
+`trade_date >= delist_date`, and terminal handling additionally requires explicit delist metadata.
+The last observed quote never supplies or changes this date.
+
+The configured v3 event file is a known verified evidence set, not a claim of complete historical
+coverage. Rules live separately in `security_lifecycle_policy.json`; adding verified stock-level
+events requires a new append-only evidence version rather than rewriting v3.
+
+Exchange ticker aliases and corporate code transitions are also distinct. The BSE alias artifact
+normalizes alternate provider keys for one observation. A reviewed code transition has a
+predecessor, successor, effective date, continuity type, and official evidence package. It is
+published under the research reports root as `security_identity_transitions_v1`; SH/SZ corporate
+events must not be appended to the BSE alias file. When supplied with
+`--identity-transition-artifact`, lifecycle scanner schema v4 stops expecting predecessor-code
+quotes on and after the verified effective date and binds the transition artifact hash into the
+scan identity. Quote history is only a consistency check and never establishes the effective date.
+
+When a blocked scan has been triaged, source completeness is investigated separately from lifecycle
+truth. The explicit networked probe is the only lifecycle command that contacts Tushare; it freezes
+current `suspend_d` and `daily` responses under the research reports root and never writes the raw
+store:
+
+```bash
+ashare-quant --config config/default.yaml \
+  data --storage-root data_on_sata/parquet security-lifecycle-source-probe \
+  --triage-manifest "$TRIAGE_MANIFEST" \
+  --reports-root "$RESEARCH_REPORTS"
+```
+
+`LOCAL_SUSPEND_D_INCOMPLETE` and `LOCAL_DAILY_INCOMPLETE` prove a provider/local snapshot
+difference, but do not repair it. `PROVIDER_HAS_NO_SUSPEND_EVIDENCE` does not prove that a missing
+quote was a suspension. Official exchange or issuer documents are frozen and hash-validated in a
+separate evidence package. `security-lifecycle-resolve` reconciles the exact parent interval IDs
+from triage with provider and verified official evidence; it emits repair and evidence plans but
+does not update raw data, lifecycle catalogs, Universe, or model artifacts. Provider request times,
+absolute paths, hostnames, tokens, and error text are excluded from logical evidence identity.
+
+D.3.1 keeps provider completeness and lifecycle truth in separate fields. In particular,
+`source_resolution=PROVIDER_HAS_NO_SUSPEND_EVIDENCE` must retain
+`lifecycle_resolution=STILL_UNRESOLVED` until an official lifecycle fact covers the interval.
+Partially covered parent intervals are expanded over `trade_cal`, resolved session by session, and
+then compressed into deterministic child segments. Parent identity is retained and child sessions
+must reconcile exactly, so one repaired date cannot incorrectly resolve an entire interval.
+
+Official Factbooks and exchange lists can be frozen once and normalized into a reusable research
+index. These commands write only below the selected reports root:
+
+```bash
+ashare-quant --config config/default.yaml data security-lifecycle-bulk-source-freeze \
+  --source-json SOURCE.json --records-json NORMALIZED_ROWS.json \
+  --document OFFICIAL_DOCUMENT.pdf --reports-root "$RESEARCH_REPORTS"
+
+ashare-quant --config config/default.yaml data security-lifecycle-official-index \
+  --reports-root "$RESEARCH_REPORTS" \
+  --bulk-source-package BULK_PACKAGE \
+  --official-evidence-package VERIFIED_EVIDENCE_PACKAGE
+
+ashare-quant --config config/default.yaml \
+  data --storage-root data_on_sata/parquet security-lifecycle-resolution-harden \
+  --triage-manifest "$TRIAGE_MANIFEST" \
+  --provider-probe-manifest "$SOURCE_PROBE_MANIFEST" \
+  --d3-resolution-manifest "$D3_RESOLUTION_MANIFEST" \
+  --official-index-manifest "$OFFICIAL_INDEX_MANIFEST" \
+  --reports-root "$RESEARCH_REPORTS"
+```
+
+Only official-domain documents with an exact security and effective-date match can resolve a
+segment. Discovery links and heuristic matches remain unverified. Bulk source packages, the
+official index, and hardened resolution are immutable manifest-last artifacts; none of them mutates
+canonical raw data or the processed universe.
+
+Formal lifecycle evidence may start before the governed research period. The official index marks
+such records as `carry_in=true`; a verified pre-period suspension start can establish the state at
+`20100101`, but only a verified resumption or terminal event closes it. A quote reappearing is a
+consistency observation, not a substitute for that closing evidence.
+
+D.3.2 closes newly indexed evidence over the exact immutable D.3.1 unresolved queue:
+
+```bash
+ashare-quant --config config/default.yaml \
+  data --storage-root data_on_sata/parquet security-lifecycle-evidence-close \
+  --baseline-hardened-manifest BASELINE_HARDENED_MANIFEST \
+  --current-hardened-manifest CURRENT_HARDENED_MANIFEST \
+  --official-index-manifest OFFICIAL_INDEX_MANIFEST \
+  --triage-manifest TRIAGE_MANIFEST \
+  --reports-root "$RESEARCH_REPORTS"
+```
+
+Every original work-queue session must map exactly once to a current evidence child. The published
+H5 reachability view covers only remaining blocking children and is informational; it never relaxes
+the global lifecycle gate and does not read labels, returns, or the possibly stale model-universe
+flag.
+
+Before D.4 repairs or rebuilds, raw inputs must be materialized as a content-defined
+`ResearchSourceSnapshot`. The contract uses a staging physical copy plus atomic rename and
+manifest-last publication. Identity binds relative file names, content SHA256 values, dataset
+fingerprints and date coverage, plus security-identity and lifecycle-evidence hashes. A manifest
+that points back to mutable production files is not a reproducible snapshot. The current dependency
+set is declared in `config/research_source_snapshot_contract.json`; it is derived from the actual
+Universe, Feature and Label builders rather than including every configured ingestion endpoint.
+
 The scan reports configured and observed aliases and unresolved mapped keys, and it
 fails closed on canonical collisions. It does not infer unknown aliases.
 
@@ -261,3 +392,48 @@ python scripts/experiments/tushare_batch_probe.py \
   --start-date 20260708 --end-date 20260709 \
   --finance-period 20260331 --finance-endpoint cashflow_vip
 ```
+
+## Lifecycle Residual Triage And Universe Overlay
+
+`security-lifecycle-triage` consumes one immutable blocked lifecycle scan and publishes
+diagnostic candidate groups. A triage label such as `LIKELY_FORMAL_LISTING_SUSPENSION` is not
+authoritative evidence and cannot make the lifecycle preflight pass. The offline scanner remains
+the sole classifier; official exchange or issuer evidence must be frozen separately before it can
+change lifecycle state.
+
+New universe builds expose a precedence-ordered lifecycle overlay:
+
+```text
+TERMINAL > LISTING_SUSPENSION > ORDINARY_SUSPENSION > ACTIVE
+```
+
+`suspend_d` contributes only explicit untimed full-day `S` snapshots to ordinary suspension.
+The versioned lifecycle evidence catalog contributes formal listing-suspension intervals.
+`stock_basic.delist_date` starts terminal state on that date under the existing project contract.
+Formal listing suspension remains inside the known listed lifecycle (`is_listed=true`) but is not
+tradable and is excluded from the model universe. It is not terminal state.
+
+Run residual triage without modifying source data:
+
+```bash
+ashare-quant --config config/default.yaml data security-lifecycle-triage \
+  --processed-root "$RESEARCH_PROCESSED" \
+  --reports-root "$RESEARCH_REPORTS" \
+  --lifecycle-scan-manifest "$LIFECYCLE_SCAN_MANIFEST"
+```
+
+When a corrected lifecycle overlay changes `universe_daily`, the old universe-dependent research
+lineage is not current governed evidence. The dependency chain is:
+
+```text
+universe_daily
+  -> features_daily + labels_forward
+  -> diagnostics
+  -> governed feature-set provenance
+  -> walk-forward plan
+  -> horizon plan
+  -> executable walk-forward evidence
+```
+
+All prior artifacts remain immutable historical evidence. Rebuild into a new isolated processed
+and reports root; never rewrite the old lineage or alter hashes to force compatibility.

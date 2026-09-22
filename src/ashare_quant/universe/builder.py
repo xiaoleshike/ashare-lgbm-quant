@@ -14,6 +14,7 @@ from ashare_quant.data.security_identity import (
     SecurityIdentityResolver,
     canonicalize_security_datasets,
 )
+from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.universe.storage import UNIVERSE_COLUMNS, UniverseStore
 from ashare_quant.universe.tradability import add_tradability_flags
@@ -34,6 +35,8 @@ class UniverseBuildResult:
     validation: UniverseValidationResult
     security_identity_mapping_version: str
     security_identity_mapping_hash: str
+    security_lifecycle_policy_version: str
+    security_lifecycle_policy_hash: str
 
 
 class UniverseBuilder:
@@ -51,11 +54,16 @@ class UniverseBuilder:
         self._identity_resolver = SecurityIdentityResolver.from_path(
             settings.security_identity.mapping_path
         )
+        self._lifecycle_resolver = SecurityLifecycleResolver.from_path(
+            settings.security_identity.lifecycle_path
+        )
 
     def build(self, start_date: str, end_date: str) -> UniverseBuildResult:
         """Build and persist daily universe rows for an inclusive date range."""
 
-        inputs = prepare_universe_inputs(self._load_inputs(), self._identity_resolver)
+        inputs = prepare_universe_inputs(
+            self._load_inputs(), self._identity_resolver, self._lifecycle_resolver
+        )
         rows_built = 0
         rows_written = 0
         errors: list[str] = []
@@ -87,6 +95,8 @@ class UniverseBuilder:
             validation=validation,
             security_identity_mapping_version=self._identity_resolver.mapping_version,
             security_identity_mapping_hash=self._identity_resolver.mapping_hash,
+            security_lifecycle_policy_version=self._lifecycle_resolver.policy_version,
+            security_lifecycle_policy_hash=self._lifecycle_resolver.policy_hash,
         )
 
     def preview(self, start_date: str, end_date: str) -> DataFrame:
@@ -98,6 +108,7 @@ class UniverseBuilder:
             start_date,
             end_date,
             identity_resolver=self._identity_resolver,
+            lifecycle_resolver=self._lifecycle_resolver,
         )
 
     def _load_inputs(self) -> dict[str, DataFrame]:
@@ -119,12 +130,15 @@ def build_universe_frame(
     start_date: str,
     end_date: str,
     identity_resolver: SecurityIdentityResolver | None = None,
+    lifecycle_resolver: SecurityLifecycleResolver | None = None,
 ) -> DataFrame:
     """Build a daily universe frame from already loaded raw input frames."""
 
     if "_security_identity_prepared" not in inputs:
         inputs = prepare_universe_inputs(
-            inputs, identity_resolver or SecurityIdentityResolver.empty()
+            inputs,
+            identity_resolver or SecurityIdentityResolver.empty(),
+            lifecycle_resolver or SecurityLifecycleResolver.empty(),
         )
 
     all_trade_dates = open_trade_dates(inputs["trade_cal"], None, end_date)
@@ -148,8 +162,13 @@ def build_universe_frame(
         inputs["stk_limit"],
         daily_with_liquidity=inputs.get("_daily_with_liquidity"),
         daily_basic_norm=inputs.get("_daily_basic_normalized"),
-        suspend_keys=inputs.get("_suspend_keys"),
+        suspend_keys=inputs.get("_ordinary_suspend_keys"),
         limit_prices=inputs.get("_limit_prices"),
+    )
+    base = add_lifecycle_flags(
+        base,
+        ordinary_suspend_keys=inputs.get("_ordinary_suspend_keys"),
+        listing_suspend_keys=inputs.get("_listing_suspend_keys"),
     )
     base = add_historical_st_flags(
         base,
@@ -166,17 +185,31 @@ def build_universe_frame(
 def prepare_universe_inputs(
     inputs: dict[str, DataFrame],
     identity_resolver: SecurityIdentityResolver | None = None,
+    lifecycle_resolver: SecurityLifecycleResolver | None = None,
 ) -> dict[str, DataFrame]:
     """Precompute full-history normalized inputs reused by chunked universe builds."""
 
     resolver = identity_resolver or SecurityIdentityResolver.empty()
+    lifecycle = lifecycle_resolver or SecurityLifecycleResolver.empty()
     prepared = canonicalize_security_datasets(inputs, resolver)
     prepared["_security_identity_prepared"] = pd.DataFrame()
     daily = normalize_daily(prepared["daily"])
     prepared["_daily_normalized"] = daily
     prepared["_daily_with_liquidity"] = add_liquidity_features(daily)
     prepared["_daily_basic_normalized"] = normalize_daily_basic(prepared["daily_basic"])
-    prepared["_suspend_keys"] = normalize_suspend_keys(prepared["suspend_d"])
+    suspend_keys = normalize_suspend_keys(prepared["suspend_d"])
+    lifecycle_keys = lifecycle.suspension_keys(
+        open_trade_dates(
+            prepared["trade_cal"],
+            None,
+            str(prepared["trade_cal"]["cal_date"].max()),
+        )
+    )
+    prepared["_ordinary_suspend_keys"] = suspend_keys
+    prepared["_listing_suspend_keys"] = lifecycle_keys
+    prepared["_suspend_keys"] = pd.concat(
+        [suspend_keys, lifecycle_keys], ignore_index=True
+    ).drop_duplicates()
     prepared["_limit_prices"] = normalize_limit_prices(prepared["stk_limit"])
     prepared["_candidates"] = build_candidates(prepared["stock_basic"], daily)
     namechange = prepared.get("namechange", pd.DataFrame())
@@ -452,7 +485,7 @@ def add_listing_flags(base: DataFrame, all_trade_dates: list[str]) -> DataFrame:
     working["is_listed"] = (
         working["list_date"].notna()
         & (working["trade_date"] >= working["list_date"])
-        & (working["delist_date"].isna() | (working["trade_date"] <= working["delist_date"]))
+        & (working["delist_date"].isna() | (working["trade_date"] < working["delist_date"]))
     )
     working["list_days"] = vectorized_trading_day_counts(
         all_trade_dates,
@@ -620,7 +653,7 @@ def merge_suspension(
 
 
 def normalize_suspend_keys(suspend_d: DataFrame) -> DataFrame:
-    """Normalize suspension keys once for chunked universe builds."""
+    """Normalize explicit full-day suspension snapshots for universe builds."""
 
     if suspend_d.empty or not {"ts_code", "trade_date"}.issubset(suspend_d.columns):
         return pd.DataFrame(columns=["ts_code", "trade_date"])
@@ -628,10 +661,48 @@ def normalize_suspend_keys(suspend_d: DataFrame) -> DataFrame:
     if "suspend_type" in working.columns:
         event_type = working["suspend_type"].fillna("").astype(str).str.upper()
         working = working[event_type == "S"].copy()
+    if "suspend_timing" in working.columns:
+        timing = working["suspend_timing"].fillna("").astype(str).str.strip()
+        working = working[timing.eq("")].copy()
     suspend_keys = working[["ts_code", "trade_date"]].copy()
     suspend_keys["ts_code"] = suspend_keys["ts_code"].astype(str)
     suspend_keys["trade_date"] = suspend_keys["trade_date"].astype(str)
     return suspend_keys.drop_duplicates()
+
+
+def add_lifecycle_flags(
+    frame: DataFrame,
+    *,
+    ordinary_suspend_keys: DataFrame | None,
+    listing_suspend_keys: DataFrame | None,
+) -> DataFrame:
+    """Attach explicit, precedence-ordered lifecycle state to universe rows."""
+
+    working = frame.copy()
+    working["is_ordinary_suspended"] = _membership_mask(working, ordinary_suspend_keys)
+    working["is_listing_suspended"] = _membership_mask(working, listing_suspend_keys)
+    working["is_terminal"] = ~working["is_listed"].fillna(False).astype(bool)
+    working["is_suspended"] = (
+        working["is_ordinary_suspended"] | working["is_listing_suspended"]
+    ) & ~working["is_terminal"]
+    working["lifecycle_state"] = "ACTIVE"
+    working.loc[working["is_ordinary_suspended"], "lifecycle_state"] = "ORDINARY_SUSPENSION"
+    working.loc[working["is_listing_suspended"], "lifecycle_state"] = "LISTING_SUSPENSION"
+    working.loc[working["is_terminal"], "lifecycle_state"] = "TERMINAL"
+    return working
+
+
+def _membership_mask(frame: DataFrame, keys: DataFrame | None) -> pd.Series:
+    """Return membership in canonical trade-date/security keys without row expansion."""
+
+    if keys is None or keys.empty:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    normalized = keys[["trade_date", "ts_code"]].copy()
+    normalized["trade_date"] = normalized["trade_date"].astype(str)
+    normalized["ts_code"] = normalized["ts_code"].astype(str)
+    key_index = pd.MultiIndex.from_frame(normalized.drop_duplicates())
+    frame_index = pd.MultiIndex.from_frame(frame[["trade_date", "ts_code"]].astype(str))
+    return pd.Series(frame_index.isin(key_index), index=frame.index, dtype=bool)
 
 
 def merge_limit_prices(
@@ -729,6 +800,9 @@ def finalize_columns(frame: DataFrame) -> DataFrame:
     working = frame.copy()
     for column in (
         "is_listed",
+        "is_ordinary_suspended",
+        "is_listing_suspended",
+        "is_terminal",
         "is_new_stock",
         "is_st",
         "is_suspended",
@@ -741,7 +815,14 @@ def finalize_columns(frame: DataFrame) -> DataFrame:
         "in_model_universe",
     ):
         working[column] = working[column].fillna(False).astype(bool)
-    for column in ("name", "market", "exchange", "industry", "exclude_reason"):
+    for column in (
+        "name",
+        "market",
+        "exchange",
+        "industry",
+        "lifecycle_state",
+        "exclude_reason",
+    ):
         working[column] = working[column].fillna("").astype(str)
     working["list_date"] = clean_date_series(working["list_date"])
     working["delist_date"] = clean_date_series(working["delist_date"])

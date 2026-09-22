@@ -1,0 +1,43 @@
+{
+  "schema_version": 2,
+  "artifact_name": "security_lifecycle_policy",
+  "policy_version": "security_lifecycle_audit_v2_1_daily_snapshots",
+  "classification_contract_version": 3,
+  "ordinary_suspension": {
+    "source": "Tushare suspend_d",
+    "full_session_suspend_type": "S",
+    "resume_type": "R",
+    "timed_suspension_is_full_session": false,
+    "resume_session_is_suspended": false,
+    "quote_presence_is_not_resume_evidence": true,
+    "suspension_semantics": "explicit_daily_snapshot",
+    "s_does_not_carry_forward": true,
+    "r_is_boundary_evidence": true,
+    "same_day_s_r_is_not_automatic_policy_collision": true,
+    "same_day_s_r_with_quote_is_non_blocking": true,
+    "listing_boundaries_use_open_sessions": true
+  },
+  "listing_suspension": {
+    "requires_verified_evidence": true,
+    "takes_precedence_over_ordinary_suspension": true
+  },
+  "terminal": {
+    "authoritative_source": "stock_basic.delist_date",
+    "first_terminal_date_rule": "trade_date_greater_than_or_equal_to_delist_date",
+    "last_quote_is_not_terminal_evidence": true
+  },
+  "missing_quote": {
+    "does_not_prove_suspension": true,
+    "does_not_prove_delisting": true,
+    "isolated_without_evidence": "UNRESOLVED",
+    "whole_open_session_absent": "MISSING_RAW_DATA"
+  },
+  "classification_precedence": [
+    "LISTING_SUSPENSION",
+    "ORDINARY_SUSPENSION",
+    "TERMINAL_DELISTING",
+    "SECURITY_ALIAS",
+    "MISSING_RAW_DATA",
+    "UNRESOLVED"
+  ]
+}

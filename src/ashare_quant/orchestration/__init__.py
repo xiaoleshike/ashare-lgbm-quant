@@ -19,6 +19,8 @@ from ashare_quant.orchestration.lock import (
     acquire_production_lock,
     detect_production_lock_owner,
     production_lock,
+    production_lock_path,
+    production_runs_root,
     release_production_lock,
     run_with_production_lock,
 )
@@ -56,6 +58,8 @@ __all__ = [
     "daily_pipeline_stages",
     "detect_production_lock_owner",
     "production_lock",
+    "production_lock_path",
+    "production_runs_root",
     "record_failure",
     "record_stage_end",
     "record_stage_start",

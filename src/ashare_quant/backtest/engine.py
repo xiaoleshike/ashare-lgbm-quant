@@ -11,9 +11,11 @@ import pandas as pd
 from ashare_quant.backtest.costs import ExecutionCostPolicy, TradeCosts
 from ashare_quant.config.settings import BacktestSettings
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_identity_transition import SecurityIdentityTransition
 
 type DataFrame = pd.DataFrame
 type BacktestPurpose = Literal["diagnostic", "oos_evidence", "executable_validation"]
+type DelayedExitPolicy = Literal["fail_at_alert", "carry_to_calendar_end"]
 
 ACCOUNTING_SCHEMA_VERSION = 2
 
@@ -26,6 +28,7 @@ class BacktestInputs:
     prices: DataFrame
     calendar: tuple[str, ...]
     benchmark: DataFrame
+    identity_transitions: tuple[SecurityIdentityTransition, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,7 @@ class Position:
     valuation_status: str = "CURRENT"
     stale_valuation_days: int = 0
     delayed_exit_days: int = 0
+    sell_delay_breached: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +81,7 @@ def simulate_portfolio(
     top_n: int,
     settings: BacktestSettings,
     purpose: BacktestPurpose = "diagnostic",
+    delayed_exit_policy: DelayedExitPolicy = "fail_at_alert",
 ) -> BacktestResult:
     """Simulate equal-weight Top-N signals with next-open execution.
 
@@ -86,12 +91,19 @@ def simulate_portfolio(
 
     if settings.execution != "next_open":
         raise DataValidationError(f"BACKTEST_UNSUPPORTED_EXECUTION: execution={settings.execution}")
+    if delayed_exit_policy not in {"fail_at_alert", "carry_to_calendar_end"}:
+        raise DataValidationError(
+            f"BACKTEST_DELAYED_EXIT_POLICY_INVALID: policy={delayed_exit_policy}"
+        )
     strict = purpose != "diagnostic"
     calendar = list(inputs.calendar)
     if not calendar:
         raise DataValidationError("BACKTEST_MARKET_DATA_INCOMPLETE: empty trading calendar")
     signal_by_entry = _signals_by_entry_date(inputs.signals, calendar, top_n)
     price_map = _price_map(inputs.prices)
+    transition_by_predecessor = {
+        item.predecessor_ts_code: item for item in inputs.identity_transitions
+    }
     benchmark_returns = _benchmark_returns(inputs.benchmark)
     cost_policy = ExecutionCostPolicy(settings.execution_costs)
     positions: dict[str, Position] = {}
@@ -105,6 +117,9 @@ def simulate_portfolio(
         "maximum_stale_days": 0,
         "terminal_writeoffs": 0,
         "delayed_sells": 0,
+        "sell_delay_breaches": 0,
+        "maximum_delayed_exit_days": 0,
+        "resolved_after_sell_delay_breach": 0,
     }
 
     signal_start = str(inputs.signals["trade_date"].astype(str).min())
@@ -112,11 +127,21 @@ def simulate_portfolio(
     if strict:
         _validate_benchmark_coverage(inputs.benchmark, simulation_dates)
     calendar_index = {date: index for index, date in enumerate(calendar)}
+    final_entry_date = max(signal_by_entry, default=simulation_dates[0])
     for current_date in simulation_dates:
         day_cost = 0.0
 
         for code in list(positions):
             position = positions[code]
+            transition = transition_by_predecessor.get(position.ts_code)
+            if transition is not None and current_date >= transition.effective_date:
+                raise DataValidationError(
+                    "CORPORATE_ACTION_EXECUTION_UNSUPPORTED: predecessor position crosses "
+                    f"security-code transition position_id={position.position_id} "
+                    f"predecessor={transition.predecessor_ts_code} "
+                    f"successor={transition.successor_ts_code} "
+                    f"effective_date={transition.effective_date}"
+                )
             if current_date < position.target_exit_date:
                 continue
             price = price_map.get((current_date, code))
@@ -131,11 +156,22 @@ def simulate_portfolio(
                     )
                 )
                 counters["terminal_writeoffs"] += 1
+                if position.sell_delay_breached:
+                    counters["resolved_after_sell_delay_breach"] += 1
                 del positions[code]
                 continue
             if price is None or not _can_sell(price):
                 position.delayed_exit_days += 1
                 counters["delayed_sells"] += 1
+                counters["maximum_delayed_exit_days"] = max(
+                    counters["maximum_delayed_exit_days"], position.delayed_exit_days
+                )
+                if (
+                    position.delayed_exit_days > settings.sell_delay_max_days
+                    and not position.sell_delay_breached
+                ):
+                    position.sell_delay_breached = True
+                    counters["sell_delay_breaches"] += 1
                 trade_rows.append(
                     _rejected_trade(
                         current_date,
@@ -144,9 +180,15 @@ def simulate_portfolio(
                         "not_sellable",
                         top_n=top_n,
                         position_id=position.position_id,
+                        delayed_exit_days=position.delayed_exit_days,
+                        sell_delay_breached=position.sell_delay_breached,
                     )
                 )
-                if position.delayed_exit_days > settings.sell_delay_max_days and strict:
+                if (
+                    position.sell_delay_breached
+                    and strict
+                    and delayed_exit_policy == "fail_at_alert"
+                ):
                     raise DataValidationError(
                         "BACKTEST_UNRESOLVED_POSITION: maximum sell delay exceeded without "
                         f"a terminal event position_id={position.position_id} date={current_date}"
@@ -168,6 +210,8 @@ def simulate_portfolio(
                     holding_sessions=calendar_index[current_date] - position.entry_calendar_index,
                 )
             )
+            if position.sell_delay_breached:
+                counters["resolved_after_sell_delay_breach"] += 1
             del positions[code]
 
         candidates = [
@@ -271,11 +315,15 @@ def simulate_portfolio(
             }
         )
         previous_equity = equity
+        if delayed_exit_policy == "carry_to_calendar_end" and not positions:
+            if current_date >= final_entry_date:
+                break
 
     if positions and strict:
         unresolved = ",".join(sorted(position.position_id for position in positions.values()))
         raise DataValidationError(
-            f"BACKTEST_UNRESOLVED_POSITION: open positions remain at cutoff: {unresolved}"
+            "BACKTEST_UNRESOLVED_POSITION: open positions remain at governed cutoff "
+            f"date={simulation_dates[-1]} positions={unresolved}"
         )
     daily = pd.DataFrame(daily_rows)
     trades = pd.DataFrame(trade_rows)
@@ -561,6 +609,8 @@ def _filled_trade(
         "slippage": costs.slippage,
         "cost": costs.total,
         "holding_sessions": holding_sessions,
+        "delayed_exit_days": position.delayed_exit_days,
+        "sell_delay_breached": position.sell_delay_breached,
         "reason": "",
         "top_n": top_n,
     }
@@ -589,6 +639,8 @@ def _rejected_trade(
     *,
     top_n: int | None = None,
     position_id: str | None = None,
+    delayed_exit_days: int = 0,
+    sell_delay_breached: bool = False,
 ) -> dict[str, object]:
     return {
         "trade_date": date,
@@ -605,6 +657,8 @@ def _rejected_trade(
         "slippage": 0.0,
         "cost": 0.0,
         "holding_sessions": None,
+        "delayed_exit_days": delayed_exit_days,
+        "sell_delay_breached": sell_delay_breached,
         "reason": reason,
         "top_n": top_n,
     }
@@ -625,6 +679,8 @@ def _terminal_position(
             "verified_terminal_security",
             top_n=top_n,
             position_id=position.position_id,
+            delayed_exit_days=position.delayed_exit_days,
+            sell_delay_breached=position.sell_delay_breached,
         ),
         "status": "terminal_writeoff",
         "shares": position.shares,
@@ -687,6 +743,9 @@ def _accounting_summary(
         if not trades.empty
         else 0,
         "delayed_sells": counters["delayed_sells"],
+        "sell_delay_breaches": counters["sell_delay_breaches"],
+        "maximum_delayed_exit_days": counters["maximum_delayed_exit_days"],
+        "resolved_after_sell_delay_breach": counters["resolved_after_sell_delay_breach"],
         "commission_total": _column_sum(trades, "commission"),
         "stamp_duty_total": _column_sum(trades, "stamp_duty"),
         "transfer_fee_total": _column_sum(trades, "transfer_fee"),

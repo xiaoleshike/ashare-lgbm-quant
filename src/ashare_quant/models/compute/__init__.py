@@ -4,7 +4,7 @@ from ashare_quant.models.compute.backend import (
     resolve_training_backend,
     training_backend_parameters,
 )
-from ashare_quant.models.compute.probe import probe_training_backend
+from ashare_quant.models.compute.probe import lightgbm_build_identity, probe_training_backend
 from ashare_quant.models.compute.schemas import (
     TrainingBackend,
     TrainingBackendProbeResult,
@@ -15,6 +15,7 @@ __all__ = [
     "TrainingBackend",
     "TrainingBackendProbeResult",
     "TrainingRuntimeMetadata",
+    "lightgbm_build_identity",
     "probe_training_backend",
     "resolve_training_backend",
     "training_backend_parameters",

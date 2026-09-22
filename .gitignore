@@ -15,6 +15,9 @@ htmlcov/
 /deploy/systemd/*.local
 /config/local.yaml
 /config/*.local.yaml
+/config/security_identity/security_lifecycle_events.json
+/export.sh
+/lightgbm-cuda-wheel/
 
 # Local data, immutable runtime artifacts, and operational state.
 /data/

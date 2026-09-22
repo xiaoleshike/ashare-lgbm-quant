@@ -23,6 +23,7 @@ from ashare_quant.config.settings import (
 )
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 
 
 def test_evidence_model_manifest_is_required(tmp_path: Path) -> None:
@@ -163,11 +164,98 @@ def test_execution_price_loader_joins_raw_alias_to_canonical_universe(tmp_path: 
         identity_resolver=SecurityIdentityResolver.from_path(
             Path("config/security_identity/bse_code_aliases.json")
         ),
+        ts_codes={"920680.BJ"},
     )
 
     assert prices.loc[0, "ts_code"] == "920680.BJ"
     assert prices.loc[0, "close"] == pytest.approx(7.1)
     assert bool(prices.loc[0, "can_buy"])
+
+
+def test_execution_price_loader_applies_authoritative_listing_suspension(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    processed_root = tmp_path / "processed"
+    for dataset in ("daily", "stk_limit"):
+        (raw_root / dataset / "year=2019" / "month=05").mkdir(parents=True)
+    universe_dir = processed_root / "universe_daily" / "year=2019" / "month=05"
+    universe_dir.mkdir(parents=True)
+    pd.DataFrame(columns=["trade_date", "ts_code", "open", "close"]).to_parquet(
+        raw_root / "daily" / "year=2019" / "month=05" / "data.parquet"
+    )
+    pd.DataFrame(columns=["trade_date", "ts_code", "up_limit", "down_limit"]).to_parquet(
+        raw_root / "stk_limit" / "year=2019" / "month=05" / "data.parquet"
+    )
+    pd.DataFrame(
+        {
+            "trade_date": ["20190513"],
+            "ts_code": ["300028.SZ"],
+            "is_suspended": [False],
+            "is_st": [False],
+            "is_listed": [True],
+            "delist_date": ["20200803"],
+        }
+    ).to_parquet(universe_dir / "data.parquet")
+
+    prices = load_execution_prices(
+        raw_root,
+        processed_root,
+        "20190513",
+        "20190513",
+        1e-6,
+        lifecycle_resolver=SecurityLifecycleResolver.from_path(
+            Path("config/security_identity/security_lifecycle_events.json")
+        ),
+        ts_codes={"300028.SZ"},
+    )
+
+    row = prices.iloc[0]
+    assert bool(row["is_suspended"])
+    assert not bool(row["can_buy"])
+    assert not bool(row["can_sell"])
+    assert pd.isna(row["close"])
+
+
+def test_execution_price_loader_normalizes_delist_date_as_terminal_boundary(
+    tmp_path: Path,
+) -> None:
+    raw_root = tmp_path / "raw"
+    processed_root = tmp_path / "processed"
+    for dataset in ("daily", "stk_limit"):
+        (raw_root / dataset / "year=2024" / "month=01").mkdir(parents=True)
+    universe_dir = processed_root / "universe_daily" / "year=2024" / "month=01"
+    universe_dir.mkdir(parents=True)
+    pd.DataFrame(columns=["trade_date", "ts_code", "open", "close"]).to_parquet(
+        raw_root / "daily" / "year=2024" / "month=01" / "data.parquet"
+    )
+    pd.DataFrame(columns=["trade_date", "ts_code", "up_limit", "down_limit"]).to_parquet(
+        raw_root / "stk_limit" / "year=2024" / "month=01" / "data.parquet"
+    )
+    pd.DataFrame(
+        {
+            "trade_date": ["20240110"],
+            "ts_code": ["000001.SZ"],
+            "is_suspended": [False],
+            "is_st": [False],
+            # Legacy processed snapshots used an inclusive delist boundary.
+            "is_listed": [True],
+            "delist_date": ["20240110"],
+        }
+    ).to_parquet(universe_dir / "data.parquet")
+
+    prices = load_execution_prices(
+        raw_root,
+        processed_root,
+        "20240110",
+        "20240110",
+        1e-6,
+        ts_codes={"000001.SZ"},
+    )
+
+    row = prices.iloc[0]
+    assert not bool(row["is_listed"])
+    assert not bool(row["can_buy"])
+    assert not bool(row["can_sell"])
+    assert row["delist_date"] == "20240110"
 
 
 def test_unexplained_missing_quote_fails_evidence_mode() -> None:
@@ -204,6 +292,61 @@ def test_sell_delay_never_implies_zero_value_and_fails_closed() -> None:
             top_n=1,
             settings=_settings(holding_period_days=1, sell_delay_max_days=0),
             purpose="executable_validation",
+        )
+
+
+def test_long_suspension_carries_past_alert_and_sells_on_authoritative_resume() -> None:
+    spring_festival = {"20170127", "20170130", "20170131", "20170201", "20170202"}
+    suspension_dates = tuple(
+        value.strftime("%Y%m%d")
+        for value in pd.bdate_range("2017-01-03", "2017-03-28")
+        if value.strftime("%Y%m%d") not in spring_festival
+    )
+    dates = ("20161229", "20161230", *suspension_dates, "20170329")
+    assert len(suspension_dates) == 56
+    prices = [_price(dates[0], 10.0, 10.0), _price(dates[1], 10.0, 10.0)]
+    prices.extend(
+        _price(date, np.nan, np.nan, can_sell=False, suspended=True) for date in dates[2:58]
+    )
+    prices.append(_price(dates[58], 9.0, 9.0))
+
+    result = simulate_portfolio(
+        _inputs(prices, calendar=dates),
+        top_n=1,
+        settings=_settings(holding_period_days=5, sell_delay_max_days=20),
+        purpose="executable_validation",
+        delayed_exit_policy="carry_to_calendar_end",
+    )
+
+    sell = result.trades[
+        (result.trades["side"] == "sell") & (result.trades["status"] == "filled")
+    ].iloc[0]
+    stale = result.holdings[result.holdings["valuation_status"] == "STALE_SUSPENDED"]
+    assert sell["trade_date"] == "20170329"
+    assert sell["delayed_exit_days"] == 52
+    assert bool(sell["sell_delay_breached"])
+    assert result.accounting_summary["sell_delay_breaches"] == 1
+    assert result.accounting_summary["maximum_delayed_exit_days"] == 52
+    assert result.accounting_summary["resolved_after_sell_delay_breach"] == 1
+    assert result.accounting_summary["unresolved_positions"] == 0
+    assert np.allclose(stale["market_value"], stale["shares"] * 10.0)
+    assert len(result.trades[result.trades["side"] == "buy"]) == 1
+
+
+def test_long_suspension_unresolved_at_governed_cutoff_fails_closed() -> None:
+    dates = tuple(value.strftime("%Y%m%d") for value in pd.bdate_range("2024-01-02", periods=30))
+    prices = [_price(dates[0], 10.0, 10.0), _price(dates[1], 10.0, 10.0)]
+    prices.extend(
+        _price(date, np.nan, np.nan, can_sell=False, suspended=True) for date in dates[2:]
+    )
+
+    with pytest.raises(DataValidationError, match="open positions remain at governed cutoff"):
+        simulate_portfolio(
+            _inputs(prices, calendar=dates),
+            top_n=1,
+            settings=_settings(holding_period_days=2, sell_delay_max_days=5),
+            purpose="executable_validation",
+            delayed_exit_policy="carry_to_calendar_end",
         )
 
 

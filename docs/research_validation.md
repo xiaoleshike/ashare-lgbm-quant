@@ -4,6 +4,12 @@ Phase 2.8.2I-B separates repeatable historical robustness analysis from genuinel
 evidence. It does not select a model automatically and does not mutate the Registry, Champion,
 Promotion, Paper Trading, or production state.
 
+Test and research configurations derive the production lock from the configured paper-trading
+state root: its sibling `runs/.production.lock` is the single lock for that isolated project state.
+The default `paper_trading` root therefore continues to resolve to the real repository
+`runs/.production.lock`. A temporary test configuration neither observes nor deletes that real
+lock, while a lock held in the temporary state still blocks the tested mutation.
+
 ## Research Policy
 
 The versioned policy is [`config/research_policy.yaml`](../config/research_policy.yaml). Its
@@ -55,7 +61,10 @@ reference model for model type, semantic defaults, and comparison, but its featu
 constrain a new research feature set. A new plan freezes `feature_set_id`, ordered feature-list
 hash, and exact provenance artifact hash. Walk-forward plan schema v4 passes that lineage to
 multi-horizon plan schema v3 and the multi-fold runner verifies all three identities match.
-Multi-fold evidence uses schema v2. Earlier feature provenance schema v1 remains readable, but a
+Multi-fold evidence produced under the corrected evaluation-universe contract uses schema v3.
+Schema-v2 multi-fold evidence remains hash-valid and readable as `LEGACY_READ_ONLY`, but it is not
+reinterpreted as corrected evaluation evidence. Earlier feature provenance schema v1 remains
+readable, but a
 schema-v1 `GOVERNED` artifact is path-bound legacy evidence and is rejected for new governed plans;
 `LEGACY_PROVENANCE_INCOMPLETE` remains explicitly legacy and is never upgraded in place.
 
@@ -69,8 +78,13 @@ window was invented.
 ## Multi-Fold Execution
 
 The runner consumes one exact multi-horizon experiment manifest and executes every referenced
-selection and historical-holdout fold. Each fold uses the common `RankerDataLoader`, `fit_ranker`,
-`evaluate_ranker`, backend resolver, and, when required, the shared Phase I-A
+selection and historical-holdout fold. Training and fit-validation continue to require mature
+labels. Evaluation first scores the signal-date model universe without reading `labels_forward`,
+then freezes the complete prediction keys and scores. Ranking metrics left-join mature labels to
+those frozen predictions, while executable simulation receives the unfiltered frozen predictions.
+Unavailable future labels can reduce metric coverage but cannot remove a stock from the original
+rank or replace it in Top-N. Each fold uses the common `RankerDataLoader`, `fit_ranker`, backend
+resolver, and, when required, the shared Phase I-A
 `simulate_portfolio` accounting engine. It does not register the fold model.
 
 Artifacts are published under:
@@ -101,11 +115,98 @@ directory set; every fold manifest; and every model, prediction, metric, executa
 importance child hash. Status, completed-run resume, and recovery all reuse this validator. Any
 tamper returns a failure or `ACTION_REQUIRED`; completed evidence is never regenerated or repaired.
 
-Ranking evidence includes Rank IC mean/median/std/ICIR, positive ratio, NDCG@10/50, coverage, date
-count, and security count. Executable evidence requires accounting schema v2 and reports Top10,
-Top20, and Top50 results. Aggregation reports distributions across folds: mean, median, standard
-deviation, minimum, maximum, positive-fold ratio, and best/worst fold index. Feature-importance
-rank dispersion is observational only.
+Ranking evidence includes Rank IC mean/median/std/ICIR, positive ratio, NDCG@10/50, date count,
+security count, and separate prediction and label coverage. Per-date diagnostics record expected
+universe rows, feature rows, scored/finite-score rows, mature/available/unavailable labels, and
+unavailable reasons. Top-fraction label proxies freeze membership before labels are joined and
+state requested, available, and missing counts.
+
+Feature-selection isolation is evaluated separately from parameter-fit isolation. The diagnostics
+selection end is advanced through the configured forward-label maturity sessions using the
+exchange calendar. A fold is `STRICT_OOS` only when both parameter fitting and feature-selection
+information precede evaluation. Earlier folds remain inspectable as
+`RETROSPECTIVE_FIXED_FEATURE_REPLAY`, but their performance appears only in descriptive grouped
+statistics, not in the strict-OOS aggregate. Executable evidence requires accounting schema v2 and
+reports Top10, Top20, and Top50 results. Aggregation reports distributions across eligible folds:
+mean, median, standard deviation, minimum, maximum, positive-fold ratio, and best/worst fold index.
+Feature-importance rank dispersion is observational only.
+
+Schema-v3 run identity separates modeling identity from execution identity. Execution identity
+binds the requested/effective training backend, LightGBM version, evaluation contract, accounting
+schema, execution mode, holding period, sell-delay policy, and effective-dated cost-policy hash.
+Changing CPU/CUDA, cost policy, or evaluation contract creates a different immutable run and cannot
+resume into old evidence.
+
+Evaluation contract v7 includes the lifecycle-audit lineage and preserves the contract-v5
+separation of delayed-exit alerts from final resolution for walk-forward
+execution evidence. The configured 20-session sell-delay value remains an auditable breach
+threshold. A breached position is never written off merely for exceeding it: walk-forward
+simulation carries an explicitly suspended position to the first authoritative tradable open,
+records the maximum delay and resolution date, and stops once all post-evaluation holdings resolve.
+The final execution cutoff is the earlier of the immutable processed-universe maximum date and the
+day before the prospective lockbox. Data is loaded in bounded session chunks as an operational
+optimization, but a chunk boundary is not an economic write-off or final evidence cutoff. No new
+signals are created in the tail. Positions still open at the governed cutoff fail closed.
+
+The execution identity also binds the version and hash of the explicit security-lifecycle policy.
+That policy covers exchange-authorized listing-suspension intervals which ordinary `suspend_d`
+does not necessarily continue to publish. Missing quotes never create lifecycle evidence.
+
+New executable walk-forward runs also require an intact `PASS` lifecycle scan manifest via
+`--lifecycle-scan-manifest`. The gate validates the root and every child hash, exact raw and
+processed source inventory, identity mapping, lifecycle policy/evidence hashes, and date coverage
+through the governed execution cutoff. The scan lineage is part of execution identity, not model
+semantic identity. Ranking-only research does not require this execution-data gate.
+
+The governed preflight order is:
+
+```text
+security-identity-scan
+    -> security-lifecycle-scan
+    -> PASS
+    -> evidence-grade executable walk-forward
+```
+
+`classification != safe execution evidence`: `MISSING_RAW_DATA`, `UNRESOLVED`, policy collisions,
+and lifecycle boundary inconsistencies all keep the scan `BLOCKED`. Existing walk-forward artifacts
+without this lineage remain immutable and readable as legacy evidence; they are not upgraded in
+place.
+
+When preflight is blocked, run `security-lifecycle-triage` before acquiring new evidence or
+rebuilding research data. Triage clusters every residual interval by source shape, duration,
+exchange, regulatory period and nearby evidence, but its candidate categories never authorize
+execution. Terminal and known listing-suspension reconciliation distinguish stale processed
+universe snapshots from missing real-world lifecycle evidence.
+
+A universe rebuilt under a changed lifecycle overlay invalidates the current governed status of
+the dependent feature, label, diagnostics, feature-provenance, walk-forward-plan, horizon-plan and
+walk-forward-evidence chain. Those artifacts are retained as immutable prior-contract evidence;
+new artifacts must be generated from the new isolated universe after lifecycle preflight passes.
+
+Lifecycle scanner schema v3 uses the daily-snapshot `suspend_d` contract. Schema v4 preserves that
+contract and additionally binds a separate official security-code transition graph. Boundary
+findings are event-level and carry `INFO`, `WARNING`, or blocking `BOUNDARY_INCONSISTENCY` severity. Provider
+shape diagnostics do not block execution by themselves. A recalibrated scan may explicitly name a
+prior immutable manifest with `--supersedes-scan-manifest` and
+`--supersession-reason SUSPEND_D_SEMANTICS_RECALIBRATION`; the new artifact publishes a hash-bound
+old/new comparison without editing the prior scan.
+Contract-v3 through contract-v6 evidence remain immutable and hash-readable as
+`LEGACY_READ_ONLY`; they cannot be resumed as contract-v7 evidence.
+
+## Fold Backend Benchmark
+
+The existing backend benchmark supports either a legacy immutable model artifact or a current
+schema-v3 walk-forward fold. Fold mode validates the entire walk-forward root, requires exact
+governed feature provenance, and permits selection-period folds only. Omitting `--fold-id` chooses
+the chronologically latest selection fold without consulting IC or return. It loads only that
+fold's train and validation windows.
+
+Benchmark identity binds actual row content, row order, dtypes, query groups, relevance labels,
+ordered features, semantic parameters, horizon, seed, and the loaded LightGBM binary hash. CPU and
+CUDA comparison rejects any mismatch, duplicate prediction key, non-finite prediction, missing
+mandatory artifact, or path-escaping manifest entry. It reports pooled and per-date correlations
+plus daily Top10/20/50 overlap; speed cannot override a correctness failure. CUDA remains optional
+for ordinary CPU research and unavailable CUDA fails closed without publishing a CUDA result.
 
 Negative performance does not make a fold technically invalid. Technical validity means chronology,
 identity, OOS evaluation, source integrity, complete predictions, current accounting evidence when
@@ -152,3 +253,19 @@ ashare-quant --config config/default.yaml models walk-forward-recovery \
 
 Status and recovery validate the complete root-to-leaf evidence chain. Recovery never repairs or
 deletes artifacts.
+
+Run a backend benchmark against a specific corrected walk-forward selection fold:
+
+```bash
+ashare-quant --config config/default.yaml models \
+  --processed-root "$RESEARCH_PROCESSED" \
+  --reports-root "$RESEARCH_REPORTS" \
+  benchmark-training-backend \
+  --backend cpu \
+  --walk-forward-run-id "$H5_RUN_ID" \
+  --fold-id FOLD_ID \
+  --feature-provenance "$FEATURE_SET_JSON"
+```
+
+The same command with `--backend cuda` is valid only after the explicit CUDA capability probe
+succeeds. Compare the resulting immutable artifacts with `compare-training-backends`.

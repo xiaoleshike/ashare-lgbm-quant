@@ -7,6 +7,7 @@ import pandas as pd
 from ashare_quant.config.settings import UniverseSettings
 from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.universe import UniverseBuilder, UniverseStore, build_universe_frame
 from ashare_quant.universe.builder import add_listing_flags, build_candidates, year_date_ranges
@@ -249,6 +250,125 @@ def test_920305_alias_suspension_and_resume_are_canonicalized() -> None:
     assert "st" in str(frame.loc["20250506", "exclude_reason"])
 
 
+def test_authoritative_listing_suspension_extends_beyond_suspend_d_rows() -> None:
+    dates = ["20190510", "20190513", "20200617", "20200618"]
+    inputs = {
+        "stock_basic": pd.DataFrame(
+            {
+                "ts_code": ["300028.SZ"],
+                "name": ["GEEYA"],
+                "market": ["GEM"],
+                "industry": ["Test"],
+                "list_date": ["20091030"],
+                "delist_date": ["20200803"],
+            }
+        ),
+        "trade_cal": pd.DataFrame({"cal_date": dates, "is_open": [1] * len(dates)}),
+        "daily": pd.DataFrame(
+            {
+                "ts_code": ["300028.SZ", "300028.SZ"],
+                "trade_date": ["20190510", "20200618"],
+                "open": [0.77, 0.69],
+                "high": [0.77, 0.69],
+                "low": [0.77, 0.69],
+                "close": [0.77, 0.69],
+                "amount": [1000.0, 1000.0],
+            }
+        ),
+        "daily_basic": pd.DataFrame(columns=["ts_code", "trade_date"]),
+        "suspend_d": pd.DataFrame(
+            {
+                "ts_code": ["300028.SZ"],
+                "trade_date": ["20190510"],
+                "suspend_type": ["S"],
+            }
+        ),
+        "stk_limit": pd.DataFrame(columns=["ts_code", "trade_date", "up_limit", "down_limit"]),
+        "namechange": pd.DataFrame(),
+    }
+
+    frame = build_universe_frame(
+        inputs,
+        UniverseSettings(
+            min_list_trading_days=0,
+            liquidity_window_days=1,
+            min_avg_amount=0.0,
+            require_full_liquidity_window=False,
+        ),
+        dates[0],
+        dates[-1],
+        lifecycle_resolver=SecurityLifecycleResolver.from_path(
+            Path("config/security_identity/security_lifecycle_events.json")
+        ),
+    ).set_index("trade_date")
+
+    assert bool(frame.loc["20190513", "is_suspended"])
+    assert bool(frame.loc["20190513", "is_listing_suspended"])
+    assert not bool(frame.loc["20190513", "is_ordinary_suspended"])
+    assert frame.loc["20190513", "lifecycle_state"] == "LISTING_SUSPENSION"
+    assert bool(frame.loc["20190513", "is_listed"])
+    assert bool(frame.loc["20200617", "is_suspended"])
+    assert not bool(frame.loc["20200618", "is_suspended"])
+    assert frame.loc["20200618", "lifecycle_state"] == "ACTIVE"
+    assert not bool(frame.loc["20190513", "can_sell"])
+
+
+def test_intraday_suspend_snapshot_does_not_create_full_day_suspension() -> None:
+    inputs = fixture_inputs()
+    inputs["suspend_d"] = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "trade_date": ["20240105"],
+            "suspend_type": ["S"],
+            "suspend_timing": ["09:30-10:00"],
+        }
+    )
+    frame = build_universe_frame(
+        inputs,
+        UniverseSettings(
+            min_list_trading_days=0,
+            liquidity_window_days=1,
+            min_avg_amount=0.0,
+            require_full_liquidity_window=False,
+        ),
+        "20240105",
+        "20240105",
+    ).set_index("ts_code")
+
+    row = frame.loc["000001.SZ"]
+    assert row["lifecycle_state"] == "ACTIVE"
+    assert not bool(row["is_ordinary_suspended"])
+    assert not bool(row["is_suspended"])
+
+
+def test_terminal_state_takes_precedence_over_suspension() -> None:
+    inputs = fixture_inputs()
+    inputs["suspend_d"] = pd.DataFrame(
+        {
+            "ts_code": ["000008.SZ"],
+            "trade_date": ["20240105"],
+            "suspend_type": ["S"],
+        }
+    )
+    frame = build_universe_frame(
+        inputs,
+        UniverseSettings(
+            min_list_trading_days=0,
+            liquidity_window_days=1,
+            min_avg_amount=0.0,
+            require_full_liquidity_window=False,
+        ),
+        "20240105",
+        "20240105",
+    ).set_index("ts_code")
+
+    row = frame.loc["000008.SZ"]
+    assert row["lifecycle_state"] == "TERMINAL"
+    assert bool(row["is_terminal"])
+    assert not bool(row["is_listed"])
+    assert not bool(row["is_suspended"])
+
+
 def test_daily_only_candidate_does_not_infer_delist_date_from_last_quote() -> None:
     daily = pd.DataFrame(
         {
@@ -309,7 +429,7 @@ def test_authoritative_delist_date_is_preserved_and_effective_dated() -> None:
     listed = add_listing_flags(base, ["20240109", "20240110", "20240111"])
 
     assert candidate.iloc[0]["delist_date"] == "20240110"
-    assert listed["is_listed"].tolist() == [True, True, False]
+    assert listed["is_listed"].tolist() == [True, False, False]
 
 
 def test_universe_validation_detects_duplicates() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from pathlib import Path
 
 import duckdb
@@ -14,6 +15,7 @@ from ashare_quant.backtest.engine import BacktestInputs
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 
 type DataFrame = pd.DataFrame
 
@@ -65,6 +67,9 @@ def load_backtest_inputs(
         identity_resolver=SecurityIdentityResolver.from_path(
             settings.security_identity.mapping_path
         ),
+        lifecycle_resolver=SecurityLifecycleResolver.from_path(
+            settings.security_identity.lifecycle_path
+        ),
     )
     benchmark = load_benchmark(
         raw_root, settings.backtest.benchmark_index_code, price_start, price_end
@@ -77,19 +82,29 @@ def load_backtest_inputs(
     )
 
 
-def load_calendar(raw_root: Path, start_date: str, end_date: str, holding_period: int) -> list[str]:
+def load_calendar(
+    raw_root: Path,
+    start_date: str,
+    end_date: str,
+    holding_period: int | None,
+    *,
+    maximum_date: str | None = None,
+) -> list[str]:
     """Return open trading dates from start through the required exit buffer."""
 
     glob = raw_root / "trade_cal" / "**" / "*.parquet"
+    maximum_clause = "AND CAST(cal_date AS VARCHAR) <= ?" if maximum_date is not None else ""
     query = f"""
         SELECT CAST(cal_date AS VARCHAR) AS trade_date
         FROM read_parquet('{glob.as_posix()}', hive_partitioning=false)
         WHERE CAST(is_open AS INTEGER) = 1
           AND CAST(cal_date AS VARCHAR) >= ?
+          {maximum_clause}
         ORDER BY cal_date
     """  # noqa: S608 -- local configured Parquet path
+    parameters = [start_date] if maximum_date is None else [start_date, maximum_date]
     with duckdb.connect() as connection:
-        frame = connection.execute(query, [start_date]).fetch_df()
+        frame = connection.execute(query, parameters).fetch_df()
     dates = frame["trade_date"].astype(str).tolist()
     if end_date not in dates:
         dates = [date for date in dates if date <= end_date]
@@ -98,6 +113,12 @@ def load_calendar(raw_root: Path, start_date: str, end_date: str, holding_period
         end_index = len(dates) - 1
     else:
         end_index = dates.index(end_date)
+    if holding_period is None:
+        if maximum_date is None:
+            raise DataValidationError(
+                "BACKTEST_EXECUTION_DATA_CUTOFF_INVALID: unbounded calendar extension"
+            )
+        return dates
     return dates[: min(len(dates), end_index + holding_period + 2)]
 
 
@@ -144,12 +165,34 @@ def load_execution_prices(
     tolerance: float,
     *,
     identity_resolver: SecurityIdentityResolver | None = None,
+    lifecycle_resolver: SecurityLifecycleResolver | None = None,
+    ts_codes: Collection[str] | None = None,
 ) -> DataFrame:
     """Load next-open tradability fields without using label outputs."""
 
     daily_glob = raw_root / "daily" / "**" / "*.parquet"
     limit_glob = raw_root / "stk_limit" / "**" / "*.parquet"
     universe_glob = processed_root / "universe_daily" / "**" / "*.parquet"
+    resolver = identity_resolver or SecurityIdentityResolver.empty()
+    canonical_codes = (
+        tuple(sorted({str(code).strip().upper() for code in ts_codes}))
+        if ts_codes is not None
+        else ()
+    )
+    if ts_codes is not None and not canonical_codes:
+        raise DataValidationError("BACKTEST_MARKET_DATA_INCOMPLETE: execution code set is empty")
+    universe_code_join = (
+        "INNER JOIN selected_canonical_codes AS selected "
+        "ON CAST(u.ts_code AS VARCHAR) = selected.ts_code"
+        if canonical_codes
+        else ""
+    )
+    raw_code_join = (
+        "INNER JOIN selected_source_codes AS selected "
+        "ON CAST(source.ts_code AS VARCHAR) = selected.ts_code"
+        if canonical_codes
+        else ""
+    )
     universe_query = f"""
         SELECT
             CAST(u.trade_date AS VARCHAR) AS trade_date,
@@ -159,32 +202,42 @@ def load_execution_prices(
             CAST(u.is_listed AS BOOLEAN) AS is_listed,
             CAST(u.delist_date AS VARCHAR) AS delist_date
         FROM read_parquet('{universe_glob.as_posix()}', hive_partitioning=false) AS u
+        {universe_code_join}
         WHERE CAST(u.trade_date AS VARCHAR) BETWEEN ? AND ?
         ORDER BY u.trade_date, u.ts_code
     """  # noqa: S608 -- local configured Parquet path
     daily_query = f"""
-        SELECT CAST(trade_date AS VARCHAR) AS trade_date,
-               CAST(ts_code AS VARCHAR) AS ts_code,
-               CAST(open AS DOUBLE) AS open,
-               CAST(close AS DOUBLE) AS close
-        FROM read_parquet('{daily_glob.as_posix()}', hive_partitioning=false)
-        WHERE CAST(trade_date AS VARCHAR) BETWEEN ? AND ?
+        SELECT CAST(source.trade_date AS VARCHAR) AS trade_date,
+               CAST(source.ts_code AS VARCHAR) AS ts_code,
+               CAST(source.open AS DOUBLE) AS open,
+               CAST(source.close AS DOUBLE) AS close
+        FROM read_parquet('{daily_glob.as_posix()}', hive_partitioning=false) AS source
+        {raw_code_join}
+        WHERE CAST(source.trade_date AS VARCHAR) BETWEEN ? AND ?
     """  # noqa: S608 -- local configured Parquet path
     limit_query = f"""
-        SELECT CAST(trade_date AS VARCHAR) AS trade_date,
-               CAST(ts_code AS VARCHAR) AS ts_code,
-               CAST(up_limit AS DOUBLE) AS up_limit,
-               CAST(down_limit AS DOUBLE) AS down_limit
-        FROM read_parquet('{limit_glob.as_posix()}', hive_partitioning=false)
-        WHERE CAST(trade_date AS VARCHAR) BETWEEN ? AND ?
+        SELECT CAST(source.trade_date AS VARCHAR) AS trade_date,
+               CAST(source.ts_code AS VARCHAR) AS ts_code,
+               CAST(source.up_limit AS DOUBLE) AS up_limit,
+               CAST(source.down_limit AS DOUBLE) AS down_limit
+        FROM read_parquet('{limit_glob.as_posix()}', hive_partitioning=false) AS source
+        {raw_code_join}
+        WHERE CAST(source.trade_date AS VARCHAR) BETWEEN ? AND ?
     """  # noqa: S608 -- local configured Parquet path
     with duckdb.connect() as connection:
+        if canonical_codes:
+            connection.register(
+                "selected_canonical_codes", pd.DataFrame({"ts_code": canonical_codes})
+            )
+            connection.register(
+                "selected_source_codes",
+                pd.DataFrame({"ts_code": resolver.source_codes_for(set(canonical_codes))}),
+            )
         frame = connection.execute(universe_query, [start_date, end_date]).fetch_df()
         daily = connection.execute(daily_query, [start_date, end_date]).fetch_df()
         limits = connection.execute(limit_query, [start_date, end_date]).fetch_df()
     if frame.empty:
         raise DataValidationError(f"no daily prices for backtest {start_date}..{end_date}")
-    resolver = identity_resolver or SecurityIdentityResolver.empty()
     daily = resolver.canonicalize_frame(daily, "daily")
     limits = resolver.canonicalize_frame(limits, "stk_limit")
     frame = frame.merge(
@@ -197,8 +250,12 @@ def load_execution_prices(
         how="left",
     )
     frame["is_suspended"] = frame["is_suspended"].fillna(False).astype(bool)
+    frame = (lifecycle_resolver or SecurityLifecycleResolver.empty()).apply_suspension(frame)
     frame["is_st"] = frame["is_st"].fillna(False).astype(bool)
     frame["is_listed"] = frame["is_listed"].fillna(False).astype(bool)
+    delist_dates = frame["delist_date"].astype("string")
+    terminal_effective = delist_dates.notna() & (frame["trade_date"] >= delist_dates)
+    frame.loc[terminal_effective, "is_listed"] = False
     frame["can_buy"] = (
         frame["is_listed"]
         & ~frame["is_suspended"]

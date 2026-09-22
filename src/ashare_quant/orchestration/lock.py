@@ -18,6 +18,23 @@ from typing import IO
 DEFAULT_PRODUCTION_LOCK_PATH = Path("runs/.production.lock")
 
 
+def production_runs_root(state_root: Path) -> Path:
+    """Resolve the run-state directory beside a configured project state root.
+
+    The default paper-trading root is ``paper_trading``, so production keeps using
+    ``runs``.  Isolated configurations rooted in a temporary directory get an
+    independent run directory and lock without weakening lock enforcement.
+    """
+
+    return Path(state_root).parent / "runs"
+
+
+def production_lock_path(state_root: Path) -> Path:
+    """Resolve the single production lock inside the configured run-state root."""
+
+    return production_runs_root(state_root) / DEFAULT_PRODUCTION_LOCK_PATH.name
+
+
 @dataclass(frozen=True, slots=True)
 class ProductionLockOwner:
     """Metadata describing the process that acquired the production lock."""

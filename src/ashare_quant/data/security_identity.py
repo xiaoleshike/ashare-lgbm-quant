@@ -160,6 +160,11 @@ class SecurityIdentityResolver:
 
         return frozenset(self._by_source)
 
+    def alias_records(self) -> tuple[SecurityAlias, ...]:
+        """Return immutable explicit aliases for vectorized audit consumers."""
+
+        return self._aliases
+
     def provenance(self) -> dict[str, str | int]:
         """Return stable mapping provenance for processed manifests."""
 
@@ -183,6 +188,16 @@ class SecurityIdentityResolver:
                 f"source_code={code} as_of_date={as_of_date}"
             )
         return next(iter(canonical_codes))
+
+    def source_codes_for(self, canonical_codes: set[str]) -> tuple[str, ...]:
+        """Return canonical codes plus every explicit source alias that can resolve to them."""
+
+        normalized = {str(code).strip().upper() for code in canonical_codes}
+        sources = set(normalized)
+        sources.update(
+            alias.source_code for alias in self._aliases if alias.canonical_code in normalized
+        )
+        return tuple(sorted(sources))
 
     def canonicalize_frame(self, frame: DataFrame, dataset_name: str) -> DataFrame:
         """Canonicalize a copied dataset frame and validate alias collisions."""

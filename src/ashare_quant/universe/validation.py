@@ -56,6 +56,29 @@ def validate_universe_frame(frame: DataFrame) -> UniverseValidationResult:
     if (suspended & frame["can_sell"].astype(bool)).any():
         errors.append("suspended stocks cannot be can_sell=true")
 
+    lifecycle_columns = {
+        "lifecycle_state",
+        "is_ordinary_suspended",
+        "is_listing_suspended",
+        "is_terminal",
+    }
+    if lifecycle_columns.issubset(frame.columns):
+        ordinary = frame["is_ordinary_suspended"].astype(bool)
+        listing = frame["is_listing_suspended"].astype(bool)
+        terminal = frame["is_terminal"].astype(bool)
+        expected = pd.Series("ACTIVE", index=frame.index)
+        expected.loc[ordinary] = "ORDINARY_SUSPENSION"
+        expected.loc[listing] = "LISTING_SUSPENSION"
+        expected.loc[terminal] = "TERMINAL"
+        if not frame["lifecycle_state"].astype(str).eq(expected).all():
+            errors.append("lifecycle_state conflicts with lifecycle flags")
+        if (terminal & frame["is_listed"].astype(bool)).any():
+            errors.append("terminal stocks cannot be is_listed=true")
+        if (listing & ~frame["is_listed"].astype(bool)).any():
+            errors.append("listing-suspended stocks remain in the listed lifecycle")
+        if ((ordinary | listing) & ~suspended).any():
+            errors.append("suspension lifecycle state implies is_suspended=true")
+
     if (frame["is_limit_up"].astype(bool) & frame["can_buy"].astype(bool)).any():
         errors.append("limit-up stocks must be can_buy=false under default execution")
     if (frame["is_limit_down"].astype(bool) & frame["can_sell"].astype(bool)).any():

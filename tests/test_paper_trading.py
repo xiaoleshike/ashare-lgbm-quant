@@ -16,6 +16,13 @@ from ashare_quant.config.settings import (
 )
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.registry import ModelRegistry
+from ashare_quant.orchestration import (
+    DEFAULT_PRODUCTION_LOCK_PATH,
+    acquire_production_lock,
+    production_lock_path,
+    production_runs_root,
+    release_production_lock,
+)
 from ashare_quant.paper_trading import service as paper_service_module
 from ashare_quant.paper_trading.service import PaperTradingService
 from ashare_quant.paper_trading.signals import PaperSignal, _combine_percentile_rankings
@@ -380,6 +387,42 @@ def test_paper_trading_init_cli(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert "paper_trading_init: accounts=1 created=1" in capsys.readouterr().out
 
 
+def test_paper_cli_uses_configured_state_lock_not_repository_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    isolated = tmp_path / "isolated"
+    repository.mkdir()
+    monkeypatch.chdir(repository)
+    repository_lock = acquire_production_lock(
+        DEFAULT_PRODUCTION_LOCK_PATH, command="real production fixture"
+    )
+    original_owner = DEFAULT_PRODUCTION_LOCK_PATH.read_text(encoding="utf-8")
+    config = _write_paper_cli_config(isolated)
+    try:
+        assert main(["--config", str(config), "paper-trading", "init"]) == 0
+        assert DEFAULT_PRODUCTION_LOCK_PATH.read_text(encoding="utf-8") == original_owner
+    finally:
+        release_production_lock(repository_lock)
+
+
+def test_paper_cli_blocks_on_configured_state_lock(tmp_path: Path) -> None:
+    config = _write_paper_cli_config(tmp_path)
+    lock = acquire_production_lock(
+        production_lock_path(tmp_path / "paper"), command="isolated production fixture"
+    )
+    try:
+        assert main(["--config", str(config), "paper-trading", "init"]) == 3
+    finally:
+        release_production_lock(lock)
+
+
+def test_default_project_state_keeps_repository_production_lock() -> None:
+    assert production_runs_root(Path("paper_trading")) == Path("runs")
+    assert production_lock_path(Path("paper_trading")) == DEFAULT_PRODUCTION_LOCK_PATH
+
+
 def paper_fixture(tmp_path: Path, *, top_n: int = 1) -> PaperTradingService:
     _write_market_fixture(tmp_path)
     settings = _settings(
@@ -434,6 +477,32 @@ def _paths(tmp_path: Path) -> PathSettings:
         reports=tmp_path / "reports",
         paper_trading=tmp_path / "paper",
     )
+
+
+def _write_paper_cli_config(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    config = root / "config.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "paths:",
+                f"  raw_data: {root / 'raw'}",
+                f"  processed_data: {root / 'processed'}",
+                f"  parquet_store: {root / 'raw'}",
+                f"  models: {root / 'models'}",
+                f"  reports: {root / 'reports'}",
+                f"  paper_trading: {root / 'paper'}",
+                "paper_trading:",
+                "  portfolios:",
+                "    - portfolio_id: alpha",
+                "      signal_type: model",
+                "      model_id: alpha-model",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return config
 
 
 def _write_market_fixture(tmp_path: Path) -> None:

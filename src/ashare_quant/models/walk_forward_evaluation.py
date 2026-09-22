@@ -4,23 +4,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+import duckdb
 import numpy as np
 import pandas as pd
 
+from ashare_quant.backtest.costs import ExecutionCostPolicy
 from ashare_quant.backtest.data import load_benchmark, load_calendar, load_execution_prices
 from ashare_quant.backtest.engine import BacktestInputs, simulate_portfolio
 from ashare_quant.backtest.executable_validation import REQUIRED_TOP_N, _signals
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.security_identity import SecurityIdentityResolver
-from ashare_quant.models.compute import resolve_training_backend
+from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
+from ashare_quant.data.security_lifecycle_audit import (
+    LifecycleAuditPolicy,
+    validate_pass_lifecycle_scan,
+)
+from ashare_quant.models.compute import lightgbm_build_identity, resolve_training_backend
 from ashare_quant.models.feature_provenance import (
     FeatureSetProvenance,
     feature_provenance_hash,
@@ -29,13 +37,27 @@ from ashare_quant.models.feature_provenance import (
 )
 from ashare_quant.models.horizon_experiments import dataset_fingerprint
 from ashare_quant.models.ranker import feature_importance, fit_ranker, ranker_semantic_parameters
-from ashare_quant.models.ranker_data import RankerDataLoader, RankerDataset
-from ashare_quant.models.ranker_metrics import evaluate_ranker
+from ashare_quant.models.ranker_data import (
+    RankerDataLoader,
+    RankerDataset,
+    RankerPredictionDataset,
+)
+from ashare_quant.models.ranker_metrics import evaluate_ranker, portfolio_metric_name
 from ashare_quant.models.research_policy import enforce_research_window, load_research_policy
 from ashare_quant.models.temporal_isolation import required_temporal_gap_sessions
 from ashare_quant.utils.manifest import atomic_write_json
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+LEGACY_SCHEMA_VERSION = 2
+EVALUATION_CONTRACT_VERSION = 7
+PREVIOUS_EVALUATION_CONTRACT_VERSION = 6
+PREVIOUS_POST_H5_EVALUATION_CONTRACT_VERSION = 5
+LEGACY_EVALUATION_CONTRACT_VERSION = 4
+OLDER_EVALUATION_CONTRACT_VERSION = 3
+ACCOUNTING_SCHEMA_VERSION = 2
+EXECUTION_TAIL_POLICY_VERSION = 2
+EXECUTION_TAIL_LOAD_CHUNK_SESSIONS = 252
+EXECUTION_TAIL_POLICY = "carry_to_source_or_lockbox_cutoff"
 REQUIRED_FOLD_ARTIFACTS = frozenset(
     {
         "model.txt",
@@ -67,6 +89,16 @@ class FoldExecutor(Protocol):
 
     def validate_sources(self, plan: JsonObject) -> JsonObject: ...
 
+    def execution_contract(
+        self,
+        *,
+        horizon: int,
+        require_executable: bool,
+        prospective_lockbox_start: str,
+    ) -> JsonObject: ...
+
+    def mature_information_end(self, signal_end: str, horizon: int) -> str: ...
+
     def execute(
         self,
         *,
@@ -74,6 +106,7 @@ class FoldExecutor(Protocol):
         horizon: int,
         features: tuple[str, ...],
         require_executable: bool,
+        execution_contract: JsonObject,
     ) -> FoldExecutionResult: ...
 
 
@@ -98,6 +131,7 @@ class RankerFoldExecutor:
         self.raw_root = raw_root
         self.processed_root = processed_root
         self.settings = settings
+        self._runtime: Any | None = None
 
     def validate_sources(self, plan: JsonObject) -> JsonObject:
         """Verify current processed manifests against the frozen experiment plan."""
@@ -121,6 +155,90 @@ class RankerFoldExecutor:
             "labels_fingerprint": labels_fingerprint,
         }
 
+    def execution_contract(
+        self,
+        *,
+        horizon: int,
+        require_executable: bool,
+        prospective_lockbox_start: str,
+    ) -> JsonObject:
+        """Resolve and freeze execution-only inputs before run identity is computed."""
+
+        runtime = resolve_training_backend(self.settings.ranker.training_backend)
+        self._runtime = runtime
+        execution = self.settings.backtest.model_copy(
+            update={
+                "execution": "next_open",
+                "holding_period_days": horizon,
+                "top_n": REQUIRED_TOP_N,
+            }
+        )
+        cost_policy = ExecutionCostPolicy.from_backtest_settings(execution)
+        processed_data_end = self._processed_execution_data_end()
+        lifecycle = SecurityLifecycleResolver.from_path(
+            self.settings.security_identity.lifecycle_path
+        )
+        return {
+            "training_compute": runtime.identity_payload(),
+            "lightgbm_version": runtime.lightgbm_version,
+            "lightgbm_build_identity": lightgbm_build_identity(runtime.lightgbm_version),
+            "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
+            "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
+            "require_executable": require_executable,
+            "execution_mode": execution.execution,
+            "holding_period_days": execution.holding_period_days,
+            "top_n": list(REQUIRED_TOP_N),
+            "sell_delay_max_days": execution.sell_delay_max_days,
+            "execution_tail": {
+                "policy_version": EXECUTION_TAIL_POLICY_VERSION,
+                "policy": EXECUTION_TAIL_POLICY,
+                "sell_delay_alert_sessions": execution.sell_delay_max_days,
+                "processed_data_end": processed_data_end,
+                "prospective_lockbox_start_exclusive": prospective_lockbox_start,
+                "unresolved_at_cutoff": "fail_closed",
+                **lifecycle.provenance(),
+            },
+            "cost_policy_hash": cost_policy.policy_hash,
+            "data_logic": {
+                "prediction_universe": "signal_date_universe_left_join_features_v1",
+                "metric_universe": "frozen_predictions_left_join_mature_labels_v1",
+                "execution_universe": "complete_frozen_predictions_v1",
+            },
+        }
+
+    def _processed_execution_data_end(self) -> str:
+        manifest = _load_json(
+            self.processed_root / "universe_daily" / "_manifest.json",
+            "walk-forward universe manifest",
+        )
+        canonical = manifest.get("canonical_artifact")
+        maximum = canonical.get("max_date") if isinstance(canonical, dict) else None
+        if not isinstance(maximum, str) or len(maximum) != 8 or not maximum.isdigit():
+            raise DataValidationError("walk-forward execution data cutoff is unavailable")
+        return maximum
+
+    def mature_information_end(self, signal_end: str, horizon: int) -> str:
+        """Resolve the last forward-label session consumed by feature selection."""
+
+        required = required_temporal_gap_sessions(horizon)
+        calendar_glob = self.raw_root / "trade_cal" / "**" / "*.parquet"
+        query = f"""
+            SELECT CAST(cal_date AS VARCHAR) AS trade_date
+            FROM read_parquet('{calendar_glob.as_posix()}', hive_partitioning=false)
+            WHERE CAST(is_open AS INTEGER) = 1
+              AND CAST(cal_date AS VARCHAR) > ?
+            ORDER BY cal_date
+            LIMIT ?
+        """  # noqa: S608 -- local configured Parquet path
+        with duckdb.connect() as connection:
+            dates = connection.execute(query, [signal_end, required]).fetch_df()
+        if len(dates) != required:
+            raise DataValidationError(
+                "FEATURE_SELECTION_INFORMATION_END_UNRESOLVED: "
+                f"signal_end={signal_end} horizon={horizon}"
+            )
+        return str(dates.iloc[-1]["trade_date"])
+
     def execute(
         self,
         *,
@@ -128,6 +246,7 @@ class RankerFoldExecutor:
         horizon: int,
         features: tuple[str, ...],
         require_executable: bool,
+        execution_contract: JsonObject,
     ) -> FoldExecutionResult:
         loader = RankerDataLoader(
             self.processed_root,
@@ -146,22 +265,25 @@ class RankerFoldExecutor:
             features,
             self.settings.ranker.relevance_grades,
         )
-        evaluation = loader.load(
+        evaluation = loader.load_prediction_universe(
             str(fold["evaluation_start"]),
             str(fold["evaluation_end"]),
             features,
-            self.settings.ranker.relevance_grades,
         )
-        runtime = resolve_training_backend(self.settings.ranker.training_backend)
+        runtime = self._runtime or resolve_training_backend(self.settings.ranker.training_backend)
         model = fit_ranker(train, validation, self.settings.ranker, runtime)
         validation_predictions = np.asarray(model.predict(validation.features), dtype=float)
         evaluation_predictions = np.asarray(model.predict(evaluation.features), dtype=float)
         predictions = _build_prediction_frame(evaluation.frame, evaluation_predictions)
-        ranking = _ranking_metrics(evaluation, evaluation_predictions, self.settings)
+        labeled_evaluation = loader.attach_evaluation_labels(
+            predictions,
+            self.settings.ranker.relevance_grades,
+        )
+        ranking = _ranking_metrics(evaluation, labeled_evaluation, self.settings)
         executable = (
-            self._executable_metrics(predictions, horizon)
+            self._executable_metrics(predictions, horizon, execution_contract)
             if require_executable
-            else {"status": "NOT_REQUIRED", "accounting_schema_version": 2}
+            else {"status": "NOT_REQUIRED", "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION}
         )
 
         def save_model(path: Path) -> None:
@@ -185,7 +307,12 @@ class RankerFoldExecutor:
             model_saver=save_model,
         )
 
-    def _executable_metrics(self, predictions: pd.DataFrame, horizon: int) -> JsonObject:
+    def _executable_metrics(
+        self,
+        predictions: pd.DataFrame,
+        horizon: int,
+        execution_contract: JsonObject,
+    ) -> JsonObject:
         dates = tuple(sorted(predictions["trade_date"].astype(str).unique()))
         execution = self.settings.backtest.model_copy(
             update={
@@ -194,34 +321,75 @@ class RankerFoldExecutor:
                 "top_n": REQUIRED_TOP_N,
             }
         )
-        calendar = load_calendar(
-            self.raw_root, dates[0], dates[-1], horizon + execution.sell_delay_max_days
-        )
-        prices = load_execution_prices(
+        tail = _validated_execution_tail_contract(execution_contract)
+        lockbox_start = str(tail["prospective_lockbox_start_exclusive"])
+        governed_cutoff = _governed_execution_cutoff(tail)
+        full_calendar = load_calendar(
             self.raw_root,
-            self.processed_root,
-            calendar[0],
-            calendar[-1],
-            self.settings.universe.price_tolerance,
-            identity_resolver=SecurityIdentityResolver.from_path(
-                self.settings.security_identity.mapping_path
-            ),
+            dates[0],
+            dates[-1],
+            None,
+            maximum_date=governed_cutoff,
         )
-        benchmark = load_benchmark(
-            self.raw_root, execution.benchmark_index_code, calendar[0], calendar[-1]
-        )
-        inputs = BacktestInputs(
-            signals=_signals(predictions),
-            prices=prices,
-            calendar=tuple(calendar),
-            benchmark=benchmark,
-        )
-        results = tuple(
-            simulate_portfolio(
-                inputs, top_n=top_n, settings=execution, purpose="executable_validation"
+        if not full_calendar or dates[-1] not in full_calendar:
+            raise DataValidationError(
+                "BACKTEST_EXECUTION_DATA_CUTOFF_INVALID: evaluation end is unavailable"
             )
-            for top_n in REQUIRED_TOP_N
+        if full_calendar[-1] >= lockbox_start:
+            raise DataValidationError(
+                "RESEARCH_LOCKBOX_VIOLATION: walk-forward execution tail is not bounded"
+            )
+        signals = _signals(predictions)
+        execution_codes = _execution_signal_codes(signals, max(REQUIRED_TOP_N))
+        identity = SecurityIdentityResolver.from_path(self.settings.security_identity.mapping_path)
+        lifecycle = SecurityLifecycleResolver.from_path(
+            self.settings.security_identity.lifecycle_path
         )
+        evaluation_end_index = full_calendar.index(dates[-1])
+        tail_sessions = EXECUTION_TAIL_LOAD_CHUNK_SESSIONS
+        while True:
+            calendar_end_index = min(
+                len(full_calendar) - 1, evaluation_end_index + horizon + tail_sessions + 1
+            )
+            calendar = full_calendar[: calendar_end_index + 1]
+            prices = load_execution_prices(
+                self.raw_root,
+                self.processed_root,
+                calendar[0],
+                calendar[-1],
+                self.settings.universe.price_tolerance,
+                identity_resolver=identity,
+                lifecycle_resolver=lifecycle,
+                ts_codes=execution_codes,
+            )
+            benchmark = load_benchmark(
+                self.raw_root, execution.benchmark_index_code, calendar[0], calendar[-1]
+            )
+            inputs = BacktestInputs(
+                signals=signals,
+                prices=prices,
+                calendar=tuple(calendar),
+                benchmark=benchmark,
+            )
+            try:
+                results = tuple(
+                    simulate_portfolio(
+                        inputs,
+                        top_n=top_n,
+                        settings=execution,
+                        purpose="executable_validation",
+                        delayed_exit_policy="carry_to_calendar_end",
+                    )
+                    for top_n in REQUIRED_TOP_N
+                )
+                break
+            except DataValidationError as error:
+                if (
+                    not _is_intermediate_execution_cutoff(error)
+                    or calendar_end_index == len(full_calendar) - 1
+                ):
+                    raise
+                tail_sessions += EXECUTION_TAIL_LOAD_CHUNK_SESSIONS
         if any(
             not result.holdings.empty
             and result.holdings["trade_date"].astype(str).eq(calendar[-1]).any()
@@ -230,10 +398,25 @@ class RankerFoldExecutor:
             raise DataValidationError("walk-forward fold has unresolved executable positions")
         return {
             "status": "COMPLETE",
-            "accounting_schema_version": 2,
+            "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
             "top_n": {str(result.top_n): result.metrics for result in results},
             "accounting_summaries": {
                 str(result.top_n): result.accounting_summary for result in results
+            },
+            "delayed_exit_evidence": {
+                str(result.top_n): _delayed_exit_evidence(result.trades) for result in results
+            },
+            "execution_tail": {
+                **tail,
+                "governed_data_cutoff": governed_cutoff,
+                "actual_calendar_cutoff": calendar[-1],
+                "actual_execution_end": max(
+                    str(result.daily_returns["trade_date"].astype(str).max()) for result in results
+                ),
+                "actual_execution_end_by_top_n": {
+                    str(result.top_n): str(result.daily_returns["trade_date"].astype(str).max())
+                    for result in results
+                },
             },
             "cost_policy_hash": str(results[0].cost_policy["cost_policy_hash"]),
         }
@@ -250,6 +433,107 @@ def _build_prediction_frame(
     return predictions
 
 
+def _validated_execution_tail_contract(execution_contract: JsonObject) -> JsonObject:
+    tail = execution_contract.get("execution_tail")
+    if not isinstance(tail, dict):
+        raise DataValidationError("WALK_FORWARD_EXECUTION_TAIL_CONTRACT_INVALID")
+    required = {
+        "policy_version": EXECUTION_TAIL_POLICY_VERSION,
+        "policy": EXECUTION_TAIL_POLICY,
+        "unresolved_at_cutoff": "fail_closed",
+    }
+    if any(tail.get(key) != value for key, value in required.items()):
+        raise DataValidationError("WALK_FORWARD_EXECUTION_TAIL_CONTRACT_INVALID")
+    for key in ("processed_data_end", "prospective_lockbox_start_exclusive"):
+        value = tail.get(key)
+        if not isinstance(value, str) or len(value) != 8 or not value.isdigit():
+            raise DataValidationError("WALK_FORWARD_EXECUTION_TAIL_CONTRACT_INVALID")
+    alert = tail.get("sell_delay_alert_sessions")
+    if not isinstance(alert, int) or isinstance(alert, bool) or alert < 0:
+        raise DataValidationError("WALK_FORWARD_EXECUTION_TAIL_CONTRACT_INVALID")
+    lifecycle_version = tail.get("security_lifecycle_policy_version")
+    lifecycle_hash = tail.get("security_lifecycle_policy_hash")
+    lifecycle_count = tail.get("security_lifecycle_event_count")
+    if (
+        not isinstance(lifecycle_version, str)
+        or not lifecycle_version
+        or not isinstance(lifecycle_hash, str)
+        or len(lifecycle_hash) != 64
+        or not isinstance(lifecycle_count, int)
+        or isinstance(lifecycle_count, bool)
+        or lifecycle_count < 0
+    ):
+        raise DataValidationError("WALK_FORWARD_EXECUTION_TAIL_CONTRACT_INVALID")
+    return cast(JsonObject, tail)
+
+
+def _execution_signal_codes(signals: pd.DataFrame, top_n: int) -> tuple[str, ...]:
+    """Return the exact union of securities that can enter any requested Top-N."""
+
+    selected: set[str] = set()
+    for _, daily in signals.groupby("trade_date", sort=True):
+        selected.update(
+            daily.sort_values(["score", "ts_code"], ascending=[False, True], kind="stable")
+            .head(top_n)["ts_code"]
+            .astype(str)
+        )
+    if not selected:
+        raise DataValidationError("BACKTEST_MARKET_DATA_INCOMPLETE: no executable signal codes")
+    return tuple(sorted(selected))
+
+
+def _is_intermediate_execution_cutoff(error: DataValidationError) -> bool:
+    return str(error).startswith(
+        "BACKTEST_UNRESOLVED_POSITION: open positions remain at governed cutoff"
+    )
+
+
+def _governed_execution_cutoff(tail: JsonObject) -> str:
+    lockbox_start = str(tail["prospective_lockbox_start_exclusive"])
+    try:
+        lockbox_previous_date = (
+            datetime.strptime(lockbox_start, "%Y%m%d") - timedelta(days=1)
+        ).strftime("%Y%m%d")
+    except ValueError as error:
+        raise DataValidationError("WALK_FORWARD_EXECUTION_TAIL_CONTRACT_INVALID") from error
+    cutoff = min(str(tail["processed_data_end"]), lockbox_previous_date)
+    if cutoff >= lockbox_start:
+        raise DataValidationError(
+            "RESEARCH_LOCKBOX_VIOLATION: walk-forward execution cutoff reaches lockbox"
+        )
+    return cutoff
+
+
+def _delayed_exit_evidence(trades: pd.DataFrame) -> JsonObject:
+    if trades.empty or "sell_delay_breached" not in trades:
+        return {
+            "breached_positions": 0,
+            "maximum_delayed_exit_sessions": 0,
+            "resolutions": [],
+        }
+    breached = trades[trades["sell_delay_breached"].fillna(False).astype(bool)]
+    resolved = breached[
+        (breached["side"] == "sell") & breached["status"].isin(["filled", "terminal_writeoff"])
+    ]
+    resolutions = [
+        {
+            "position_id": str(row.position_id),
+            "ts_code": str(row.ts_code),
+            "resolution_date": str(row.trade_date),
+            "resolution_status": str(row.status),
+            "delayed_exit_sessions": int(cast(Any, row).delayed_exit_days),
+        }
+        for row in resolved.itertuples(index=False)
+    ]
+    return {
+        "breached_positions": int(breached["position_id"].dropna().astype(str).nunique()),
+        "maximum_delayed_exit_sessions": (
+            int(breached["delayed_exit_days"].astype(int).max()) if not breached.empty else 0
+        ),
+        "resolutions": resolutions,
+    }
+
+
 class MultiFoldEvaluationRunner:
     """Run every fold in one exact horizon experiment and aggregate validated evidence."""
 
@@ -260,11 +544,13 @@ class MultiFoldEvaluationRunner:
         settings: AppSettings,
         executor: FoldExecutor,
         research_policy_path: Path = Path("config/research_policy.yaml"),
+        lifecycle_audit_required: bool = True,
     ) -> None:
         self.reports_root = reports_root
         self.settings = settings
         self.executor = executor
         self.research_policy_path = research_policy_path
+        self.lifecycle_audit_required = lifecycle_audit_required
 
     def run(
         self,
@@ -273,6 +559,7 @@ class MultiFoldEvaluationRunner:
         experiment_id: str,
         feature_provenance_path: Path,
         require_executable: bool = True,
+        lifecycle_scan_manifest: Path | None = None,
     ) -> WalkForwardEvaluationResult:
         plan = _load_json(experiment_manifest, "horizon experiment manifest")
         experiment = _select_experiment(plan, experiment_id)
@@ -285,25 +572,84 @@ class MultiFoldEvaluationRunner:
         provenance_sha256 = feature_provenance_hash(feature_provenance_path)
         _validate_feature_lineage(plan, provenance, provenance_sha256)
         current_source_identity = self.executor.validate_sources(plan)
-        folds = _load_eligible_folds(plan, experiment, horizon)
+        raw_folds = _load_eligible_folds(plan, experiment, horizon)
+        diagnostics_horizon = _diagnostics_horizon(provenance, self.reports_root)
+        if provenance.selection_end is None:
+            raise DataValidationError("feature selection end is required for governed evaluation")
+        selection_information_end = self.executor.mature_information_end(
+            provenance.selection_end,
+            diagnostics_horizon,
+        )
+        folds = tuple(
+            _with_research_classification(fold, selection_information_end) for fold in raw_folds
+        )
         for fold in folds:
+            evaluation_information_end = self.executor.mature_information_end(
+                str(fold["evaluation_end"]), horizon
+            )
             enforce_research_window(
                 policy,
                 consumer="walk_forward_evaluation",
                 start_date=str(fold["evaluation_start"]),
-                end_date=str(fold["evaluation_end"]),
+                end_date=evaluation_information_end,
             )
-        identity = _experiment_identity(
+        execution_contract = self.executor.execution_contract(
+            horizon=horizon,
+            require_executable=require_executable,
+            prospective_lockbox_start=policy.prospective_lockbox.start_date,
+        )
+        if require_executable and self.lifecycle_audit_required:
+            if lifecycle_scan_manifest is None:
+                raise DataValidationError("SECURITY_LIFECYCLE_AUDIT_REQUIRED")
+            if not isinstance(self.executor, RankerFoldExecutor):
+                raise DataValidationError("SECURITY_LIFECYCLE_AUDIT_REQUIRED: unsupported executor")
+            identity_resolver = SecurityIdentityResolver.from_path(
+                self.settings.security_identity.mapping_path
+            )
+            lifecycle_evidence = SecurityLifecycleResolver.from_path(
+                self.settings.security_identity.lifecycle_path
+            )
+            lifecycle_policy = LifecycleAuditPolicy.from_path(
+                self.settings.security_identity.lifecycle_policy_path
+            )
+            audit = validate_pass_lifecycle_scan(
+                lifecycle_scan_manifest,
+                required_start=min(str(fold["train_start"]) for fold in folds),
+                required_end=_governed_execution_cutoff(execution_contract["execution_tail"]),
+                raw_root=self.executor.raw_root,
+                processed_root=self.executor.processed_root,
+                identity_resolver=identity_resolver,
+                lifecycle_evidence=lifecycle_evidence,
+                lifecycle_policy=lifecycle_policy,
+            )
+            execution_contract = {
+                **execution_contract,
+                "security_lifecycle_audit": {
+                    "lifecycle_scan_id": audit["scan_id"],
+                    "lifecycle_scan_manifest_hash": _file_hash(lifecycle_scan_manifest),
+                    "lifecycle_policy_hash": audit["policy_hash"],
+                    "lifecycle_evidence_hash": audit["lifecycle_evidence_hash"],
+                    "source_inventory_hash": audit["source_inventory_hash"],
+                },
+            }
+        identities = _experiment_identities(
             plan=plan,
             experiment=experiment,
-            fold_ids=tuple(str(fold["fold_id"]) for fold in folds),
+            fold_contracts=tuple(
+                {
+                    "fold_id": str(fold["fold_id"]),
+                    "research_validity": fold["research_validity"],
+                }
+                for fold in folds
+            ),
             feature_set_id=provenance.feature_set_id,
             feature_provenance_hash=provenance_sha256,
             research_policy_hash=policy.policy_hash,
             semantic_parameters=ranker_semantic_parameters(self.settings.ranker),
             source_identity=current_source_identity,
-            require_executable=require_executable,
+            execution_contract=execution_contract,
         )
+        identity = str(identities["run_identity"])
         run_id = f"walk_forward_{identity[:16]}"
         output_dir = self.reports_root / "research" / "walk_forward" / run_id
         existing = _existing_complete(output_dir, identity)
@@ -321,11 +667,15 @@ class MultiFoldEvaluationRunner:
                     horizon=horizon,
                     features=provenance.features,
                     require_executable=require_executable,
+                    execution_contract=execution_contract,
                 )
                 _publish_fold(
                     fold_dir,
                     fold=fold,
                     experiment_identity=identity,
+                    modeling_identity=str(identities["modeling_identity"]),
+                    execution_identity=str(identities["execution_identity"]),
+                    execution_contract=execution_contract,
                     horizon=horizon,
                     feature_set_id=provenance.feature_set_id,
                     feature_set_hash=provenance.feature_list_hash,
@@ -352,6 +702,9 @@ class MultiFoldEvaluationRunner:
         _publish_aggregate(
             output_dir,
             identity=identity,
+            modeling_identity=str(identities["modeling_identity"]),
+            execution_identity=str(identities["execution_identity"]),
+            execution_contract=execution_contract,
             run_id=run_id,
             plan_path=str(experiment_manifest),
             experiment=experiment,
@@ -408,36 +761,170 @@ def walk_forward_status(reports_root: Path, run_id: str) -> JsonObject:
         "fold_count": len(cast(dict[str, str], manifest["fold_manifest_hashes"])),
         "research_policy_hash": manifest.get("research_policy_hash"),
         "feature_set_id": manifest.get("feature_set_id"),
+        "evaluation_contract_version": manifest.get("evaluation_contract_version", 2),
+        "evidence_classification": (
+            "CURRENT"
+            if manifest.get("schema_version") == SCHEMA_VERSION
+            and manifest.get("evaluation_contract_version") == EVALUATION_CONTRACT_VERSION
+            else "LEGACY_READ_ONLY"
+        ),
     }
 
 
 def _ranking_metrics(
-    dataset: RankerDataset, predictions: np.ndarray, settings: AppSettings
+    prediction_dataset: RankerPredictionDataset,
+    labeled_predictions: pd.DataFrame,
+    settings: AppSettings,
 ) -> JsonObject:
+    """Evaluate frozen predictions without allowing labels to alter the signal universe."""
+
+    available = labeled_predictions["is_label_available"].astype(bool)
+    metric_frame = labeled_predictions.loc[available].copy()
+    group_sizes = metric_frame.groupby("trade_date")["ts_code"].transform("size")
+    metric_frame = metric_frame.loc[group_sizes >= settings.ranker.minimum_group_size].reset_index(
+        drop=True
+    )
+    if metric_frame.empty:
+        raise DataValidationError(
+            "walk-forward evaluation has no mature label groups meeting minimum_group_size"
+        )
+    metric_frame["relevance"] = metric_frame["relevance"].astype("int32")
+    metric_dataset = RankerDataset(frame=metric_frame, feature_names=())
     base = cast(
         JsonObject,
         evaluate_ranker(
-            dataset, predictions, settings.ranker.ndcg_at, settings.ranker.portfolio_fractions
+            metric_dataset,
+            metric_frame["prediction_score"].to_numpy(dtype=float),
+            settings.ranker.ndcg_at,
+            settings.ranker.portfolio_fractions,
         ),
     )
-    frame = dataset.frame.loc[:, ["trade_date", "future_excess_ret_5d"]].copy()
-    frame["score"] = predictions
+    base.pop("yearly", None)
     daily_values = [
-        group["score"].corr(group["future_excess_ret_5d"], method="spearman")
-        for _, group in frame.groupby("trade_date", sort=True)
+        group["prediction_score"].corr(group["future_excess_ret_5d"], method="spearman")
+        for _, group in metric_frame.groupby("trade_date", sort=True)
     ]
     values = pd.to_numeric(pd.Series(daily_values, dtype="float64"), errors="coerce").dropna()
+    coverage = prediction_dataset.coverage_by_date.copy()
+    scored = (
+        labeled_predictions.groupby("trade_date", sort=True)
+        .agg(
+            scored_rows=("ts_code", "size"),
+            finite_score_rows=("prediction_score", lambda value: int(np.isfinite(value).sum())),
+            mature_label_rows=("is_label_mature", "sum"),
+            available_label_rows=("is_label_available", "sum"),
+        )
+        .reset_index()
+    )
+    coverage = coverage.merge(scored, on="trade_date", how="left", validate="one_to_one")
+    count_columns = (
+        "expected_universe_rows",
+        "feature_rows_present",
+        "scored_rows",
+        "finite_score_rows",
+        "mature_label_rows",
+        "available_label_rows",
+    )
+    for column in count_columns:
+        coverage[column] = coverage[column].fillna(0).astype(int)
+    coverage["unavailable_label_rows"] = coverage["scored_rows"] - coverage["available_label_rows"]
+    coverage["prediction_coverage"] = pd.Series(
+        [
+            _optional_ratio(int(scored), int(expected))
+            for scored, expected in zip(
+                coverage["scored_rows"], coverage["expected_universe_rows"], strict=True
+            )
+        ],
+        dtype="object",
+    )
+    coverage["label_coverage"] = pd.Series(
+        [
+            _optional_ratio(int(available_count), int(scored))
+            for available_count, scored in zip(
+                coverage["available_label_rows"], coverage["scored_rows"], strict=True
+            )
+        ],
+        dtype="object",
+    )
+    expected_total = int(coverage["expected_universe_rows"].sum())
+    scored_total = int(coverage["scored_rows"].sum())
+    available_total = int(coverage["available_label_rows"].sum())
+    reason_counts = {
+        str(reason): int(count)
+        for reason, count in labeled_predictions.loc[~available, "label_unavailable_reason"]
+        .value_counts(dropna=False)
+        .items()
+    }
+    top_label_proxies = _top_label_proxies(
+        labeled_predictions,
+        settings.ranker.portfolio_fractions,
+    )
+    for name, payload in top_label_proxies.items():
+        base[name] = payload["conditional_mean_future_excess_ret"]
     base.update(
         {
             "rank_ic_median": float(values.median()),
             "rank_ic_std": float(values.std(ddof=1)) if len(values) > 1 else 0.0,
             "positive_rank_ic_ratio": float((values > 0).mean()),
-            "coverage": float(len(dataset.frame) / max(1, len(dataset.frame))),
-            "signal_dates": int(dataset.frame["trade_date"].nunique()),
-            "securities_scored": int(dataset.frame["ts_code"].nunique()),
+            "coverage": _optional_ratio(scored_total, expected_total),
+            "prediction_coverage": _optional_ratio(scored_total, expected_total),
+            "label_coverage": _optional_ratio(available_total, scored_total),
+            "expected_universe_rows": expected_total,
+            "feature_rows_present": int(coverage["feature_rows_present"].sum()),
+            "scored_rows": scored_total,
+            "finite_score_rows": int(coverage["finite_score_rows"].sum()),
+            "mature_label_rows": int(coverage["mature_label_rows"].sum()),
+            "available_label_rows": available_total,
+            "unavailable_label_rows": int(coverage["unavailable_label_rows"].sum()),
+            "unavailable_label_reasons": reason_counts,
+            "coverage_by_date": coverage.to_dict("records"),
+            "top_n_label_proxies": top_label_proxies,
+            "signal_dates": int(labeled_predictions["trade_date"].nunique()),
+            "securities_scored": int(labeled_predictions["ts_code"].nunique()),
+            "metric_rows": len(metric_frame),
+            "metric_groups": int(metric_frame["trade_date"].nunique()),
+            "metric_scope": "available labels joined after frozen prediction membership",
         }
     )
     return base
+
+
+def _top_label_proxies(
+    labeled_predictions: pd.DataFrame,
+    fractions: tuple[float, ...],
+) -> JsonObject:
+    output: JsonObject = {}
+    for fraction in fractions:
+        requested = 0
+        available = 0
+        values: list[float] = []
+        for _, daily in labeled_predictions.groupby("trade_date", sort=True):
+            count = max(1, int(math.ceil(len(daily) * fraction)))
+            top = daily.sort_values(
+                ["prediction_score", "ts_code"], ascending=[False, True], kind="stable"
+            ).head(count)
+            requested += count
+            valid = top["is_label_available"].astype(bool)
+            available += int(valid.sum())
+            values.extend(
+                pd.to_numeric(top.loc[valid, "future_excess_ret_5d"], errors="coerce")
+                .dropna()
+                .astype(float)
+                .tolist()
+            )
+        name = portfolio_metric_name(fraction)
+        output[name] = {
+            "requested_rows": requested,
+            "available_label_rows": available,
+            "unavailable_label_rows": requested - available,
+            "conditional_mean_future_excess_ret": (float(np.mean(values)) if values else None),
+        }
+    return output
+
+
+def _optional_ratio(numerator: int | float, denominator: int | float) -> float | None:
+    divisor = int(denominator)
+    return None if divisor == 0 else float(int(numerator) / divisor)
 
 
 def _load_eligible_folds(
@@ -483,6 +970,52 @@ def _load_eligible_folds(
         selected.append(resolved)
         seen.add(fold_id)
     return tuple(selected)
+
+
+def _diagnostics_horizon(
+    provenance: FeatureSetProvenance,
+    reports_root: Path,
+) -> int:
+    locator = provenance.source_diagnostics_manifest_locator
+    if not locator:
+        raise DataValidationError("feature provenance lacks diagnostics manifest locator")
+    root = reports_root.resolve()
+    manifest_path = (root / locator).resolve()
+    try:
+        manifest_path.relative_to(root)
+    except ValueError as error:
+        raise DataValidationError("feature diagnostics locator escapes reports root") from error
+    manifest = _load_json(manifest_path, "feature diagnostics manifest")
+    horizon = manifest.get("horizon")
+    if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon <= 0:
+        raise DataValidationError("feature diagnostics manifest lacks a valid label horizon")
+    return horizon
+
+
+def _with_research_classification(
+    fold: JsonObject,
+    selection_information_end: str,
+) -> JsonObject:
+    resolved = dict(fold)
+    evaluation_start = str(fold["evaluation_start"])
+    parameter_fit_oos = str(fold["validation_end"]) < evaluation_start
+    feature_selection_oos = selection_information_end < evaluation_start
+    if parameter_fit_oos and feature_selection_oos:
+        classification = "STRICT_OOS"
+    elif parameter_fit_oos:
+        classification = "RETROSPECTIVE_FIXED_FEATURE_REPLAY"
+    else:
+        classification = "INVALID_PARAMETER_FIT_OVERLAP"
+    resolved["research_validity"] = {
+        "parameter_fit_oos": parameter_fit_oos,
+        "feature_selection_oos": feature_selection_oos,
+        "selection_information_end": selection_information_end,
+        "evaluation_start": evaluation_start,
+        "research_classification": classification,
+    }
+    if not parameter_fit_oos:
+        raise DataValidationError(f"fold parameter fit is not OOS: {fold.get('fold_id')}")
+    return resolved
 
 
 def _validate_feature_lineage(
@@ -546,31 +1079,42 @@ def _select_experiment(plan: JsonObject, requested: str) -> JsonObject:
     return matches[0]
 
 
-def _experiment_identity(
+def _experiment_identities(
     *,
     plan: JsonObject,
     experiment: JsonObject,
-    fold_ids: tuple[str, ...],
+    fold_contracts: tuple[JsonObject, ...],
     feature_set_id: str,
     feature_provenance_hash: str,
     research_policy_hash: str,
     semantic_parameters: JsonObject,
     source_identity: JsonObject,
-    require_executable: bool,
-) -> str:
-    stable = {
+    execution_contract: JsonObject,
+) -> JsonObject:
+    modeling = {
         "schema_version": SCHEMA_VERSION,
         "plan_identity_hash": plan.get("plan_identity_hash"),
         "experiment_id": experiment.get("experiment_id"),
-        "fold_ids": fold_ids,
+        "fold_contracts": fold_contracts,
         "feature_set_id": feature_set_id,
         "feature_provenance_hash": feature_provenance_hash,
         "research_policy_hash": research_policy_hash,
         "semantic_parameters": semantic_parameters,
         "source_identity": source_identity,
-        "require_executable": require_executable,
     }
-    return _payload_hash(stable)
+    modeling_identity = _payload_hash(modeling)
+    execution_identity = _payload_hash(execution_contract)
+    return {
+        "modeling_identity": modeling_identity,
+        "execution_identity": execution_identity,
+        "run_identity": _payload_hash(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "modeling_identity": modeling_identity,
+                "execution_identity": execution_identity,
+            }
+        ),
+    }
 
 
 def _publish_fold(
@@ -578,6 +1122,9 @@ def _publish_fold(
     *,
     fold: JsonObject,
     experiment_identity: str,
+    modeling_identity: str,
+    execution_identity: str,
+    execution_contract: JsonObject,
     horizon: int,
     feature_set_id: str,
     feature_set_hash: str,
@@ -590,6 +1137,11 @@ def _publish_fold(
     source_identity: JsonObject,
     result: FoldExecutionResult,
 ) -> None:
+    expected_compute = execution_contract.get("training_compute")
+    if not isinstance(expected_compute, dict) or any(
+        result.training_compute.get(key) != value for key, value in expected_compute.items()
+    ):
+        raise DataValidationError("WALK_FORWARD_TRAINING_COMPUTE_IDENTITY_MISMATCH")
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=path.parent, prefix=f".{path.name}.staging-") as temporary:
         staging = Path(temporary)
@@ -619,6 +1171,10 @@ def _publish_fold(
             "technical_status": "VALID",
             "fold": fold,
             "experiment_identity": experiment_identity,
+            "modeling_identity": modeling_identity,
+            "execution_identity": execution_identity,
+            "execution_contract": execution_contract,
+            "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
             "horizon": horizon,
             "feature_set_id": feature_set_id,
             "feature_set_hash": feature_set_hash,
@@ -630,6 +1186,7 @@ def _publish_fold(
             "semantic_parameters": semantic_parameters,
             "source_identity": source_identity,
             "training_compute": result.training_compute,
+            "research_validity": fold.get("research_validity"),
             "artifact_hashes": files,
         }
         atomic_write_json(staging / "manifest.json", manifest)
@@ -667,6 +1224,9 @@ def _publish_aggregate(
     output_dir: Path,
     *,
     identity: str,
+    modeling_identity: str,
+    execution_identity: str,
+    execution_contract: JsonObject,
     run_id: str,
     plan_path: str,
     experiment: JsonObject,
@@ -705,17 +1265,28 @@ def _publish_aggregate(
         )
         for fold_id in fold_hashes
     ]
-    aggregate["performance"] = _metric_distributions(ranking_rows)
-    aggregate["executable_performance"] = _executable_distributions(executable_rows)
+    strict_indices = [
+        index
+        for index, fold in enumerate(folds)
+        if cast(JsonObject, fold.get("research_validity", {})).get("research_classification")
+        == "STRICT_OOS"
+    ]
+    aggregate["performance"] = _classified_metric_distributions(ranking_rows, strict_indices)
+    aggregate["executable_performance"] = _classified_executable_distributions(
+        executable_rows, strict_indices
+    )
     aggregate["feature_importance_stability"] = _importance_stability(importance_rows)
     atomic_write_json(output_dir / "aggregate_metrics.json", aggregate)
     pd.DataFrame(
         [
             {
                 "fold_id": fold_id,
+                "research_classification": cast(
+                    JsonObject, folds[index].get("research_validity", {})
+                ).get("research_classification"),
                 **{key: value for key, value in row.items() if isinstance(value, (int, float))},
             }
-            for fold_id, row in zip(fold_hashes, ranking_rows, strict=True)
+            for index, (fold_id, row) in enumerate(zip(fold_hashes, ranking_rows, strict=True))
         ]
     ).to_parquet(output_dir / "fold_summary.parquet", index=False)
     manifest = {
@@ -723,6 +1294,10 @@ def _publish_aggregate(
         "artifact_name": "multi_fold_walk_forward_evidence",
         "status": "COMPLETE",
         "identity": identity,
+        "modeling_identity": modeling_identity,
+        "execution_identity": execution_identity,
+        "execution_contract": execution_contract,
+        "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
         "run_id": run_id,
         "plan_path": plan_path,
         "experiment": experiment,
@@ -774,6 +1349,23 @@ def _metric_distributions(rows: list[JsonObject]) -> JsonObject:
     return output
 
 
+def _classified_metric_distributions(
+    rows: list[JsonObject], strict_indices: list[int]
+) -> JsonObject:
+    descriptive = _metric_distributions(rows)
+    if not strict_indices:
+        return {
+            "status": "NO_STRICT_OOS_FOLDS",
+            "strict_oos_fold_count": 0,
+            "descriptive_all_folds": descriptive,
+        }
+    strict = _metric_distributions([rows[index] for index in strict_indices])
+    strict["status"] = "COMPLETE"
+    strict["strict_oos_fold_count"] = len(strict_indices)
+    strict["descriptive_all_folds"] = descriptive
+    return strict
+
+
 def _executable_distributions(rows: list[JsonObject]) -> JsonObject:
     if all(row.get("status") == "NOT_REQUIRED" for row in rows):
         return {"status": "NOT_REQUIRED"}
@@ -795,6 +1387,22 @@ def _executable_distributions(rows: list[JsonObject]) -> JsonObject:
                     record[f"top_{bucket}_{name}"] = value
         flattened.append(record)
     return {"status": "COMPLETE", "metrics": _metric_distributions(flattened)}
+
+
+def _classified_executable_distributions(
+    rows: list[JsonObject], strict_indices: list[int]
+) -> JsonObject:
+    descriptive = _executable_distributions(rows)
+    if not strict_indices:
+        return {
+            "status": "NO_STRICT_OOS_FOLDS",
+            "strict_oos_fold_count": 0,
+            "descriptive_all_folds": descriptive,
+        }
+    strict = _executable_distributions([rows[index] for index in strict_indices])
+    strict["strict_oos_fold_count"] = len(strict_indices)
+    strict["descriptive_all_folds"] = descriptive
+    return strict
 
 
 def _importance_stability(rows: list[JsonObject]) -> list[JsonObject]:
@@ -842,8 +1450,9 @@ def validate_completed_walk_forward_artifact(
     """Validate a COMPLETE multi-fold artifact from its root through every leaf."""
 
     manifest = _load_json(path / "manifest.json", "walk-forward manifest")
+    schema_version = manifest.get("schema_version")
     if (
-        manifest.get("schema_version") != SCHEMA_VERSION
+        schema_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}
         or manifest.get("artifact_name") != "multi_fold_walk_forward_evidence"
         or manifest.get("status") != "COMPLETE"
         or manifest.get("run_id") != path.name
@@ -854,6 +1463,29 @@ def validate_completed_walk_forward_artifact(
         raise DataValidationError("WALK_FORWARD_MANIFEST_INVALID: identity missing")
     if expected_identity is not None and identity != expected_identity:
         raise DataValidationError(f"walk-forward identity conflict: {path}")
+    root_evaluation_contract = manifest.get("evaluation_contract_version")
+    if schema_version == SCHEMA_VERSION and (
+        not isinstance(root_evaluation_contract, int)
+        or isinstance(root_evaluation_contract, bool)
+        or root_evaluation_contract
+        not in {
+            OLDER_EVALUATION_CONTRACT_VERSION,
+            LEGACY_EVALUATION_CONTRACT_VERSION,
+            PREVIOUS_EVALUATION_CONTRACT_VERSION,
+            PREVIOUS_POST_H5_EVALUATION_CONTRACT_VERSION,
+            EVALUATION_CONTRACT_VERSION,
+        }
+        or not isinstance(manifest.get("modeling_identity"), str)
+        or not isinstance(manifest.get("execution_identity"), str)
+        or not isinstance(manifest.get("execution_contract"), dict)
+    ):
+        raise DataValidationError("WALK_FORWARD_EXECUTION_CONTRACT_INVALID")
+    validated_evaluation_contract = (
+        root_evaluation_contract
+        if isinstance(root_evaluation_contract, int)
+        and not isinstance(root_evaluation_contract, bool)
+        else EVALUATION_CONTRACT_VERSION
+    )
     expected_root_entries = {
         "aggregate_metrics.json",
         "fold_summary.parquet",
@@ -903,6 +1535,12 @@ def validate_completed_walk_forward_artifact(
             fold_dir,
             expected_identity=identity,
             expected_fold_id=fold_id,
+            expected_schema=int(schema_version),
+            expected_evaluation_contract_version=(
+                validated_evaluation_contract
+                if schema_version == SCHEMA_VERSION
+                else EVALUATION_CONTRACT_VERSION
+            ),
             expected_lineage={
                 "feature_set_id": manifest.get("feature_set_id"),
                 "feature_set_hash": manifest.get("feature_set_hash"),
@@ -919,12 +1557,14 @@ def _validate_fold_artifact(
     *,
     expected_identity: str,
     expected_fold_id: str,
+    expected_schema: int = SCHEMA_VERSION,
+    expected_evaluation_contract_version: int = EVALUATION_CONTRACT_VERSION,
     expected_lineage: JsonObject | None = None,
 ) -> JsonObject:
     manifest = _load_json(path / "manifest.json", "fold manifest")
     raw_fold = manifest.get("fold")
     if (
-        manifest.get("schema_version") != SCHEMA_VERSION
+        manifest.get("schema_version") != expected_schema
         or manifest.get("artifact_name") != "walk_forward_fold_evidence"
         or manifest.get("technical_status") != "VALID"
         or manifest.get("experiment_identity") != expected_identity
@@ -932,6 +1572,14 @@ def _validate_fold_artifact(
         or raw_fold.get("fold_id") != expected_fold_id
     ):
         raise DataValidationError(f"WALK_FORWARD_FOLD_MANIFEST_INVALID: {expected_fold_id}")
+    if expected_schema == SCHEMA_VERSION and (
+        manifest.get("evaluation_contract_version") != expected_evaluation_contract_version
+        or not isinstance(manifest.get("modeling_identity"), str)
+        or not isinstance(manifest.get("execution_identity"), str)
+        or not isinstance(manifest.get("execution_contract"), dict)
+        or not isinstance(manifest.get("research_validity"), dict)
+    ):
+        raise DataValidationError(f"WALK_FORWARD_EXECUTION_CONTRACT_INVALID: {expected_fold_id}")
     hashes = manifest.get("artifact_hashes")
     if expected_lineage is not None and any(
         not isinstance(value, str) or not value or manifest.get(key) != value
