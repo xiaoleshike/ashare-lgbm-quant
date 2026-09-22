@@ -84,6 +84,14 @@ Verified official evidence can be compiled into a partial typed runtime catalog 
 security, event type, and interval as the immutable base catalog, compilation retains the base
 record rather than publishing a duplicate runtime event.
 
+The runtime compiler treats the Official Index as an event stream. A verified formal suspension
+start remains open until an authoritative resumption or terminal event. Resumption and terminal
+days are excluded from the listing-suspension interval by resolving the previous governed open
+session from `trade_cal`. Quotes and `suspend_d` resume rows cannot close a formal suspension.
+Unclosed or conflicting event streams remain explicit compiler diagnostics; they are never given
+an inferred end date. Base v3 rows are already runtime intervals and retain provenance when they
+duplicate a compiled interval exactly.
+
 Before rebuilding a governed research lineage, capture one coherent physical source generation
 under the production writer lock:
 
@@ -98,6 +106,20 @@ The command derives enabled dataset dependencies from configuration and delegate
 copying, capture proof, validation, and manifest-last publication to the snapshot service. The
 frozen `datasets/` root, not mutable canonical raw, is the input for subsequent Universe and
 lifecycle-scan commands.
+
+Frozen provider-proven `suspend_d` repairs are activated only in an immutable derived snapshot:
+
+```bash
+ashare-quant --config config/default.yaml data research-source-snapshot-repair \
+  --parent-snapshot /path/to/research_source_snapshot_PARENT \
+  --repair-source-artifact /path/to/security_lifecycle_source_probe_PROBE \
+  --snapshots-root data/research/source_snapshots \
+  --lifecycle-evidence /path/to/new/typed/events.json
+```
+
+The parent remains unchanged. The child records exact added rows, pre/post partition hashes, the
+validated provider artifact, and a new content identity. Partial evidence repairs only their
+verified sessions; neighboring unexplained sessions remain unresolved.
 
 When a blocked scan has been triaged, source completeness is investigated separately from lifecycle
 truth. The explicit networked probe is the only lifecycle command that contacts Tushare; it freezes
@@ -470,6 +492,21 @@ immutable, explicitly `partial` runtime catalog. Ordinary suspension and formal 
 suspension remain distinct. Terminal metadata continues to come from `stock_basic.delist_date`,
 and code transitions remain in the separate identity-transition artifact. A partial catalog
 does not imply full-market lifecycle PASS.
+
+Compilation requires the governed research range and raw `trade_cal`, and should bind the selected
+identity-transition artifact:
+
+```bash
+ashare-quant --config config/default.yaml data \
+  --storage-root /path/to/frozen/datasets \
+  security-lifecycle-catalog-compile \
+  --official-index /path/to/official-index \
+  --base-lifecycle-evidence /path/to/v3.json \
+  --identity-transition-artifact /path/to/transitions \
+  --catalog-version security_lifecycle_events_<explicit-version> \
+  --start-date 20100101 --end-date 20260710 \
+  --reports-root /path/to/new/reports
+```
 
 Real stock-level evidence files and official packages are intentionally local and ignored by
 Git. A fresh checkout must receive explicit base-catalog, official-index, and transition-artifact

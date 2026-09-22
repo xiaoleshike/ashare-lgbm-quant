@@ -34,9 +34,9 @@ type LifecycleClassification = Literal[
     "UNRESOLVED",
 ]
 
-SCANNER_SCHEMA_VERSION = 6
-LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
-CLASSIFICATION_CONTRACT_VERSION = 5
+SCANNER_SCHEMA_VERSION = 7
+LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
+CLASSIFICATION_CONTRACT_VERSION = 6
 ARTIFACT_NAME = "security_lifecycle_scan"
 REQUIRED_ARTIFACTS = frozenset(
     {
@@ -102,6 +102,17 @@ class LifecycleAuditPolicy:
         ]
         if payload.get("classification_precedence") != required_precedence:
             raise DataValidationError("SECURITY_LIFECYCLE_POLICY_INVALID: precedence")
+        ordinary = payload.get("ordinary_suspension")
+        listing = payload.get("listing_suspension")
+        if (
+            not isinstance(ordinary, dict)
+            or ordinary.get("ordinary_boundary_checks_require_listed_session") is not True
+            or not isinstance(listing, dict)
+            or listing.get("boundary_checks_require_listed_session") is not True
+            or listing.get("verified_predecessor_metadata_scope")
+            != "research_carry_in_through_transition"
+        ):
+            raise DataValidationError("SECURITY_LIFECYCLE_POLICY_INVALID: boundary scope")
         return cls(
             schema_version=2,
             policy_version=version,
@@ -935,6 +946,8 @@ class SecurityLifecycleScanner:
                 (i.first_open_session,'LISTING_SUSPENSION_START'),
                 (i.last_open_session,'LISTING_SUSPENSION_END')
               ) b(trade_date,boundary_type)
+              JOIN expected_listed e ON e.canonical_ts_code=i.canonical_ts_code
+                AND e.trade_date=b.trade_date
               LEFT JOIN universe_state u ON u.canonical_ts_code=i.canonical_ts_code
                 AND u.trade_date=b.trade_date
               WHERE coalesce(u.is_suspended,false)=false
@@ -1042,7 +1055,12 @@ class SecurityLifecycleScanner:
                      'stock_basic/daily identity accounting'
               FROM daily_security_bounds d
               LEFT JOIN stock_source s USING(canonical_ts_code)
+              LEFT JOIN security_identity_transitions t
+                ON t.predecessor_ts_code=d.canonical_ts_code
+              CROSS JOIN calendar_bounds bounds
               WHERE s.canonical_ts_code IS NULL
+                AND (t.predecessor_ts_code IS NULL
+                  OR d.first_daily_date>bounds.first_date)
             )
             SELECT * FROM ordinary_mismatch
             UNION ALL SELECT * FROM listing_boundary_mismatch
@@ -1188,7 +1206,7 @@ def validate_security_lifecycle_artifact(path: Path) -> JsonObject:
     schema_version = int(manifest["schema_version"])
     required_artifacts = (
         REQUIRED_ARTIFACTS
-        if schema_version in {3, SCANNER_SCHEMA_VERSION}
+        if schema_version in {3, 6, SCANNER_SCHEMA_VERSION}
         else LEGACY_REQUIRED_ARTIFACTS
     )
     hashes = manifest.get("artifact_hashes")
@@ -1209,7 +1227,7 @@ def validate_security_lifecycle_artifact(path: Path) -> JsonObject:
     expected_id = f"security_lifecycle_{canonical_payload_hash(logical)[:24]}"
     if expected_id != manifest.get("scan_id"):
         raise DataValidationError("SECURITY_LIFECYCLE_SCAN_ID_MISMATCH")
-    if schema_version == SCANNER_SCHEMA_VERSION:
+    if schema_version in {6, SCANNER_SCHEMA_VERSION}:
         _validate_lifecycle_business_contents(path, manifest)
     return manifest
 

@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "artifact_name": "security_lifecycle_policy",
-  "policy_version": "security_lifecycle_audit_v2_3_listed_boundary_scope",
-  "classification_contract_version": 5,
+  "policy_version": "security_lifecycle_audit_v2_4_interval_compiler_scope",
+  "classification_contract_version": 6,
   "ordinary_suspension": {
     "source": "Tushare suspend_d",
     "full_session_suspend_type": "S",
@@ -20,7 +20,9 @@
   },
   "listing_suspension": {
     "requires_verified_evidence": true,
-    "takes_precedence_over_ordinary_suspension": true
+    "takes_precedence_over_ordinary_suspension": true,
+    "boundary_checks_require_listed_session": true,
+    "verified_predecessor_metadata_scope": "research_carry_in_through_transition"
   },
   "terminal": {
     "authoritative_source": "stock_basic.delist_date",

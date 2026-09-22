@@ -282,9 +282,33 @@ def test_verified_transition_stops_old_code_expected_quote_population(tmp_path: 
 
     result = scanner.scan(DATES[0], DATES[-1])
     classified = pd.read_parquet(result.output_dir / "classified_gaps.parquet")
+    boundaries = pd.read_parquet(result.output_dir / "boundary_checks.parquet")
 
     assert not classified["canonical_ts_code"].eq("000004.SZ").any()
+    assert not (
+        boundaries["canonical_ts_code"].eq("000004.SZ")
+        & boundaries["boundary_type"].eq("LISTING_METADATA_MISSING")
+    ).any()
     assert result.counts["unresolved"] == 0
+
+
+def test_listing_suspension_boundaries_outside_expected_listed_scope_are_ignored(
+    tmp_path: Path,
+) -> None:
+    scanner = _fixture_scanner(tmp_path, include_unresolved=False)
+    stock_path = scanner.raw_root / "stock_basic" / "data.parquet"
+    stocks = pd.read_parquet(stock_path)
+    stocks.loc[stocks["ts_code"].eq("000002.SZ"), "list_date"] = "20200107"
+    stocks.to_parquet(stock_path, index=False)
+
+    result = scanner.scan(DATES[0], DATES[-1])
+    boundaries = pd.read_parquet(result.output_dir / "boundary_checks.parquet")
+    selected = boundaries[
+        boundaries["canonical_ts_code"].eq("000002.SZ")
+        & boundaries["boundary_type"].isin({"LISTING_SUSPENSION_START", "LISTING_SUSPENSION_END"})
+    ]
+
+    assert selected.empty
 
 
 def test_pass_scan_is_idempotent_portable_and_gate_valid(tmp_path: Path) -> None:
@@ -734,6 +758,13 @@ def _policy() -> dict[str, object]:
         "artifact_name": "security_lifecycle_policy",
         "policy_version": "fixture-v1",
         "classification_contract_version": CLASSIFICATION_CONTRACT_VERSION,
+        "ordinary_suspension": {
+            "ordinary_boundary_checks_require_listed_session": True,
+        },
+        "listing_suspension": {
+            "boundary_checks_require_listed_session": True,
+            "verified_predecessor_metadata_scope": ("research_carry_in_through_transition"),
+        },
         "classification_precedence": [
             "LISTING_SUSPENSION",
             "ORDINARY_SUSPENSION",

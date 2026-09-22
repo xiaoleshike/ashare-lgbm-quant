@@ -7,6 +7,10 @@ import pandas as pd
 from ashare_quant.config.settings import UniverseSettings
 from ashare_quant.data.datasets import get_dataset_spec
 from ashare_quant.data.security_identity import SecurityIdentityResolver
+from ashare_quant.data.security_identity_transition import (
+    SecurityIdentityTransition,
+    SecurityIdentityTransitionResolver,
+)
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.universe import UniverseBuilder, UniverseStore, build_universe_frame
@@ -168,6 +172,44 @@ def test_universe_builder_covers_core_membership_and_tradability_rules() -> None
     assert "not_listed" in str(delisted["exclude_reason"])
 
     assert validate_universe_frame(frame).ok
+
+
+def test_verified_transition_stops_predecessor_universe_rows_at_effective_date() -> None:
+    inputs = fixture_inputs()
+    transition = SecurityIdentityTransitionResolver(
+        artifact_version="fixture-v1",
+        artifact_hash="b" * 64,
+        transitions=(
+            SecurityIdentityTransition(
+                predecessor_ts_code="000001.SZ",
+                successor_ts_code="000009.SZ",
+                predecessor_name="Old",
+                successor_name="New",
+                transition_type="CODE_CHANGE_CONTINUITY",
+                effective_date="20240105",
+                continuity_type="SAME_LISTED_ENTITY",
+                share_conversion_ratio=1.0,
+                evidence_package_id="evidence-fixture",
+                evidence_package_hash="c" * 64,
+            ),
+        ),
+    )
+
+    frame = build_universe_frame(
+        inputs,
+        UniverseSettings(
+            min_list_trading_days=0,
+            liquidity_window_days=1,
+            min_avg_amount=0.0,
+            require_full_liquidity_window=False,
+        ),
+        "20240104",
+        "20240105",
+        transition_resolver=transition,
+    )
+
+    predecessor_dates = frame.loc[frame["ts_code"] == "000001.SZ", "trade_date"].tolist()
+    assert predecessor_dates == ["20240104"]
 
 
 def test_920305_alias_suspension_and_resume_are_canonicalized() -> None:

@@ -24,6 +24,7 @@ from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
 from ashare_quant.data.ingestion import DataIngestionService, GapReport, build_store
 from ashare_quant.data.quality_logging import append_quality_event, append_validation_results
 from ashare_quant.data.research_source_snapshot import (
+    materialize_repair_derived_research_source_snapshot,
     materialize_research_source_snapshot,
     research_rebuild_datasets,
 )
@@ -32,6 +33,7 @@ from ashare_quant.data.security_identity import (
     scan_cross_source_identity,
 )
 from ashare_quant.data.security_identity_transition import (
+    SecurityIdentityTransitionResolver,
     load_identity_transition_contract,
     publish_security_identity_transitions,
     publish_transition_evidence_package,
@@ -352,6 +354,9 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     typed_catalog_parser.add_argument("--base-lifecycle-evidence", required=True)
     typed_catalog_parser.add_argument("--catalog-version", required=True)
     typed_catalog_parser.add_argument("--reports-root", required=True)
+    typed_catalog_parser.add_argument("--start-date", required=True)
+    typed_catalog_parser.add_argument("--end-date", required=True)
+    typed_catalog_parser.add_argument("--identity-transition-artifact", default=None)
     snapshot_parser = data_subparsers.add_parser(
         "research-source-snapshot-create",
         help="Capture an immutable research source snapshot under the production writer lock.",
@@ -361,6 +366,14 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     snapshot_parser.add_argument("--lifecycle-evidence", required=True)
     snapshot_parser.add_argument("--writer-lock-path", default=None)
     snapshot_parser.add_argument("--source-generation-manifest", default=None)
+    repair_snapshot_parser = data_subparsers.add_parser(
+        "research-source-snapshot-repair",
+        help="Create an immutable child snapshot from frozen verified source repairs.",
+    )
+    repair_snapshot_parser.add_argument("--parent-snapshot", required=True)
+    repair_snapshot_parser.add_argument("--repair-source-artifact", required=True)
+    repair_snapshot_parser.add_argument("--snapshots-root", required=True)
+    repair_snapshot_parser.add_argument("--lifecycle-evidence", required=True)
     hardened_parser = data_subparsers.add_parser(
         "security-lifecycle-resolution-harden",
         help="Split partial source repairs and separate source from lifecycle conclusions.",
@@ -1338,8 +1351,38 @@ def run_data_command(args: argparse.Namespace) -> int:
         )
         return 0
 
+    if args.data_command == "research-source-snapshot-repair":
+        try:
+            lifecycle = SecurityLifecycleResolver.from_path(Path(args.lifecycle_evidence))
+            snapshot_result = materialize_repair_derived_research_source_snapshot(
+                parent_snapshot=Path(args.parent_snapshot),
+                repair_source_artifact=Path(args.repair_source_artifact),
+                snapshots_root=Path(args.snapshots_root),
+                lifecycle_evidence_hash=lifecycle.policy_hash,
+            )
+        except (DataValidationError, OSError, ValueError) as error:
+            print(f"research source snapshot repair failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"research_source_snapshot: snapshot_id={snapshot_result.snapshot_id} "
+            f"output={snapshot_result.output_dir} "
+            f"idempotent={str(snapshot_result.idempotent).lower()}"
+        )
+        return 0
+
     if args.data_command == "security-lifecycle-catalog-compile":
         try:
+            trade_cal = store.read_dataset(get_dataset_spec("trade_cal"))
+            trade_dates = tuple(
+                sorted(
+                    trade_cal.loc[
+                        trade_cal["is_open"].astype(str).isin({"1", "1.0"}),
+                        "cal_date",
+                    ]
+                    .astype(str)
+                    .drop_duplicates()
+                )
+            )
             output = publish_typed_lifecycle_catalog(
                 official_index=Path(args.official_index),
                 base_catalog=SecurityLifecycleResolver.from_path(
@@ -1347,6 +1390,16 @@ def run_data_command(args: argparse.Namespace) -> int:
                 ),
                 reports_root=Path(args.reports_root),
                 catalog_version=args.catalog_version,
+                open_trade_dates=trade_dates,
+                research_start=args.start_date,
+                research_end=args.end_date,
+                identity_transitions=(
+                    None
+                    if args.identity_transition_artifact is None
+                    else SecurityIdentityTransitionResolver.from_path(
+                        Path(args.identity_transition_artifact)
+                    )
+                ),
             )
         except (DataValidationError, OSError, ValueError) as error:
             print(f"security lifecycle catalog compile failed: {error}", file=sys.stderr)
@@ -1841,6 +1894,12 @@ def run_universe_command(args: argparse.Namespace) -> int:
                         build_result.security_lifecycle_policy_version
                     ),
                     "security_lifecycle_policy_hash": build_result.security_lifecycle_policy_hash,
+                    "security_identity_transition_version": (
+                        build_result.security_identity_transition_version
+                    ),
+                    "security_identity_transition_hash": (
+                        build_result.security_identity_transition_hash
+                    ),
                 },
             )
         return 0 if build_result.validation.ok else 1

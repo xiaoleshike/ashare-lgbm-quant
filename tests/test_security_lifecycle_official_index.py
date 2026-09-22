@@ -86,6 +86,13 @@ def test_verified_index_compiles_typed_partial_runtime_catalog(tmp_path: Path) -
         source=_source(document),
         records=[
             _record("600001.SH"),
+            _record(
+                "600001.SH",
+                event_type="FORMAL_LISTING_RESUMPTION",
+                effective_start="20110105",
+                effective_end="20110105",
+                source_locator="page 10 table 2 row 2",
+            ),
             _record("600002.SH", event_type="ORDINARY_FULL_DAY_SUSPENSION"),
         ],
         document=document,
@@ -103,6 +110,9 @@ def test_verified_index_compiles_typed_partial_runtime_catalog(tmp_path: Path) -
         base_catalog=SecurityLifecycleResolver.empty(),
         reports_root=tmp_path / "reports",
         catalog_version="typed-fixture-v1",
+        open_trade_dates=("20110104", "20110105"),
+        research_start="20110101",
+        research_end="20110105",
     )
     validate_typed_lifecycle_catalog(catalog, official_index=index.output_dir)
     resolver = SecurityLifecycleResolver.from_path(catalog / "events.json")
@@ -157,6 +167,9 @@ def test_typed_catalog_preserves_base_event_when_official_index_duplicates_inter
         base_catalog=SecurityLifecycleResolver.from_path(base_path),
         reports_root=tmp_path / "reports",
         catalog_version="typed-fixture-v1",
+        open_trade_dates=("20110104", "20110105"),
+        research_start="20110101",
+        research_end="20110105",
     )
     events = json.loads((catalog / "events.json").read_text(encoding="utf-8"))["events"]
 

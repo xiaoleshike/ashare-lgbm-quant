@@ -23,8 +23,10 @@ type JsonObject = dict[str, Any]
 
 SNAPSHOT_SCHEMA_VERSION = 2
 SNAPSHOT_CONTRACT_VERSION = "research_source_snapshot_v2_coherent_generation"
+DERIVED_SNAPSHOT_CONTRACT_VERSION = "research_source_snapshot_v3_repair_derived"
 SNAPSHOT_ARTIFACT_NAME = "research_source_snapshot"
 SNAPSHOT_MECHANISM = "PHYSICAL_COPY_ATOMIC"
+DERIVED_SNAPSHOT_MECHANISM = "IMMUTABLE_PARENT_HARDLINK_COPY_ON_WRITE"
 
 # Exact union consumed by UniverseBuilder, FeatureBuilder, and LabelBuilder in the
 # current governed rebuild path. Forecast/express are not consumed by those builders.
@@ -53,6 +55,127 @@ class ResearchSourceSnapshotResult:
     snapshot_id: str
     output_dir: Path
     idempotent: bool
+
+
+def materialize_repair_derived_research_source_snapshot(
+    *,
+    parent_snapshot: Path,
+    repair_source_artifact: Path,
+    snapshots_root: Path,
+    lifecycle_evidence_hash: str,
+) -> ResearchSourceSnapshotResult:
+    """Apply only frozen provider-proven suspend rows to an immutable child snapshot."""
+
+    from ashare_quant.data.security_lifecycle_source_probe import (
+        validate_lifecycle_source_probe_artifact,
+    )
+
+    parent_manifest = validate_research_source_snapshot(parent_snapshot)
+    validate_lifecycle_source_probe_artifact(repair_source_artifact)
+    comparison = pd.read_parquet(repair_source_artifact / "comparison.parquet")
+    selected = comparison[
+        comparison["source_completeness_status"]
+        .astype(str)
+        .isin({"LOCAL_SUSPEND_D_INCOMPLETE", "LOCAL_BOTH_INCOMPLETE"})
+    ]
+    repair_rows = _missing_suspend_rows(selected)
+    if repair_rows.empty:
+        raise DataValidationError("RESEARCH_SOURCE_REPAIR_ROWS_MISSING")
+    provider = pd.read_parquet(repair_source_artifact / "suspend_d_provider.parquet")
+    _validate_repair_rows_against_provider(repair_rows, provider)
+
+    parent_logical = cast(JsonObject, parent_manifest["logical_identity"])
+    datasets = tuple(
+        str(item["dataset"]) for item in cast(list[JsonObject], parent_logical.get("datasets", []))
+    )
+    snapshots_root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=snapshots_root, prefix=".repair-derived.staging-"))
+    try:
+        frozen_root = staging / "datasets"
+        _hardlink_snapshot_files(parent_snapshot / "datasets", frozen_root)
+        changes = _apply_suspend_repairs(
+            frozen_root=frozen_root,
+            parent_root=parent_snapshot / "datasets",
+            repair_rows=repair_rows,
+        )
+        inventory = _source_inventory(frozen_root, datasets)
+        repair_identity: JsonObject = {
+            "parent_snapshot_id": parent_snapshot.name,
+            "parent_snapshot_manifest_hash": file_sha256(parent_snapshot / "manifest.json"),
+            "repair_source_artifact_id": repair_source_artifact.name,
+            "repair_source_manifest_hash": file_sha256(repair_source_artifact / "manifest.json"),
+            "dataset": "suspend_d",
+            "repair_rows_hash": canonical_payload_hash(_json_records(repair_rows)),
+            "partition_changes": changes,
+            "repair_reason": "VERIFIED_LOCAL_SUSPEND_D_INCOMPLETE",
+        }
+        generation: JsonObject = {
+            "mode": "REPAIR_DERIVED_SNAPSHOT",
+            "generation_hash": canonical_payload_hash(repair_identity),
+        }
+        logical: JsonObject = {
+            "schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "contract_version": DERIVED_SNAPSHOT_CONTRACT_VERSION,
+            "snapshot_mechanism": DERIVED_SNAPSHOT_MECHANISM,
+            "datasets": inventory["datasets"],
+            "security_identity_mapping_hash": parent_logical["security_identity_mapping_hash"],
+            "lifecycle_evidence_hash": lifecycle_evidence_hash,
+            "source_generation": generation,
+            "parent_snapshot_id": parent_snapshot.name,
+            "parent_snapshot_manifest_hash": repair_identity["parent_snapshot_manifest_hash"],
+            "repair_source_artifact_id": repair_source_artifact.name,
+            "repair_source_manifest_hash": repair_identity["repair_source_manifest_hash"],
+            "repair_identity_hash": canonical_payload_hash(repair_identity),
+        }
+        snapshot_id = f"research_source_snapshot_{canonical_payload_hash(logical)[:24]}"
+        output = snapshots_root / snapshot_id
+        if output.exists():
+            shutil.rmtree(staging)
+            validate_research_source_snapshot(output)
+            return ResearchSourceSnapshotResult(snapshot_id, output, True)
+
+        evidence_target = staging / "repair_evidence" / repair_source_artifact.name
+        shutil.copytree(repair_source_artifact, evidence_target)
+        atomic_write_json(staging / "contract.json", _derived_snapshot_contract())
+        atomic_write_json(staging / "source_inventory.json", inventory)
+        atomic_write_json(staging / "repair_manifest.json", repair_identity)
+        inventory_hash = canonical_payload_hash(inventory)
+        atomic_write_json(
+            staging / "capture_proof.json",
+            {
+                "capture_contract": "immutable_parent_repair_v1",
+                "source_generation": generation,
+                "inventory_hash_before": canonical_payload_hash(parent_logical.get("datasets", [])),
+                "inventory_hash_after": inventory_hash,
+                "parent_snapshot_manifest_hash": repair_identity["parent_snapshot_manifest_hash"],
+            },
+        )
+        artifact_hashes = {
+            name: file_sha256(staging / name)
+            for name in (
+                "capture_proof.json",
+                "contract.json",
+                "repair_manifest.json",
+                "source_inventory.json",
+            )
+        }
+        atomic_write_json(
+            staging / "manifest.json",
+            {
+                "schema_version": SNAPSHOT_SCHEMA_VERSION,
+                "artifact_name": SNAPSHOT_ARTIFACT_NAME,
+                "snapshot_id": snapshot_id,
+                "logical_identity": logical,
+                "artifact_hashes": artifact_hashes,
+                "completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+        )
+        os.replace(staging, output)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+    validate_research_source_snapshot(output)
+    return ResearchSourceSnapshotResult(snapshot_id, output, False)
 
 
 def snapshot_contract() -> JsonObject:
@@ -229,7 +352,11 @@ def validate_research_source_snapshot(path: Path) -> JsonObject:
     ):
         raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_INVALID")
     hashes = manifest.get("artifact_hashes")
+    logical = cast(JsonObject, manifest.get("logical_identity", {}))
+    contract_version = logical.get("contract_version")
     expected_artifacts = {"contract.json", "source_inventory.json", "capture_proof.json"}
+    if contract_version == DERIVED_SNAPSHOT_CONTRACT_VERSION:
+        expected_artifacts.add("repair_manifest.json")
     if not isinstance(hashes, dict) or set(hashes) != expected_artifacts:
         raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_ARTIFACT_SET_INVALID")
     for relative, expected in hashes.items():
@@ -258,17 +385,20 @@ def validate_research_source_snapshot(path: Path) -> JsonObject:
     }
     if actual_files != expected_files:
         raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_FROZEN_SET_MISMATCH")
-    logical = cast(JsonObject, manifest.get("logical_identity", {}))
     if logical.get("datasets") != inventory.get("datasets"):
         raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_IDENTITY_MISMATCH")
     inventory_hash = canonical_payload_hash(inventory)
-    if (
-        logical.get("contract_version") != SNAPSHOT_CONTRACT_VERSION
-        or capture.get("capture_contract") != "shared_production_writer_lock_v1"
-        or capture.get("source_generation") != logical.get("source_generation")
-        or capture.get("inventory_hash_before") != inventory_hash
-        or capture.get("inventory_hash_after") != inventory_hash
-    ):
+    if contract_version == SNAPSHOT_CONTRACT_VERSION:
+        if (
+            capture.get("capture_contract") != "shared_production_writer_lock_v1"
+            or capture.get("source_generation") != logical.get("source_generation")
+            or capture.get("inventory_hash_before") != inventory_hash
+            or capture.get("inventory_hash_after") != inventory_hash
+        ):
+            raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_CAPTURE_PROOF_INVALID")
+    elif contract_version == DERIVED_SNAPSHOT_CONTRACT_VERSION:
+        _validate_derived_snapshot(path, manifest, capture, inventory_hash)
+    else:
         raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_CAPTURE_PROOF_INVALID")
     datasets = cast(list[JsonObject], inventory.get("datasets", []))
     names = [str(item.get("dataset", "")) for item in datasets]
@@ -278,6 +408,211 @@ def validate_research_source_snapshot(path: Path) -> JsonObject:
     if expected_id != path.name:
         raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_IDENTITY_MISMATCH")
     return cast(JsonObject, manifest)
+
+
+def _derived_snapshot_contract() -> JsonObject:
+    contract = snapshot_contract()
+    contract.update(
+        {
+            "contract_version": DERIVED_SNAPSHOT_CONTRACT_VERSION,
+            "snapshot_mechanism": DERIVED_SNAPSHOT_MECHANISM,
+            "capture_consistency": "validated immutable parent + copy-on-write repair",
+            "publication": "staging + atomic rename + manifest last",
+        }
+    )
+    return contract
+
+
+def _validate_derived_snapshot(
+    path: Path,
+    manifest: JsonObject,
+    capture: JsonObject,
+    inventory_hash: str,
+) -> None:
+    from ashare_quant.data.security_lifecycle_source_probe import (
+        validate_lifecycle_source_probe_artifact,
+    )
+
+    logical = cast(JsonObject, manifest.get("logical_identity", {}))
+    repair = _read_json_file(path / "repair_manifest.json")
+    parent_id = str(logical.get("parent_snapshot_id", ""))
+    parent = path.parent / parent_id
+    parent_manifest = validate_research_source_snapshot(parent)
+    parent_logical = cast(JsonObject, parent_manifest.get("logical_identity", {}))
+    if (
+        capture.get("capture_contract") != "immutable_parent_repair_v1"
+        or capture.get("source_generation") != logical.get("source_generation")
+        or capture.get("inventory_hash_after") != inventory_hash
+        or file_sha256(parent / "manifest.json") != logical.get("parent_snapshot_manifest_hash")
+        or parent_manifest.get("snapshot_id") != parent_id
+        or capture.get("inventory_hash_before")
+        != canonical_payload_hash(parent_logical.get("datasets", []))
+        or canonical_payload_hash(repair) != logical.get("repair_identity_hash")
+        or repair.get("parent_snapshot_id") != parent_id
+        or repair.get("parent_snapshot_manifest_hash")
+        != logical.get("parent_snapshot_manifest_hash")
+        or repair.get("repair_source_artifact_id") != logical.get("repair_source_artifact_id")
+        or repair.get("repair_source_manifest_hash") != logical.get("repair_source_manifest_hash")
+        or repair.get("dataset") != "suspend_d"
+    ):
+        raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_CAPTURE_PROOF_INVALID")
+    evidence_id = str(logical.get("repair_source_artifact_id", ""))
+    evidence = path / "repair_evidence" / evidence_id
+    validate_lifecycle_source_probe_artifact(evidence)
+    if file_sha256(evidence / "manifest.json") != logical.get("repair_source_manifest_hash"):
+        raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_REPAIR_EVIDENCE_INVALID")
+    comparison = pd.read_parquet(evidence / "comparison.parquet")
+    selected = comparison[
+        comparison["source_completeness_status"]
+        .astype(str)
+        .isin({"LOCAL_SUSPEND_D_INCOMPLETE", "LOCAL_BOTH_INCOMPLETE"})
+    ]
+    rows = _missing_suspend_rows(selected)
+    provider = pd.read_parquet(evidence / "suspend_d_provider.parquet")
+    _validate_repair_rows_against_provider(rows, provider)
+    changes = repair.get("partition_changes")
+    if (
+        repair.get("repair_rows_hash") != canonical_payload_hash(_json_records(rows))
+        or not isinstance(changes, list)
+        or sum(int(cast(JsonObject, item).get("rows_added", 0)) for item in changes) != len(rows)
+    ):
+        raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_REPAIR_EVIDENCE_INVALID")
+    _validate_partition_changes(path, parent, cast(list[JsonObject], changes))
+
+
+def _validate_partition_changes(child: Path, parent: Path, changes: list[JsonObject]) -> None:
+    seen: set[str] = set()
+    for item in changes:
+        relative = str(item.get("relative_path", ""))
+        relative_path = Path(relative)
+        if (
+            not relative.startswith("suspend_d/")
+            or relative in seen
+            or int(item.get("rows_added", 0)) <= 0
+            or file_sha256(parent / "datasets" / relative_path) != item.get("before_partition_hash")
+            or file_sha256(child / "datasets" / relative_path) != item.get("after_partition_hash")
+        ):
+            raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_REPAIR_PARTITION_INVALID")
+        seen.add(relative)
+
+
+def _read_json_file(path: Path) -> JsonObject:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_REPAIR_MANIFEST_INVALID") from error
+    if not isinstance(value, dict):
+        raise DataValidationError("RESEARCH_SOURCE_SNAPSHOT_REPAIR_MANIFEST_INVALID")
+    return cast(JsonObject, value)
+
+
+def _missing_suspend_rows(comparison: pd.DataFrame) -> pd.DataFrame:
+    rows: list[JsonObject] = []
+    for value in comparison["missing_suspend_rows"].fillna("[]").astype(str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise DataValidationError("RESEARCH_SOURCE_REPAIR_ROWS_INVALID") from error
+        if not isinstance(parsed, list):
+            raise DataValidationError("RESEARCH_SOURCE_REPAIR_ROWS_INVALID")
+        rows.extend(cast(list[JsonObject], parsed))
+    required = [
+        "canonical_ts_code",
+        "source_ts_code",
+        "trade_date",
+        "suspend_timing",
+        "suspend_type",
+    ]
+    frame = pd.DataFrame(rows, columns=required)
+    if frame.empty or frame[["source_ts_code", "trade_date", "suspend_type"]].isna().any(axis=None):
+        raise DataValidationError("RESEARCH_SOURCE_REPAIR_ROWS_INVALID")
+    return frame.sort_values(required, na_position="first").drop_duplicates().reset_index(drop=True)
+
+
+def _validate_repair_rows_against_provider(repair: pd.DataFrame, provider: pd.DataFrame) -> None:
+    normalized = provider.copy()
+    keys = ["source_ts_code", "canonical_ts_code", "trade_date", "suspend_type"]
+    for frame in (repair, normalized):
+        for column in keys:
+            frame[column] = frame[column].astype(str)
+        frame["suspend_timing"] = frame["suspend_timing"].fillna("").astype(str)
+    expected = set(map(tuple, repair[[*keys, "suspend_timing"]].to_numpy()))
+    available = set(map(tuple, normalized[[*keys, "suspend_timing"]].to_numpy()))
+    if not expected.issubset(available):
+        raise DataValidationError("RESEARCH_SOURCE_REPAIR_PROVIDER_MISMATCH")
+
+
+def _hardlink_snapshot_files(source: Path, target: Path) -> None:
+    for item in source.glob("**/*"):
+        if not item.is_file():
+            continue
+        destination = target / item.relative_to(source)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.link(item, destination)
+
+
+def _apply_suspend_repairs(
+    *, frozen_root: Path, parent_root: Path, repair_rows: pd.DataFrame
+) -> list[JsonObject]:
+    changes: list[JsonObject] = []
+    working = repair_rows.copy()
+    working["year"] = working["trade_date"].astype(str).str[:4]
+    working["month"] = working["trade_date"].astype(str).str[4:6]
+    for (year, month), group in working.groupby(["year", "month"], sort=True):
+        relative = Path("suspend_d") / f"year={year}" / f"month={month}" / "data.parquet"
+        parent_file = parent_root / relative
+        child_file = frozen_root / relative
+        if not parent_file.is_file() or not child_file.is_file():
+            raise DataValidationError("RESEARCH_SOURCE_REPAIR_PARTITION_MISSING")
+        before_hash = file_sha256(parent_file)
+        existing = pd.read_parquet(parent_file)
+        additions = pd.DataFrame(
+            {
+                "ts_code": group["source_ts_code"].astype(str),
+                "trade_date": group["trade_date"].astype(str),
+                "suspend_timing": group["suspend_timing"],
+                "suspend_type": group["suspend_type"].astype(str),
+                "month": str(month),
+                "year": int(str(year)),
+            }
+        )
+        columns = list(existing.columns)
+        additions = additions.reindex(columns=columns)
+        combined = pd.concat([existing, additions], ignore_index=True)
+        normalized_timing = combined["suspend_timing"].fillna("").astype(str)
+        combined = combined.assign(_timing=normalized_timing)
+        combined = combined.drop_duplicates(
+            ["ts_code", "trade_date", "suspend_type", "_timing"], keep="first"
+        ).drop(columns="_timing")
+        combined = combined.sort_values(
+            ["trade_date", "ts_code", "suspend_type", "suspend_timing"],
+            na_position="first",
+        )
+        temporary = child_file.with_suffix(".repair.parquet")
+        combined.to_parquet(temporary, index=False)
+        os.replace(temporary, child_file)
+        added = len(combined) - len(existing)
+        if added != len(additions):
+            raise DataValidationError("RESEARCH_SOURCE_REPAIR_ROW_COUNT_MISMATCH")
+        changes.append(
+            {
+                "relative_path": relative.as_posix(),
+                "before_partition_hash": before_hash,
+                "after_partition_hash": file_sha256(child_file),
+                "rows_added": int(added),
+                "repair_row_content_hash": canonical_payload_hash(
+                    _json_records(group.drop(columns=["year", "month"]))
+                ),
+            }
+        )
+    return changes
+
+
+def _json_records(frame: pd.DataFrame) -> list[JsonObject]:
+    """Normalize pandas scalars/nulls before content-addressing repair rows."""
+
+    normalized = frame.astype(object).where(pd.notna(frame), None)
+    return cast(list[JsonObject], normalized.to_dict(orient="records"))
 
 
 def research_rebuild_datasets(*, include_fundamentals: bool) -> tuple[str, ...]:

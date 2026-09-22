@@ -14,6 +14,10 @@ from ashare_quant.data.security_identity import (
     SecurityIdentityResolver,
     canonicalize_security_datasets,
 )
+from ashare_quant.data.security_identity_transition import (
+    SecurityIdentityTransitionResolver,
+    load_identity_transition_contract,
+)
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.universe.storage import UNIVERSE_COLUMNS, UniverseStore
@@ -37,6 +41,8 @@ class UniverseBuildResult:
     security_identity_mapping_hash: str
     security_lifecycle_policy_version: str
     security_lifecycle_policy_hash: str
+    security_identity_transition_version: str
+    security_identity_transition_hash: str
 
 
 class UniverseBuilder:
@@ -57,12 +63,19 @@ class UniverseBuilder:
         self._lifecycle_resolver = SecurityLifecycleResolver.from_path(
             settings.security_identity.lifecycle_path
         )
+        self._transition_resolver = load_identity_transition_contract(
+            mode=settings.security_identity.identity_transition_mode,
+            artifact_path=settings.security_identity.identity_transition_path,
+        )
 
     def build(self, start_date: str, end_date: str) -> UniverseBuildResult:
         """Build and persist daily universe rows for an inclusive date range."""
 
         inputs = prepare_universe_inputs(
-            self._load_inputs(), self._identity_resolver, self._lifecycle_resolver
+            self._load_inputs(),
+            self._identity_resolver,
+            self._lifecycle_resolver,
+            self._transition_resolver,
         )
         rows_built = 0
         rows_written = 0
@@ -97,6 +110,8 @@ class UniverseBuilder:
             security_identity_mapping_hash=self._identity_resolver.mapping_hash,
             security_lifecycle_policy_version=self._lifecycle_resolver.policy_version,
             security_lifecycle_policy_hash=self._lifecycle_resolver.policy_hash,
+            security_identity_transition_version=(self._transition_resolver.artifact_version),
+            security_identity_transition_hash=self._transition_resolver.artifact_hash,
         )
 
     def preview(self, start_date: str, end_date: str) -> DataFrame:
@@ -109,6 +124,7 @@ class UniverseBuilder:
             end_date,
             identity_resolver=self._identity_resolver,
             lifecycle_resolver=self._lifecycle_resolver,
+            transition_resolver=self._transition_resolver,
         )
 
     def _load_inputs(self) -> dict[str, DataFrame]:
@@ -131,6 +147,7 @@ def build_universe_frame(
     end_date: str,
     identity_resolver: SecurityIdentityResolver | None = None,
     lifecycle_resolver: SecurityLifecycleResolver | None = None,
+    transition_resolver: SecurityIdentityTransitionResolver | None = None,
 ) -> DataFrame:
     """Build a daily universe frame from already loaded raw input frames."""
 
@@ -139,6 +156,7 @@ def build_universe_frame(
             inputs,
             identity_resolver or SecurityIdentityResolver.empty(),
             lifecycle_resolver or SecurityLifecycleResolver.empty(),
+            transition_resolver or SecurityIdentityTransitionResolver.empty(),
         )
 
     all_trade_dates = open_trade_dates(inputs["trade_cal"], None, end_date)
@@ -153,6 +171,7 @@ def build_universe_frame(
 
     calendar = pd.DataFrame({"trade_date": build_dates})
     base = calendar.merge(candidates, how="cross")
+    base = apply_identity_transition_scope(base, inputs.get("_predecessor_cutoffs"))
     base = add_listing_flags(base, all_trade_dates)
     base = merge_market_data(
         base,
@@ -186,11 +205,13 @@ def prepare_universe_inputs(
     inputs: dict[str, DataFrame],
     identity_resolver: SecurityIdentityResolver | None = None,
     lifecycle_resolver: SecurityLifecycleResolver | None = None,
+    transition_resolver: SecurityIdentityTransitionResolver | None = None,
 ) -> dict[str, DataFrame]:
     """Precompute full-history normalized inputs reused by chunked universe builds."""
 
     resolver = identity_resolver or SecurityIdentityResolver.empty()
     lifecycle = lifecycle_resolver or SecurityLifecycleResolver.empty()
+    transitions = transition_resolver or SecurityIdentityTransitionResolver.empty()
     prepared = canonicalize_security_datasets(inputs, resolver)
     prepared["_security_identity_prepared"] = pd.DataFrame()
     daily = normalize_daily(prepared["daily"])
@@ -215,6 +236,16 @@ def prepare_universe_inputs(
     ).drop_duplicates()
     prepared["_limit_prices"] = normalize_limit_prices(prepared["stk_limit"])
     prepared["_candidates"] = build_candidates(prepared["stock_basic"], daily)
+    prepared["_predecessor_cutoffs"] = pd.DataFrame(
+        [
+            {
+                "ts_code": item.predecessor_ts_code,
+                "transition_effective_date": item.effective_date,
+            }
+            for item in transitions.transition_records()
+        ],
+        columns=["ts_code", "transition_effective_date"],
+    )
     namechange = prepared.get("namechange", pd.DataFrame())
     if not namechange.empty:
         prepared["_st_keys"] = build_historical_st_keys(
@@ -226,6 +257,21 @@ def prepare_universe_inputs(
             ),
         )
     return prepared
+
+
+def apply_identity_transition_scope(
+    base: DataFrame, predecessor_cutoffs: DataFrame | None
+) -> DataFrame:
+    """Stop emitting predecessor-code universe rows at a verified transition."""
+
+    if predecessor_cutoffs is None or predecessor_cutoffs.empty:
+        return base
+    scoped = base.merge(predecessor_cutoffs, on="ts_code", how="left", validate="many_to_one")
+    scoped = scoped[
+        scoped["transition_effective_date"].isna()
+        | (scoped["trade_date"] < scoped["transition_effective_date"])
+    ]
+    return scoped.drop(columns="transition_effective_date")
 
 
 def build_historical_st_keys(namechange: DataFrame, all_trade_dates: list[str]) -> DataFrame:

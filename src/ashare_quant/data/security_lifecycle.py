@@ -9,16 +9,20 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pandas as pd
 
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.security_lifecycle_compiler import LifecycleIntervalCompiler
 from ashare_quant.utils.manifest import atomic_write_json
 
 type DataFrame = pd.DataFrame
 type JsonObject = dict[str, Any]
 type LifecycleEventType = Literal["ORDINARY_SUSPENSION", "LISTING_SUSPENDED"]
+
+if TYPE_CHECKING:
+    from ashare_quant.data.security_identity_transition import SecurityIdentityTransitionResolver
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +84,7 @@ class SecurityLifecycleResolver:
             ) from error
         if not isinstance(payload, dict):
             raise DataValidationError("SECURITY_LIFECYCLE_POLICY_INVALID: root must be an object")
-        if payload.get("schema_version") not in {1, 2}:
+        if payload.get("schema_version") not in {1, 2, 3}:
             raise DataValidationError(
                 "SECURITY_LIFECYCLE_POLICY_INVALID: unsupported schema_version"
             )
@@ -266,6 +270,10 @@ def publish_typed_lifecycle_catalog(
     base_catalog: SecurityLifecycleResolver,
     reports_root: Path,
     catalog_version: str,
+    open_trade_dates: tuple[str, ...],
+    research_start: str,
+    research_end: str,
+    identity_transitions: SecurityIdentityTransitionResolver | None = None,
 ) -> Path:
     """Compile VERIFIED ordinary/listing evidence into one partial runtime catalog."""
 
@@ -287,6 +295,12 @@ def publish_typed_lifecycle_catalog(
         }
         for event in base_catalog.events()
     ]
+    compilation = LifecycleIntervalCompiler(
+        open_trade_dates=open_trade_dates,
+        research_start=research_start,
+        research_end=research_end,
+        identity_transitions=identity_transitions,
+    ).compile(events, base_events=tuple(base_rows), require_closed=False)
     rows_by_identity = {
         (
             str(row["canonical_ts_code"]),
@@ -296,22 +310,8 @@ def publish_typed_lifecycle_catalog(
         ): row
         for row in base_rows
     }
-    event_map = {
-        "ORDINARY_FULL_DAY_SUSPENSION": "ORDINARY_SUSPENSION",
-        "FORMAL_LISTING_SUSPENSION_START": "LISTING_SUSPENDED",
-    }
-    for row in events.itertuples(index=False):
-        event_type = event_map.get(str(row.event_type))
-        if str(row.status) != "VERIFIED" or event_type is None:
-            continue
-        compiled = {
-            "canonical_ts_code": str(row.canonical_ts_code),
-            "event_type": event_type,
-            "effective_from": str(row.effective_start),
-            "effective_to": str(row.effective_end),
-            "evidence_source": str(row.package_id),
-            "evidence_reference": str(row.row_identity),
-        }
+    duplicate_count = 0
+    for compiled in compilation.events:
         identity = (
             str(compiled["canonical_ts_code"]),
             str(compiled["event_type"]),
@@ -320,6 +320,8 @@ def publish_typed_lifecycle_catalog(
         )
         # The base catalog remains immutable provenance when an official index
         # independently verifies the exact same lifecycle interval.
+        if identity in rows_by_identity:
+            duplicate_count += 1
         rows_by_identity.setdefault(identity, compiled)
     ordered = sorted(
         rows_by_identity.values(),
@@ -330,7 +332,7 @@ def publish_typed_lifecycle_catalog(
         ),
     )
     payload: JsonObject = {
-        "schema_version": 2,
+        "schema_version": 3,
         "artifact_name": "security_lifecycle_events",
         "policy_version": catalog_version,
         "completeness": "partial",
@@ -341,6 +343,14 @@ def publish_typed_lifecycle_catalog(
         policy_hash="0" * 64,
         events=tuple(_parse_event(row) for row in ordered),
     )
+    compiler_report = dict(compilation.report)
+    compiler_report["counts"] = {
+        **cast(JsonObject, compiler_report["counts"]),
+        "base_runtime_intervals": len(base_rows),
+        "deduplicated_intervals": duplicate_count
+        + int(cast(JsonObject, compiler_report["counts"])["base_events_covering_official_starts"]),
+        "published_runtime_intervals": resolver.event_count,
+    }
     logical = {
         "catalog_version": catalog_version,
         "base_catalog_hash": base_catalog.policy_hash,
@@ -349,6 +359,17 @@ def publish_typed_lifecycle_catalog(
         "events_hash": canonical_payload_hash(ordered),
         "event_count": resolver.event_count,
         "completeness": "partial",
+        "compiler_contract_version": compiler_report["compiler_contract_version"],
+        "compiler_report_hash": canonical_payload_hash(compiler_report),
+        "research_start": research_start,
+        "research_end": research_end,
+        "trade_calendar_hash": compiler_report["trade_calendar_hash"],
+        "identity_transition_version": (
+            "none" if identity_transitions is None else identity_transitions.artifact_version
+        ),
+        "identity_transition_hash": (
+            "none" if identity_transitions is None else identity_transitions.artifact_hash
+        ),
     }
     catalog_id = f"security_lifecycle_typed_catalog_{canonical_payload_hash(logical)[:24]}"
     output = reports_root / "security_lifecycle_typed_catalog" / catalog_id
@@ -359,14 +380,18 @@ def publish_typed_lifecycle_catalog(
     staging = Path(tempfile.mkdtemp(dir=output.parent, prefix=f".{catalog_id}.staging-"))
     try:
         atomic_write_json(staging / "events.json", payload)
+        atomic_write_json(staging / "compiler_report.json", compiler_report)
         atomic_write_json(
             staging / "manifest.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "artifact_name": "security_lifecycle_typed_catalog",
                 "catalog_id": catalog_id,
                 "logical_identity": logical,
-                "artifact_hashes": {"events.json": file_sha256(staging / "events.json")},
+                "artifact_hashes": {
+                    "compiler_report.json": file_sha256(staging / "compiler_report.json"),
+                    "events.json": file_sha256(staging / "events.json"),
+                },
             },
         )
         _validate_typed_catalog_contents(
@@ -404,10 +429,29 @@ def _validate_typed_catalog_contents(
         not isinstance(manifest, dict)
         or not isinstance(payload, dict)
         or manifest.get("catalog_id") != expected_id
-        or manifest.get("artifact_hashes") != {"events.json": file_sha256(path / "events.json")}
-        or payload.get("schema_version") != 2
         or payload.get("completeness") != "partial"
     ):
+        raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_INVALID")
+    schema_version = manifest.get("schema_version")
+    payload_schema = payload.get("schema_version")
+    if schema_version == 1 and payload_schema == 2:
+        expected_hashes = {"events.json": file_sha256(path / "events.json")}
+        compiler_report: JsonObject | None = None
+    elif schema_version == 2 and payload_schema == 3:
+        try:
+            parsed_report = json.loads((path / "compiler_report.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_INVALID") from error
+        if not isinstance(parsed_report, dict):
+            raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_INVALID")
+        compiler_report = cast(JsonObject, parsed_report)
+        expected_hashes = {
+            "compiler_report.json": file_sha256(path / "compiler_report.json"),
+            "events.json": file_sha256(path / "events.json"),
+        }
+    else:
+        raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_INVALID")
+    if manifest.get("artifact_hashes") != expected_hashes:
         raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_INVALID")
     source = validate_official_lifecycle_index(official_index)
     logical = cast(JsonObject, manifest.get("logical_identity", {}))
@@ -417,6 +461,11 @@ def _validate_typed_catalog_contents(
         != file_sha256(official_index / "manifest.json")
         or logical.get("events_hash") != canonical_payload_hash(payload.get("events"))
         or f"security_lifecycle_typed_catalog_{canonical_payload_hash(logical)[:24]}" != expected_id
+    ):
+        raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_IDENTITY_MISMATCH")
+    if compiler_report is not None and (
+        logical.get("compiler_report_hash") != canonical_payload_hash(compiler_report)
+        or logical.get("trade_calendar_hash") != compiler_report.get("trade_calendar_hash")
     ):
         raise DataValidationError("SECURITY_LIFECYCLE_TYPED_CATALOG_IDENTITY_MISMATCH")
     SecurityLifecycleResolver(
