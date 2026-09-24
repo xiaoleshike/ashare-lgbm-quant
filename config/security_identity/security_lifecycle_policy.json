@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "artifact_name": "security_lifecycle_policy",
-  "policy_version": "security_lifecycle_audit_v2_4_interval_compiler_scope",
-  "classification_contract_version": 6,
+  "policy_version": "security_lifecycle_audit_v2_5_interval_union",
+  "classification_contract_version": 7,
   "ordinary_suspension": {
     "source": "Tushare suspend_d",
     "full_session_suspend_type": "S",
@@ -16,7 +16,8 @@
     "same_day_s_r_is_not_automatic_policy_collision": true,
     "same_day_s_r_with_quote_is_non_blocking": true,
     "listing_boundaries_use_open_sessions": true,
-    "ordinary_boundary_checks_require_listed_session": true
+    "ordinary_boundary_checks_require_listed_session": true,
+    "overlapping_authoritative_intervals": "deterministic_open_session_union"
   },
   "listing_suspension": {
     "requires_verified_evidence": true,

@@ -34,9 +34,9 @@ type LifecycleClassification = Literal[
     "UNRESOLVED",
 ]
 
-SCANNER_SCHEMA_VERSION = 7
-LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
-CLASSIFICATION_CONTRACT_VERSION = 6
+SCANNER_SCHEMA_VERSION = 8
+LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7})
+CLASSIFICATION_CONTRACT_VERSION = 7
 ARTIFACT_NAME = "security_lifecycle_scan"
 REQUIRED_ARTIFACTS = frozenset(
     {
@@ -270,6 +270,120 @@ def normalize_ordinary_suspension_intervals(
         pd.DataFrame(intervals, columns=interval_columns),
         pd.DataFrame(boundaries, columns=boundary_columns),
     )
+
+
+def coalesce_lifecycle_intervals(
+    intervals: DataFrame,
+    open_sessions: tuple[str, ...],
+) -> DataFrame:
+    """Union overlapping or adjacent same-state intervals on the governed calendar."""
+
+    columns = [
+        "canonical_ts_code",
+        "state",
+        "effective_start",
+        "effective_end",
+        "start_source",
+        "end_source",
+        "evidence_hash",
+    ]
+    if intervals.empty:
+        return pd.DataFrame(columns=columns)
+    if not set(columns).issubset(intervals.columns):
+        raise DataValidationError("SECURITY_LIFECYCLE_INTERVAL_SCHEMA_INVALID")
+    calendar = tuple(sorted(set(open_sessions)))
+    positions = {date: index for index, date in enumerate(calendar)}
+    if not calendar:
+        raise DataValidationError("SECURITY_LIFECYCLE_COVERAGE_INSUFFICIENT: trade_cal")
+
+    normalized = intervals.loc[:, columns].copy()
+    for field in ("canonical_ts_code", "state", "effective_start", "effective_end"):
+        normalized[field] = normalized[field].astype(str)
+    if (
+        ~normalized["effective_start"].isin(positions)
+        | ~normalized["effective_end"].isin(positions)
+        | normalized["effective_start"].gt(normalized["effective_end"])
+    ).any():
+        raise DataValidationError("SECURITY_LIFECYCLE_INTERVAL_BOUNDARY_INVALID")
+
+    rows: list[JsonObject] = []
+    for (code, state), group in normalized.groupby(["canonical_ts_code", "state"], sort=True):
+        ordered = group.sort_values(
+            ["effective_start", "effective_end", "evidence_hash", "start_source", "end_source"]
+        )
+        components: list[JsonObject] = []
+        current_start = ""
+        current_end = ""
+
+        for record in ordered.to_dict("records"):
+            start = str(record["effective_start"])
+            end = str(record["effective_end"])
+            component = cast(JsonObject, record)
+            if not components:
+                current_start, current_end = start, end
+                components = [component]
+                continue
+            if positions[start] <= positions[current_end] + 1:
+                current_end = max(current_end, end)
+                components.append(component)
+                continue
+            rows.append(
+                _coalesced_interval_row(
+                    str(code), str(state), current_start, current_end, components
+                )
+            )
+            current_start, current_end = start, end
+            components = [component]
+        if components:
+            rows.append(
+                _coalesced_interval_row(
+                    str(code), str(state), current_start, current_end, components
+                )
+            )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _coalesced_interval_row(
+    code: str,
+    state: str,
+    effective_start: str,
+    effective_end: str,
+    components: list[JsonObject],
+) -> JsonObject:
+    sources = {
+        str(component[field])
+        for component in components
+        for field in ("start_source", "end_source")
+    }
+    source = next(iter(sources)) if len(sources) == 1 else "COMBINED_AUTHORITATIVE_EVIDENCE"
+    evidence_components = [
+        {
+            key: component[key]
+            for key in (
+                "effective_start",
+                "effective_end",
+                "start_source",
+                "end_source",
+                "evidence_hash",
+            )
+        }
+        for component in components
+    ]
+    return {
+        "canonical_ts_code": code,
+        "state": state,
+        "effective_start": effective_start,
+        "effective_end": effective_end,
+        "start_source": source,
+        "end_source": source,
+        "evidence_hash": canonical_payload_hash(
+            {
+                "canonical_ts_code": code,
+                "state": state,
+                "components": evidence_components,
+            }
+        ),
+    }
 
 
 class SecurityLifecycleScanner:
@@ -601,7 +715,10 @@ class SecurityLifecycleScanner:
                 ],
                 columns=interval_columns,
             )
-            ordinary = pd.concat([ordinary, verified_ordinary], ignore_index=True).drop_duplicates()
+            ordinary = coalesce_lifecycle_intervals(
+                pd.concat([ordinary, verified_ordinary], ignore_index=True).drop_duplicates(),
+                calendar,
+            )
             intervals = pd.concat([ordinary, listing], ignore_index=True)
             con.register("lifecycle_intervals_input", intervals)
             classified_daily = self._classify_daily(con)

@@ -18,6 +18,7 @@ from ashare_quant.data.security_lifecycle_audit import (
     CLASSIFICATION_CONTRACT_VERSION,
     LifecycleAuditPolicy,
     SecurityLifecycleScanner,
+    coalesce_lifecycle_intervals,
     normalize_ordinary_suspension_intervals,
     validate_pass_lifecycle_scan,
     validate_security_lifecycle_artifact,
@@ -602,6 +603,78 @@ def test_medium_event_set_compresses_by_interval_not_stock_day_loop() -> None:
     assert len(intervals) == 200
     assert len(boundaries) == 200
     assert not boundaries["blocking"].any()
+
+
+def test_overlapping_ordinary_evidence_is_unioned_before_classification() -> None:
+    intervals = pd.DataFrame(
+        [
+            {
+                "canonical_ts_code": "000001.SZ",
+                "state": "ORDINARY_SUSPENSION",
+                "effective_start": "20200103",
+                "effective_end": "20200106",
+                "start_source": "TUSHARE_SUSPEND_D_DAILY_SNAPSHOT",
+                "end_source": "LAST_CONSECUTIVE_SUSPEND_D_S_SNAPSHOT",
+                "evidence_hash": "a" * 64,
+            },
+            {
+                "canonical_ts_code": "000001.SZ",
+                "state": "ORDINARY_SUSPENSION",
+                "effective_start": "20200106",
+                "effective_end": "20200107",
+                "start_source": "VERIFIED_LIFECYCLE_EVIDENCE",
+                "end_source": "VERIFIED_LIFECYCLE_EVIDENCE",
+                "evidence_hash": "b" * 64,
+            },
+        ]
+    )
+
+    merged = coalesce_lifecycle_intervals(intervals, DATES)
+
+    assert merged[["effective_start", "effective_end"]].to_dict("records") == [
+        {"effective_start": "20200103", "effective_end": "20200107"}
+    ]
+    assert merged.loc[0, "start_source"] == "COMBINED_AUTHORITATIVE_EVIDENCE"
+    assert len(str(merged.loc[0, "evidence_hash"])) == 64
+
+
+def test_scanner_unions_suspend_d_and_verified_ordinary_evidence(tmp_path: Path) -> None:
+    scanner = _fixture_scanner(tmp_path, include_unresolved=False)
+    evidence_path = tmp_path / "ordinary-evidence.json"
+    payload = _evidence()
+    events = payload["events"]
+    assert isinstance(events, list)
+    events.append(
+        {
+            "canonical_ts_code": "000001.SZ",
+            "event_type": "ORDINARY_SUSPENSION",
+            "effective_from": "20200103",
+            "effective_to": "20200106",
+            "evidence_source": "fixture official announcement",
+            "evidence_reference": "fixture://ordinary-suspension",
+        }
+    )
+    _write_json(evidence_path, payload)
+    scanner = SecurityLifecycleScanner(
+        raw_root=scanner.raw_root,
+        processed_root=scanner.processed_root,
+        reports_root=scanner.reports_root,
+        identity_resolver=scanner.identity,
+        lifecycle_evidence=SecurityLifecycleResolver.from_path(evidence_path),
+        lifecycle_policy=scanner.policy,
+        identity_transitions=SecurityIdentityTransitionResolver.empty(),
+    )
+
+    result = scanner.scan(DATES[0], DATES[-1])
+    validate_security_lifecycle_artifact(result.output_dir)
+    classified = pd.read_parquet(result.output_dir / "classified_gaps.parquet")
+    ordinary = classified[
+        classified["canonical_ts_code"].eq("000001.SZ")
+        & classified["classification"].eq("ORDINARY_SUSPENSION")
+    ]
+    assert ordinary[["gap_start", "gap_end", "session_count"]].to_dict("records") == [
+        {"gap_start": "20200103", "gap_end": "20200106", "session_count": 2}
+    ]
 
 
 def test_v3_verified_events_are_loaded_without_rewrite() -> None:
