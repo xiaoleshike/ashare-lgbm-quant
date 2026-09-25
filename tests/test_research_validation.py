@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from ashare_quant.backtest.corporate_actions import default_corporate_action_execution_policy
 from ashare_quant.backtest.executable_validation import _signals
 from ashare_quant.config.settings import AppSettings, PathSettings
 from ashare_quant.data.exceptions import DataValidationError
@@ -632,18 +633,27 @@ def test_ranker_executor_passes_bound_transition_to_simulator(
         }
     }
 
-    with pytest.raises(DataValidationError, match="CORPORATE_ACTION_EXECUTION_UNSUPPORTED"):
-        executor._executable_metrics(
-            pd.DataFrame(
-                {
-                    "trade_date": [dates[0]],
-                    "ts_code": ["000001.SZ"],
-                    "prediction_score": [1.0],
-                }
-            ),
-            5,
-            contract,
-        )
+    metrics = executor._executable_metrics(
+        pd.DataFrame(
+            {
+                "trade_date": [dates[0]],
+                "ts_code": ["000001.SZ"],
+                "prediction_score": [1.0],
+            }
+        ),
+        5,
+        contract,
+    )
+
+    assert metrics["status"] == "COMPLETE"
+    assert all(
+        summary["corporate_action_transformations"] == 1
+        for summary in metrics["accounting_summaries"].values()
+    )
+    assert metrics["security_identity_transitions"] == {
+        "security_identity_transition_version": "fixture-v1",
+        "security_identity_transition_hash": "b" * 64,
+    }
 
 
 def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
@@ -706,7 +716,7 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
         },
         "lightgbm_version": "fixture",
         "evaluation_contract_version": 4,
-        "accounting_schema_version": 2,
+        "accounting_schema_version": 3,
         "require_executable": True,
         "holding_period_days": 5,
         "cost_policy_hash": "fixture",
@@ -771,7 +781,7 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
 
     def execute(**kwargs: object) -> FoldExecutionResult:
         observed["executor_transitions"] = executor._identity_transitions
-        executor._executable_metrics(
+        metrics = executor._executable_metrics(
             pd.DataFrame(
                 {
                     "trade_date": [dates[0]],
@@ -782,7 +792,11 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
             5,
             execution_contract,
         )
-        raise AssertionError("simulator must reject a predecessor position crossing transition")
+        observed["corporate_action_transformations"] = tuple(
+            summary["corporate_action_transformations"]
+            for summary in metrics["accounting_summaries"].values()
+        )
+        raise RuntimeError("SIMULATOR_WIRING_VERIFIED")
 
     monkeypatch.setattr(executor, "execute", execute)
     lifecycle_manifest = tmp_path / "fixture-scan" / "manifest.json"
@@ -794,7 +808,7 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
         executor=executor,
     )
 
-    with pytest.raises(DataValidationError, match="CORPORATE_ACTION_EXECUTION_UNSUPPORTED"):
+    with pytest.raises(RuntimeError, match="SIMULATOR_WIRING_VERIFIED"):
         runner.run(
             experiment_manifest=plan,
             experiment_id="h5_fixture",
@@ -806,6 +820,7 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
     assert observed == {
         "preflight_transitions": transitions,
         "executor_transitions": transitions,
+        "corporate_action_transformations": (1, 1, 1),
     }
 
 
@@ -1048,7 +1063,15 @@ def test_backend_benchmark_source_consumes_latest_selection_fold_without_model_c
 
 @pytest.mark.parametrize(
     "mutation",
-    ("aggregate", "summary", "fold_manifest", "fold_child", "extra_fold", "missing_fold"),
+    (
+        "aggregate",
+        "summary",
+        "fold_manifest",
+        "fold_child",
+        "corporate_action_child",
+        "extra_fold",
+        "missing_fold",
+    ),
 )
 def test_completed_walk_forward_tamper_fails_status_resume_and_recovery(
     tmp_path: Path,
@@ -1078,6 +1101,9 @@ def test_completed_walk_forward_tamper_fails_status_resume_and_recovery(
     elif mutation == "fold_child":
         target = result.output_dir / "folds" / "fold_1" / "ranking_metrics.json"
         target.write_text("{}", encoding="utf-8")
+    elif mutation == "corporate_action_child":
+        target = result.output_dir / "folds" / "fold_1" / "corporate_actions.parquet"
+        target.write_bytes(target.read_bytes() + b"tamper")
     elif mutation == "extra_fold":
         extra = result.output_dir / "folds" / "unexpected_fold"
         extra.mkdir()
@@ -1276,7 +1302,7 @@ class FakeExecutor:
             },
             "lightgbm_version": "4.fixture",
             "evaluation_contract_version": self.contract_version,
-            "accounting_schema_version": 2,
+            "accounting_schema_version": 3,
             "require_executable": require_executable,
             "holding_period_days": horizon,
             "cost_policy_hash": self.cost_policy_hash,
@@ -1329,12 +1355,18 @@ class FakeExecutor:
         }
         executable = {
             "status": "COMPLETE",
-            "accounting_schema_version": 2,
+            "accounting_schema_version": 3,
             "top_n": {
                 str(top_n): {"total_return": index / 100, "sharpe": 0.5} for top_n in (10, 20, 50)
             },
             "accounting_summaries": {},
             "cost_policy_hash": "cost-fixture",
+            "corporate_action_execution_policy": (
+                default_corporate_action_execution_policy().to_dict()
+            ),
+            "corporate_action_execution_policy_hash": (
+                default_corporate_action_execution_policy().policy_hash
+            ),
         }
         return FoldExecutionResult(
             predictions=predictions,

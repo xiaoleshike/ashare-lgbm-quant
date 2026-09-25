@@ -13,7 +13,11 @@ import numpy as np
 import pandas as pd
 
 from ashare_quant.backtest.data import load_backtest_inputs, load_model_and_features
-from ashare_quant.backtest.engine import BacktestResult, simulate_portfolio
+from ashare_quant.backtest.engine import (
+    ACCOUNTING_SCHEMA_VERSION,
+    BacktestResult,
+    simulate_portfolio,
+)
 from ashare_quant.backtest.provenance import (
     ModelEvaluationBoundary,
     require_oos_evaluation,
@@ -127,6 +131,9 @@ class HistoricalBacktestEngine:
         ]
         daily = pd.concat([result.daily_returns for result in results], ignore_index=True)
         holdings = pd.concat([result.holdings for result in results], ignore_index=True)
+        corporate_actions = pd.concat(
+            [result.corporate_actions for result in results], ignore_index=True
+        )
         metrics = {
             str(result.top_n): _metrics_with_years(
                 result,
@@ -159,7 +166,7 @@ class HistoricalBacktestEngine:
             "prediction_rows": len(predictions),
             "label_audit": label_audit,
             "metrics": metrics,
-            "accounting_schema_version": 2,
+            "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
             "accounting_summaries": {
                 str(result.top_n): result.accounting_summary for result in results
             },
@@ -180,7 +187,7 @@ class HistoricalBacktestEngine:
             boundary,
             results,
         )
-        _publish(output_dir, summary, manifest, predictions, daily, holdings)
+        _publish(output_dir, summary, manifest, predictions, daily, holdings, corporate_actions)
         return HistoricalBacktestResult(
             run_id, output_dir, champion.model_id, requested_start, effective_end, metrics
         )
@@ -255,9 +262,24 @@ class HistoricalBacktestEngine:
             "effective_end_date": effective_end,
             "out_of_sample": True,
             "purpose": "OOS_EVIDENCE",
-            "accounting_schema_version": 2,
+            "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
             "execution_cost_policy": results[0].cost_policy,
             "cost_policy_hash": results[0].cost_policy["cost_policy_hash"],
+            "corporate_action_execution_policy": results[0].corporate_action_policy,
+            "corporate_action_execution_policy_hash": results[0].corporate_action_policy[
+                "policy_hash"
+            ],
+            "security_identity_transitions": {
+                key: results[0].execution_provenance[key]
+                for key in (
+                    "security_identity_transition_version",
+                    "security_identity_transition_hash",
+                )
+            },
+            "corporate_action_ledger_hashes": {
+                str(result.top_n): result.execution_provenance["corporate_action_ledger_hash"]
+                for result in results
+            },
             "label_audit": label_audit,
             "git_commit": git["commit"],
             "git_dirty": git["dirty"],
@@ -467,6 +489,7 @@ def _publish(
     predictions: DataFrame,
     daily: DataFrame,
     holdings: DataFrame,
+    corporate_actions: DataFrame,
 ) -> None:
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     if output_dir.exists():
@@ -487,6 +510,7 @@ def _publish(
         predictions.to_parquet(staging / "predictions.parquet", index=False)
         daily.to_parquet(staging / "daily_returns.parquet", index=False)
         holdings.to_parquet(staging / "holdings.parquet", index=False)
+        corporate_actions.to_parquet(staging / "corporate_actions.parquet", index=False)
         atomic_write_json(staging / "summary.json", summary)
         (staging / "backtest_report.md").write_text(_render_report(summary), encoding="utf-8")
         atomic_write_json(staging / "manifest.json", manifest)

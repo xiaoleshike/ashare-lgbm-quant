@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from ashare_quant.backtest import BacktestRunner
+from ashare_quant.backtest.corporate_actions import default_corporate_action_execution_policy
 from ashare_quant.cli import main
 from ashare_quant.config.settings import PromotionReviewSettings
 from ashare_quant.data.exceptions import DataValidationError
@@ -114,6 +115,7 @@ def _evidence(
             "alerts": [],
         },
     )
+    policy = default_corporate_action_execution_policy()
     return PromotionEvidencePaths(
         challenger_evaluation=_write(
             reports_root / "challenger_evaluation" / "run" / "manifest.json",
@@ -141,9 +143,11 @@ def _evidence(
             {
                 "artifact_name": "executable_oos_portfolio_validation_manifest",
                 "schema_version": 2,
-                "accounting_schema_version": 2,
+                "accounting_schema_version": 3,
                 "cost_policy_hash": "c" * 64,
                 "execution_cost_policy": {"cost_policy_hash": "c" * 64},
+                "corporate_action_execution_policy_hash": policy.policy_hash,
+                "corporate_action_execution_policy": policy.to_dict(),
                 "challenger_model_id": candidate_id,
                 "champion_model_id": champion_id,
                 "maximum_signal_date": date,
@@ -256,6 +260,27 @@ def test_legacy_executable_accounting_cannot_become_promotion_evidence(
     paths.executable_validation.write_text(json.dumps(executable), encoding="utf-8")
 
     with pytest.raises(DataValidationError, match="legacy or unsupported accounting schema"):
+        PromotionGovernanceService(models_root=models_root, reports_root=reports_root).create(
+            model_id=candidate_id,
+            evidence_cutoff_date="20260729",
+            evidence_paths=paths,
+        )
+
+
+def test_unreviewed_corporate_action_policy_cannot_become_promotion_evidence(
+    tmp_path: Path,
+) -> None:
+    models_root = tmp_path / "models"
+    reports_root = tmp_path / "reports"
+    _, champion_id, candidate_id = _setup_registry(models_root)
+    paths = _evidence(reports_root, candidate_id, champion_id)
+    executable = json.loads(paths.executable_validation.read_text(encoding="utf-8"))
+    executable["corporate_action_execution_policy"]["version"] = "unreviewed-v2"
+    executable["corporate_action_execution_policy_hash"] = "f" * 64
+    executable["corporate_action_execution_policy"]["policy_hash"] = "f" * 64
+    paths.executable_validation.write_text(json.dumps(executable), encoding="utf-8")
+
+    with pytest.raises(DataValidationError, match="CORPORATE_ACTION_EXECUTION_POLICY_UNSUPPORTED"):
         PromotionGovernanceService(models_root=models_root, reports_root=reports_root).create(
             model_id=candidate_id,
             evidence_cutoff_date="20260729",

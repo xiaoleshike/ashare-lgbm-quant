@@ -53,7 +53,8 @@ def test_executable_validation_uses_next_open_horizon_exit_and_costs(
         summary["terminal_untradable_policy"]
         == "explicit_terminal_event_only; unresolved_fails_closed"
     )
-    assert summary["accounting_schema_version"] == 2
+    assert summary["accounting_schema_version"] == 3
+    assert len(summary["corporate_action_execution_policy_hash"]) == 64
     assert summary["top_n"] == [10, 20, 50]
     assert {
         "trade_win_rate",
@@ -90,6 +91,7 @@ def test_executable_validation_is_oos_label_free_deterministic_and_read_only(
         "daily_returns.parquet",
         "trades.parquet",
         "holdings.parquet",
+        "corporate_actions.parquet",
         "manifest.json",
     }
 

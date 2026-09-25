@@ -46,6 +46,7 @@ def test_historical_backtest_publishes_required_deterministic_outputs(
         "predictions.parquet",
         "daily_returns.parquet",
         "holdings.parquet",
+        "corporate_actions.parquet",
         "manifest.json",
     }
     summary = json.loads((first.output_dir / "summary.json").read_text(encoding="utf-8"))

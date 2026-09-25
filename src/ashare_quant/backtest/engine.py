@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
 
+from ashare_quant.backtest.corporate_actions import (
+    CORPORATE_ACTION_MARK_VALUE_TOLERANCE,
+    CorporateActionExecutionPolicy,
+    default_corporate_action_execution_policy,
+    validate_corporate_action_execution_policy,
+)
 from ashare_quant.backtest.costs import ExecutionCostPolicy, TradeCosts
 from ashare_quant.config.settings import BacktestSettings
 from ashare_quant.data.exceptions import DataValidationError
@@ -17,7 +25,7 @@ type DataFrame = pd.DataFrame
 type BacktestPurpose = Literal["diagnostic", "oos_evidence", "executable_validation"]
 type DelayedExitPolicy = Literal["fail_at_alert", "carry_to_calendar_end"]
 
-ACCOUNTING_SCHEMA_VERSION = 2
+ACCOUNTING_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +39,9 @@ class BacktestInputs:
     identity_transitions: tuple[SecurityIdentityTransition, ...] = ()
     identity_transition_version: str | None = None
     identity_transition_hash: str | None = None
+    corporate_action_policy: CorporateActionExecutionPolicy = field(
+        default_factory=default_corporate_action_execution_policy
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,9 +52,12 @@ class BacktestResult:
     daily_returns: DataFrame
     trades: DataFrame
     holdings: DataFrame
+    corporate_actions: DataFrame
     metrics: dict[str, float | int | None]
     accounting_summary: dict[str, float | int] = field(default_factory=dict)
     cost_policy: dict[str, object] = field(default_factory=dict)
+    corporate_action_policy: dict[str, object] = field(default_factory=dict)
+    execution_provenance: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -52,6 +66,7 @@ class Position:
 
     position_id: str
     ts_code: str
+    original_entry_ts_code: str
     shares: float
     entry_date: str
     entry_calendar_index: int
@@ -104,6 +119,10 @@ def simulate_portfolio(
         or len(inputs.identity_transition_hash) != 64
     ):
         raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONTRACT_REQUIRED")
+    if strict:
+        validate_corporate_action_execution_policy(
+            inputs.corporate_action_policy.to_dict(), inputs.corporate_action_policy.policy_hash
+        )
     calendar = list(inputs.calendar)
     if not calendar:
         raise DataValidationError("BACKTEST_MARKET_DATA_INCOMPLETE: empty trading calendar")
@@ -112,6 +131,8 @@ def simulate_portfolio(
     transition_by_predecessor = {
         item.predecessor_ts_code: item for item in inputs.identity_transitions
     }
+    if len(transition_by_predecessor) != len(inputs.identity_transitions):
+        raise DataValidationError("SECURITY_IDENTITY_TRANSITION_UNSUPPORTED_TOPOLOGY")
     benchmark_returns = _benchmark_returns(inputs.benchmark)
     cost_policy = ExecutionCostPolicy(settings.execution_costs)
     positions: dict[str, Position] = {}
@@ -120,6 +141,7 @@ def simulate_portfolio(
     daily_rows: list[dict[str, object]] = []
     trade_rows: list[dict[str, object]] = []
     holding_rows: list[dict[str, object]] = []
+    corporate_action_rows: list[dict[str, object]] = []
     counters = {
         "stale_valuation_days": 0,
         "maximum_stale_days": 0,
@@ -128,6 +150,7 @@ def simulate_portfolio(
         "sell_delay_breaches": 0,
         "maximum_delayed_exit_days": 0,
         "resolved_after_sell_delay_breach": 0,
+        "unsupported_transition_crossings": 0,
     }
 
     signal_start = str(inputs.signals["trade_date"].astype(str).min())
@@ -139,17 +162,19 @@ def simulate_portfolio(
     for current_date in simulation_dates:
         day_cost = 0.0
 
+        _apply_effective_corporate_actions(
+            positions,
+            transition_by_predecessor,
+            current_date=current_date,
+            transition_version=str(inputs.identity_transition_version),
+            transition_hash=str(inputs.identity_transition_hash),
+            policy=inputs.corporate_action_policy,
+            ledger_rows=corporate_action_rows,
+            top_n=top_n,
+        )
+
         for code in list(positions):
             position = positions[code]
-            transition = transition_by_predecessor.get(position.ts_code)
-            if transition is not None and current_date >= transition.effective_date:
-                raise DataValidationError(
-                    "CORPORATE_ACTION_EXECUTION_UNSUPPORTED: predecessor position crosses "
-                    f"security-code transition position_id={position.position_id} "
-                    f"predecessor={transition.predecessor_ts_code} "
-                    f"successor={transition.successor_ts_code} "
-                    f"effective_date={transition.effective_date}"
-                )
             if current_date < position.target_exit_date:
                 continue
             price = price_map.get((current_date, code))
@@ -253,6 +278,7 @@ def simulate_portfolio(
                 position = Position(
                     position_id=position_id,
                     ts_code=code,
+                    original_entry_ts_code=code,
                     shares=shares,
                     entry_date=current_date,
                     entry_calendar_index=calendar_index[current_date],
@@ -291,6 +317,7 @@ def simulate_portfolio(
                     "trade_date": current_date,
                     "position_id": position.position_id,
                     "ts_code": position.ts_code,
+                    "original_entry_ts_code": position.original_entry_ts_code,
                     "shares": position.shares,
                     "market_value": market_value,
                     "entry_date": position.entry_date,
@@ -336,23 +363,51 @@ def simulate_portfolio(
     daily = pd.DataFrame(daily_rows)
     trades = pd.DataFrame(trade_rows)
     holdings = pd.DataFrame(holding_rows)
-    _validate_trade_lifecycles(trades, positions)
-    summary = _accounting_summary(daily, trades, positions, counters)
+    corporate_actions = pd.DataFrame(corporate_action_rows, columns=_corporate_action_columns())
+    _validate_corporate_action_ledger(corporate_actions)
+    _validate_trade_lifecycles(trades, positions, corporate_actions)
+    summary = _accounting_summary(daily, trades, positions, counters, corporate_actions)
+    metrics = calculate_metrics(daily, trades, settings)
+    metrics.update(
+        {
+            "corporate_action_transformations": int(len(corporate_actions)),
+            "corporate_action_positions": int(
+                corporate_actions["position_id"].nunique() if not corporate_actions.empty else 0
+            ),
+            "corporate_action_mark_value_delta_max": float(
+                corporate_actions["mark_value_delta"].abs().max()
+                if not corporate_actions.empty
+                else 0.0
+            ),
+            "unsupported_transition_crossings": 0,
+        }
+    )
     return BacktestResult(
         top_n=top_n,
         daily_returns=daily,
         trades=trades,
         holdings=holdings,
-        metrics=calculate_metrics(daily, trades, settings),
+        corporate_actions=corporate_actions,
+        metrics=metrics,
         accounting_summary=summary,
         cost_policy=cost_policy.to_dict(),
+        corporate_action_policy=inputs.corporate_action_policy.to_dict(),
+        execution_provenance={
+            "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
+            "security_identity_transition_version": inputs.identity_transition_version,
+            "security_identity_transition_hash": inputs.identity_transition_hash,
+            "corporate_action_execution_policy_version": inputs.corporate_action_policy.version,
+            "corporate_action_execution_policy_hash": inputs.corporate_action_policy.policy_hash,
+            "corporate_action_count": len(corporate_actions),
+            "corporate_action_ledger_hash": _frame_hash(corporate_actions),
+        },
     )
 
 
 def calculate_metrics(
     daily: DataFrame, trades: DataFrame, settings: BacktestSettings
 ) -> dict[str, float | int | None]:
-    """Compute schema-v2 metrics from compounded portfolio and session returns."""
+    """Compute schema-v3 metrics from compounded portfolio and session returns."""
 
     if daily.empty:
         return {}
@@ -481,6 +536,208 @@ def _signals_by_entry_date(
         )
         by_entry.setdefault(entry_date, []).extend(selected)
     return by_entry
+
+
+def _apply_effective_corporate_actions(
+    positions: dict[str, Position],
+    transition_by_predecessor: dict[str, SecurityIdentityTransition],
+    *,
+    current_date: str,
+    transition_version: str,
+    transition_hash: str,
+    policy: CorporateActionExecutionPolicy,
+    ledger_rows: list[dict[str, object]],
+    top_n: int | None = None,
+) -> None:
+    """Validate all due chains, then atomically migrate position identities."""
+
+    plans: list[tuple[str, Position, tuple[SecurityIdentityTransition, ...]]] = []
+    occupied = set(positions)
+    final_codes: set[str] = set()
+    for source_code, position in positions.items():
+        chain: list[SecurityIdentityTransition] = []
+        current_code = position.ts_code
+        seen: set[str] = set()
+        previous_effective_date = ""
+        while (transition := transition_by_predecessor.get(current_code)) is not None:
+            if transition.effective_date > current_date:
+                break
+            if current_code in seen or transition.successor_ts_code in seen:
+                raise DataValidationError("SECURITY_IDENTITY_TRANSITION_CONFLICT: cycle")
+            if previous_effective_date and transition.effective_date <= previous_effective_date:
+                raise DataValidationError(
+                    "SECURITY_IDENTITY_TRANSITION_CONFLICT: transition chain dates are "
+                    "not strictly increasing"
+                )
+            eligibility = policy.classify(transition)
+            if not eligibility.supported:
+                raise DataValidationError(
+                    "CORPORATE_ACTION_EXECUTION_UNSUPPORTED: predecessor position crosses "
+                    f"security-code transition position_id={position.position_id} "
+                    f"predecessor={transition.predecessor_ts_code} "
+                    f"successor={transition.successor_ts_code} "
+                    f"effective_date={transition.effective_date} reason={eligibility.reason}"
+                )
+            seen.add(current_code)
+            chain.append(transition)
+            previous_effective_date = transition.effective_date
+            current_code = transition.successor_ts_code
+        if not chain:
+            continue
+        traversed_successors = {item.successor_ts_code for item in chain}
+        conflicting = (traversed_successors & occupied) - {source_code}
+        if conflicting:
+            raise DataValidationError(
+                "CORPORATE_ACTION_POSITION_COLLISION: successor already has an independent "
+                f"position codes={sorted(conflicting)}"
+            )
+        if current_code in final_codes:
+            raise DataValidationError(
+                f"CORPORATE_ACTION_POSITION_COLLISION: multiple positions target {current_code}"
+            )
+        final_codes.add(current_code)
+        plans.append((source_code, position, tuple(chain)))
+
+    for source_code, position, plan_chain in plans:
+        del positions[source_code]
+        for transition in plan_chain:
+            ratio = transition.share_conversion_ratio
+            if ratio is None:
+                raise DataValidationError("CORPORATE_ACTION_EXECUTION_UNSUPPORTED: ratio missing")
+            old_shares = position.shares
+            old_close = position.last_valid_close
+            new_shares = old_shares * ratio
+            adjusted_close = old_close / ratio
+            before = old_shares * old_close
+            after = new_shares * adjusted_close
+            values = (old_shares, old_close, ratio, new_shares, adjusted_close, before, after)
+            if any(not np.isfinite(value) or value <= 0 for value in values):
+                raise DataValidationError(
+                    "BACKTEST_ACCOUNTING_INVARIANT_FAILED: non-finite corporate action value"
+                )
+            delta = after - before
+            if not np.isclose(
+                before,
+                after,
+                rtol=CORPORATE_ACTION_MARK_VALUE_TOLERANCE,
+                atol=CORPORATE_ACTION_MARK_VALUE_TOLERANCE,
+            ):
+                raise DataValidationError(
+                    "BACKTEST_ACCOUNTING_INVARIANT_FAILED: corporate action mark value changed"
+                )
+            ledger_rows.append(
+                {
+                    "effective_date": transition.effective_date,
+                    "position_id": position.position_id,
+                    "predecessor_ts_code": transition.predecessor_ts_code,
+                    "successor_ts_code": transition.successor_ts_code,
+                    "transition_type": transition.transition_type,
+                    "continuity_type": transition.continuity_type,
+                    "old_shares": old_shares,
+                    "new_shares": new_shares,
+                    "share_conversion_ratio": ratio,
+                    "old_last_valid_close": old_close,
+                    "adjusted_last_valid_close": adjusted_close,
+                    "pre_action_mark_value": before,
+                    "post_action_mark_value": after,
+                    "mark_value_delta": delta,
+                    "cash_delta": 0.0,
+                    "transaction_cost": 0.0,
+                    "turnover_contribution": 0.0,
+                    "transition_version": transition_version,
+                    "transition_hash": transition_hash,
+                    "evidence_package_id": transition.evidence_package_id,
+                    "evidence_package_hash": transition.evidence_package_hash,
+                    "execution_policy_version": policy.version,
+                    "execution_policy_hash": policy.policy_hash,
+                    "top_n": top_n,
+                }
+            )
+            position.ts_code = transition.successor_ts_code
+            position.shares = new_shares
+            position.last_valid_close = adjusted_close
+        positions[position.ts_code] = position
+
+
+def _corporate_action_columns() -> list[str]:
+    return [
+        "effective_date",
+        "position_id",
+        "predecessor_ts_code",
+        "successor_ts_code",
+        "transition_type",
+        "continuity_type",
+        "old_shares",
+        "new_shares",
+        "share_conversion_ratio",
+        "old_last_valid_close",
+        "adjusted_last_valid_close",
+        "pre_action_mark_value",
+        "post_action_mark_value",
+        "mark_value_delta",
+        "cash_delta",
+        "transaction_cost",
+        "turnover_contribution",
+        "transition_version",
+        "transition_hash",
+        "evidence_package_id",
+        "evidence_package_hash",
+        "execution_policy_version",
+        "execution_policy_hash",
+        "top_n",
+    ]
+
+
+def _validate_corporate_action_ledger(frame: DataFrame) -> None:
+    if frame.empty:
+        return
+    numeric = frame[
+        [
+            "old_shares",
+            "new_shares",
+            "share_conversion_ratio",
+            "old_last_valid_close",
+            "adjusted_last_valid_close",
+            "pre_action_mark_value",
+            "post_action_mark_value",
+            "mark_value_delta",
+            "cash_delta",
+            "transaction_cost",
+            "turnover_contribution",
+        ]
+    ].to_numpy(dtype=float)
+    if not np.isfinite(numeric).all():
+        raise DataValidationError(
+            "BACKTEST_ACCOUNTING_INVARIANT_FAILED: corporate action ledger is non-finite"
+        )
+    if not np.allclose(
+        frame["pre_action_mark_value"].to_numpy(dtype=float),
+        frame["post_action_mark_value"].to_numpy(dtype=float),
+        rtol=CORPORATE_ACTION_MARK_VALUE_TOLERANCE,
+        atol=CORPORATE_ACTION_MARK_VALUE_TOLERANCE,
+    ):
+        raise DataValidationError(
+            "BACKTEST_ACCOUNTING_INVARIANT_FAILED: corporate action ledger does not reconcile"
+        )
+    if not np.equal(
+        frame[["cash_delta", "transaction_cost", "turnover_contribution"]].to_numpy(dtype=float),
+        0.0,
+    ).all():
+        raise DataValidationError(
+            "BACKTEST_ACCOUNTING_INVARIANT_FAILED: unsupported corporate action consideration"
+        )
+
+
+def _frame_hash(frame: DataFrame) -> str:
+    records = frame.where(pd.notna(frame), None).to_dict("records")
+    payload = json.dumps(
+        records,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _calendar_offset(calendar: list[str], date: str, offset: int) -> str:
@@ -696,33 +953,61 @@ def _terminal_position(
     }
 
 
-def _validate_trade_lifecycles(trades: DataFrame, positions: dict[str, Position]) -> None:
+def _validate_trade_lifecycles(
+    trades: DataFrame, positions: dict[str, Position], corporate_actions: DataFrame
+) -> None:
     if trades.empty:
         return
     opened: dict[str, float] = {}
+    events: list[tuple[str, int, str, float, float]] = []
     for row in trades.itertuples(index=False):
         typed = cast(Any, row)
         if str(typed.status) not in {"filled", "terminal_writeoff"}:
             continue
-        position_id = str(typed.position_id)
-        shares = float(typed.shares)
-        costs = float(typed.cost)
+        priority = 0 if str(typed.side) == "buy" else 2
+        events.append(
+            (
+                str(typed.trade_date),
+                priority,
+                str(typed.position_id),
+                float(typed.shares),
+                float(typed.cost),
+            )
+        )
+    for row in corporate_actions.itertuples(index=False):
+        typed = cast(Any, row)
+        events.append(
+            (
+                str(typed.effective_date),
+                1,
+                str(typed.position_id),
+                float(typed.new_shares),
+                0.0,
+            )
+        )
+    for _, priority, position_id, shares, costs in sorted(events):
         if shares < 0 or costs < 0 or not np.isfinite(shares + costs):
             raise DataValidationError(
                 "BACKTEST_ACCOUNTING_INVARIANT_FAILED: invalid trade shares or costs"
             )
-        if str(typed.side) == "buy":
+        if priority == 0:
             if position_id in opened:
                 raise DataValidationError(
                     "BACKTEST_ACCOUNTING_INVARIANT_FAILED: duplicate open position"
                 )
             opened[position_id] = shares
-            continue
-        held = opened.pop(position_id, None)
-        if held is None or shares > held + 1e-9:
-            raise DataValidationError(
-                "BACKTEST_ACCOUNTING_INVARIANT_FAILED: sell exceeds held position"
-            )
+        elif priority == 1:
+            if position_id not in opened:
+                raise DataValidationError(
+                    "BACKTEST_ACCOUNTING_INVARIANT_FAILED: corporate action without position"
+                )
+            opened[position_id] = shares
+        else:
+            held = opened.pop(position_id, None)
+            if held is None or shares > held + 1e-9:
+                raise DataValidationError(
+                    "BACKTEST_ACCOUNTING_INVARIANT_FAILED: sell exceeds held position"
+                )
     if set(opened) != {position.position_id for position in positions.values()}:
         raise DataValidationError(
             "BACKTEST_ACCOUNTING_INVARIANT_FAILED: position lifecycle reconciliation failed"
@@ -734,6 +1019,7 @@ def _accounting_summary(
     trades: DataFrame,
     positions: dict[str, Position],
     counters: dict[str, int],
+    corporate_actions: DataFrame,
 ) -> dict[str, float | int]:
     filled = trades[trades["status"] == "filled"] if not trades.empty else trades
     return {
@@ -754,6 +1040,16 @@ def _accounting_summary(
         "sell_delay_breaches": counters["sell_delay_breaches"],
         "maximum_delayed_exit_days": counters["maximum_delayed_exit_days"],
         "resolved_after_sell_delay_breach": counters["resolved_after_sell_delay_breach"],
+        "corporate_action_transformations": len(corporate_actions),
+        "corporate_action_positions": int(
+            corporate_actions["position_id"].nunique() if not corporate_actions.empty else 0
+        ),
+        "corporate_action_mark_value_delta_max": float(
+            corporate_actions["mark_value_delta"].abs().max()
+            if not corporate_actions.empty
+            else 0.0
+        ),
+        "unsupported_transition_crossings": counters["unsupported_transition_crossings"],
         "commission_total": _column_sum(trades, "commission"),
         "stamp_duty_total": _column_sum(trades, "stamp_duty"),
         "transfer_fee_total": _column_sum(trades, "transfer_fee"),

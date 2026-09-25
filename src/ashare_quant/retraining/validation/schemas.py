@@ -50,10 +50,16 @@ class ExecutableValidationEvidence(BaseModel):
     top_n: tuple[int, ...]
     execution_config: dict[str, Any]
     metrics: dict[str, dict[str, float | int | None]]
-    accounting_schema_version: Literal[2] = 2
+    accounting_schema_version: Literal[3] = 3
     cost_policy_hash: str = Field(min_length=64, max_length=64)
     execution_cost_policy: dict[str, Any]
     accounting_summaries: dict[str, dict[str, float | int]]
+    security_identity_transition_version: str
+    security_identity_transition_hash: str = Field(min_length=64, max_length=64)
+    corporate_action_execution_policy: dict[str, Any]
+    corporate_action_execution_policy_hash: str = Field(min_length=64, max_length=64)
+    corporate_action_ledger_hashes: dict[str, str]
+    corporate_action_ledgers: dict[str, list[dict[str, Any]]]
     unresolved_holdings: Literal[False] = False
     labels_loaded: Literal[False] = False
     trading_state_modified: Literal[False] = False

@@ -73,12 +73,14 @@ cohorts, including `300028.SZ`, `300216.SZ`, and `300431.SZ`, through the sessio
 security's delisting-board trading began or authoritative delisting became effective. Missing quotes
 do not create lifecycle events.
 
-Security-code continuity does not by itself authorize portfolio accounting. A position held under
-a predecessor code at an effective transition date raises
-`CORPORATE_ACTION_EXECUTION_UNSUPPORTED` until the engine has explicit, evidence-backed share
-conversion and successor-price handling. This applies even when an official document states a 1:1
-quantity relationship: the identity fact is resolved, but execution support is a separate reviewed
-contract. The engine never silently renames, sells, or writes off such a position.
+Security-code continuity does not by itself authorize portfolio accounting. Accounting schema v3
+uses the content-hashed `corporate_action_execution_policy_v1`, which supports only an
+authoritatively validated `CODE_CHANGE_CONTINUITY` with `SAME_LISTED_ENTITY`, a finite positive
+share ratio, unambiguous one-to-one topology, and shares-only consideration. The engine applies the
+effective transition before same-day exits, preserves the position ID and entry lifecycle, adjusts
+shares and the stale mark inversely, and writes an immutable `corporate_actions` ledger. It emits
+no trade, cash movement, cost, or turnover for the transformation. Every other crossing, including
+restructuring with an otherwise known ratio, remains `CORPORATE_ACTION_EXECUTION_UNSUPPORTED`.
 
 The engine checks nonnegative cash/equity for the unlevered strategy, finite values, equity
 reconciliation, nonnegative shares and costs, sell quantity, duplicate positions, and complete
@@ -91,9 +93,11 @@ resolved by trade date and side. The default schedule uses sell-side stamp duty 
 2023-08-28 and `0.0005` from 2023-08-28. Commission, optional minimum commission, optional transfer
 fee, and deterministic slippage are explicit fields. Buy trades never pay sell-side stamp duty.
 
-The complete schedule and `cost_policy_hash` are frozen in schema-v2 backtest and executable
-validation manifests. Legacy scalar settings remain readable for explicitly constructed fixed-cost
-diagnostic fixtures, but new repository configuration uses the schedule.
+The complete schedule and `cost_policy_hash` are frozen in backtest and executable-validation
+manifests. Accounting-schema-v3 evidence additionally binds the identity-transition version/hash,
+corporate-action policy version/hash, and content hash of each corporate-action ledger. Legacy
+scalar settings remain readable for explicitly constructed fixed-cost diagnostic fixtures, but new
+repository configuration uses the schedule.
 
 ## Metrics
 
@@ -110,7 +114,7 @@ diagnostic fixtures, but new repository configuration uses the schedule.
 - Holding period is measured from entry to exit in trading sessions.
 - Turnover is two-way traded gross notional, buys plus sells, divided by previous equity.
 
-Legacy aliases remain in JSON where needed, but schema-v2 fields define the units explicitly.
+Legacy aliases remain in JSON where needed, but current fields define the units explicitly.
 
 ## Outputs
 
@@ -122,8 +126,10 @@ ashare-quant --config config/default.yaml backtest run \
 ```
 
 Outputs under `backtests/<experiment_id>_backtest_<timestamp>/` include predictions, daily returns,
-trades, holdings, metrics, and a manifest written last. New artifacts use backtest/accounting schema
-version 2 and contain accounting diagnostics and cost-policy provenance.
+trades, holdings, corporate actions, metrics, and a manifest written last. New artifacts use
+accounting schema version 3 and contain accounting diagnostics plus cost, transition, and
+corporate-action-policy provenance. Earlier accounting-schema-v2 artifacts remain historical and
+cannot serve as current governed executable evidence.
 
 ## Legacy Invalidation
 

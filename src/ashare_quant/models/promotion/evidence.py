@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
+from ashare_quant.backtest.corporate_actions import validate_corporate_action_execution_policy
 from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.models.promotion.schemas import (
     EvidenceReference,
@@ -179,7 +180,7 @@ def _validate_model_lineage(
 def _validate_executable_accounting(payload: dict[str, Any]) -> None:
     """Reject legacy executable evidence produced by superseded accounting semantics."""
 
-    if payload.get("schema_version") != 2 or payload.get("accounting_schema_version") != 2:
+    if payload.get("schema_version") != 2 or payload.get("accounting_schema_version") != 3:
         raise DataValidationError(
             "executable validation uses a legacy or unsupported accounting schema"
         )
@@ -189,6 +190,13 @@ def _validate_executable_accounting(payload: dict[str, Any]) -> None:
         raise DataValidationError("executable validation lacks immutable execution-cost identity")
     if policy.get("cost_policy_hash") != cost_hash:
         raise DataValidationError("executable validation cost-policy identity mismatch")
+    corporate_hash = payload.get("corporate_action_execution_policy_hash")
+    corporate_policy = payload.get("corporate_action_execution_policy")
+    if not isinstance(corporate_hash, str) or not isinstance(corporate_policy, dict):
+        raise DataValidationError(
+            "executable validation lacks immutable corporate-action policy identity"
+        )
+    validate_corporate_action_execution_policy(corporate_policy, corporate_hash)
 
 
 def _evidence_date(evidence_type: str, payload: dict[str, Any], path: Path) -> str:

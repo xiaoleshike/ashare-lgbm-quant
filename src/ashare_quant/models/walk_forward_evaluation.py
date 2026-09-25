@@ -7,7 +7,7 @@ import json
 import math
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -16,9 +16,17 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from ashare_quant.backtest.corporate_actions import (
+    default_corporate_action_execution_policy,
+    validate_corporate_action_execution_policy,
+)
 from ashare_quant.backtest.costs import ExecutionCostPolicy
 from ashare_quant.backtest.data import load_benchmark, load_calendar, load_execution_prices
-from ashare_quant.backtest.engine import BacktestInputs, simulate_portfolio
+from ashare_quant.backtest.engine import (
+    ACCOUNTING_SCHEMA_VERSION,
+    BacktestInputs,
+    simulate_portfolio,
+)
 from ashare_quant.backtest.executable_validation import REQUIRED_TOP_N, _signals
 from ashare_quant.config.settings import AppSettings
 from ashare_quant.data.exceptions import DataValidationError
@@ -54,12 +62,12 @@ from ashare_quant.utils.manifest import atomic_write_json
 
 SCHEMA_VERSION = 3
 LEGACY_SCHEMA_VERSION = 2
-EVALUATION_CONTRACT_VERSION = 7
+EVALUATION_CONTRACT_VERSION = 8
+PRE_D5_EVALUATION_CONTRACT_VERSION = 7
 PREVIOUS_EVALUATION_CONTRACT_VERSION = 6
 PREVIOUS_POST_H5_EVALUATION_CONTRACT_VERSION = 5
 LEGACY_EVALUATION_CONTRACT_VERSION = 4
 OLDER_EVALUATION_CONTRACT_VERSION = 3
-ACCOUNTING_SCHEMA_VERSION = 2
 EXECUTION_TAIL_POLICY_VERSION = 2
 EXECUTION_TAIL_LOAD_CHUNK_SESSIONS = 252
 EXECUTION_TAIL_POLICY = "carry_to_source_or_lockbox_cutoff"
@@ -71,6 +79,7 @@ REQUIRED_FOLD_ARTIFACTS = frozenset(
         "ranking_metrics.json",
         "executable_metrics.json",
         "feature_importance.json",
+        "corporate_actions.parquet",
     }
 )
 type JsonObject = dict[str, Any]
@@ -87,6 +96,7 @@ class FoldExecutionResult:
     feature_importance: list[JsonObject]
     training_compute: JsonObject
     model_saver: Callable[[Path], None]
+    corporate_actions: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 class FoldExecutor(Protocol):
@@ -190,6 +200,7 @@ class RankerFoldExecutor:
             }
         )
         cost_policy = ExecutionCostPolicy.from_backtest_settings(execution)
+        corporate_action_policy = default_corporate_action_execution_policy()
         processed_data_end = self._processed_execution_data_end()
         lifecycle = SecurityLifecycleResolver.from_path(
             self.settings.security_identity.lifecycle_path
@@ -218,6 +229,8 @@ class RankerFoldExecutor:
                 **lifecycle.provenance(),
             },
             "cost_policy_hash": cost_policy.policy_hash,
+            "corporate_action_execution_policy": corporate_action_policy.to_dict(),
+            "corporate_action_execution_policy_hash": corporate_action_policy.policy_hash,
             "security_identity_transitions": (
                 transitions.provenance() if transitions is not None else None
             ),
@@ -318,10 +331,21 @@ class RankerFoldExecutor:
             "train": train.sample_selection_by_date.to_dict("records"),
             "validation": validation.sample_selection_by_date.to_dict("records"),
         }
+        corporate_action_frames: list[pd.DataFrame] = []
         executable = (
-            self._executable_metrics(predictions, horizon, execution_contract)
+            self._executable_metrics(
+                predictions,
+                horizon,
+                execution_contract,
+                corporate_action_frames=corporate_action_frames,
+            )
             if require_executable
             else {"status": "NOT_REQUIRED", "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION}
+        )
+        corporate_actions = (
+            pd.concat(corporate_action_frames, ignore_index=True)
+            if corporate_action_frames
+            else pd.DataFrame()
         )
 
         def save_model(path: Path) -> None:
@@ -343,6 +367,7 @@ class RankerFoldExecutor:
             feature_importance=cast(list[JsonObject], feature_importance(model, features)),
             training_compute=runtime.model_dump(mode="json"),
             model_saver=save_model,
+            corporate_actions=corporate_actions,
         )
 
     def _executable_metrics(
@@ -350,6 +375,8 @@ class RankerFoldExecutor:
         predictions: pd.DataFrame,
         horizon: int,
         execution_contract: JsonObject,
+        *,
+        corporate_action_frames: list[pd.DataFrame] | None = None,
     ) -> JsonObject:
         dates = tuple(sorted(predictions["trade_date"].astype(str).unique()))
         execution = self.settings.backtest.model_copy(
@@ -441,6 +468,8 @@ class RankerFoldExecutor:
             for result in results
         ):
             raise DataValidationError("walk-forward fold has unresolved executable positions")
+        if corporate_action_frames is not None:
+            corporate_action_frames.extend(result.corporate_actions for result in results)
         return {
             "status": "COMPLETE",
             "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
@@ -464,6 +493,21 @@ class RankerFoldExecutor:
                 },
             },
             "cost_policy_hash": str(results[0].cost_policy["cost_policy_hash"]),
+            "corporate_action_execution_policy": results[0].corporate_action_policy,
+            "corporate_action_execution_policy_hash": results[0].corporate_action_policy[
+                "policy_hash"
+            ],
+            "security_identity_transitions": {
+                key: results[0].execution_provenance[key]
+                for key in (
+                    "security_identity_transition_version",
+                    "security_identity_transition_hash",
+                )
+            },
+            "corporate_action_ledger_hashes": {
+                str(result.top_n): result.execution_provenance["corporate_action_ledger_hash"]
+                for result in results
+            },
         }
 
 
@@ -1224,6 +1268,7 @@ def _publish_fold(
         staging = Path(temporary)
         result.model_saver(staging / "model.txt")
         result.predictions.to_parquet(staging / "predictions.parquet", index=False)
+        result.corporate_actions.to_parquet(staging / "corporate_actions.parquet", index=False)
         for name, payload in (
             ("validation_metrics.json", result.validation_metrics),
             ("ranking_metrics.json", result.ranking_metrics),
@@ -1240,6 +1285,7 @@ def _publish_fold(
                 "ranking_metrics.json",
                 "executable_metrics.json",
                 "feature_importance.json",
+                "corporate_actions.parquet",
             )
         }
         manifest = {
@@ -1447,9 +1493,20 @@ def _executable_distributions(rows: list[JsonObject]) -> JsonObject:
     if all(row.get("status") == "NOT_REQUIRED" for row in rows):
         return {"status": "NOT_REQUIRED"}
     if any(
-        row.get("status") != "COMPLETE" or row.get("accounting_schema_version") != 2 for row in rows
+        row.get("status") != "COMPLETE"
+        or row.get("accounting_schema_version") != ACCOUNTING_SCHEMA_VERSION
+        for row in rows
     ):
-        raise DataValidationError("executable fold evidence is missing or not accounting schema v2")
+        raise DataValidationError(
+            "executable fold evidence is missing or not current accounting schema"
+        )
+    for row in rows:
+        policy = row.get("corporate_action_execution_policy")
+        if not isinstance(policy, dict):
+            raise DataValidationError("executable fold evidence has no corporate-action policy")
+        validate_corporate_action_execution_policy(
+            policy, row.get("corporate_action_execution_policy_hash")
+        )
     flattened: list[JsonObject] = []
     for row in rows:
         top_n = row.get("top_n")
@@ -1550,6 +1607,7 @@ def validate_completed_walk_forward_artifact(
             LEGACY_EVALUATION_CONTRACT_VERSION,
             PREVIOUS_EVALUATION_CONTRACT_VERSION,
             PREVIOUS_POST_H5_EVALUATION_CONTRACT_VERSION,
+            PRE_D5_EVALUATION_CONTRACT_VERSION,
             EVALUATION_CONTRACT_VERSION,
         }
         or not isinstance(manifest.get("modeling_identity"), str)

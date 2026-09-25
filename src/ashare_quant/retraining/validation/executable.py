@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pandas as pd
 
@@ -140,6 +141,22 @@ class RetrainingExecutableValidator:
             execution_cost_policy=results[0].cost_policy,
             accounting_summaries={
                 str(result.top_n): result.accounting_summary for result in results
+            },
+            security_identity_transition_version=transitions.artifact_version,
+            security_identity_transition_hash=transitions.artifact_hash,
+            corporate_action_execution_policy=results[0].corporate_action_policy,
+            corporate_action_execution_policy_hash=str(
+                results[0].corporate_action_policy["policy_hash"]
+            ),
+            corporate_action_ledger_hashes={
+                str(result.top_n): str(result.execution_provenance["corporate_action_ledger_hash"])
+                for result in results
+            },
+            corporate_action_ledgers={
+                str(result.top_n): cast(
+                    list[dict[str, Any]], result.corporate_actions.to_dict("records")
+                )
+                for result in results
             },
         )
 

@@ -199,9 +199,11 @@ complete procedure and recovery commands.
 
 Before treating a backtest as governance evidence, verify that its manifest uses schema version 2,
 has `purpose=OOS_EVIDENCE`, records a model boundary and exact model-manifest hash, and records
-`accounting_schema_version=2` plus a `cost_policy_hash`. A live model is not automatically valid for
-historical performance measurement: evaluation must begin strictly after its immutable training and
-selection boundary.
+`accounting_schema_version=3`, a `cost_policy_hash`, identity-transition provenance, the
+corporate-action execution-policy hash, and corporate-action ledger hashes. A live model is not
+automatically valid for historical performance measurement: evaluation must begin strictly after
+its immutable training and selection boundary. Accounting-schema-v2 results remain historical and
+must not be promoted as current evidence.
 
 Suspended holdings use their last valid close for valuation but remain untradeable. Unexplained quote
 gaps and unresolved exits fail evidence-grade runs. The sell-delay threshold never authorizes a zero

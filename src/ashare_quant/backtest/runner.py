@@ -12,7 +12,11 @@ from typing import Any
 import pandas as pd
 
 from ashare_quant.backtest.data import load_backtest_inputs, load_model_and_features
-from ashare_quant.backtest.engine import BacktestResult, simulate_portfolio
+from ashare_quant.backtest.engine import (
+    ACCOUNTING_SCHEMA_VERSION,
+    BacktestResult,
+    simulate_portfolio,
+)
 from ashare_quant.backtest.provenance import (
     ModelEvaluationBoundary,
     require_oos_evaluation,
@@ -152,12 +156,15 @@ class BacktestRunner:
             pd.concat([result.holdings for result in results], ignore_index=True).to_csv(
                 directory / "holdings.csv", index=False
             )
+            pd.concat([result.corporate_actions for result in results], ignore_index=True).to_csv(
+                directory / "corporate_actions.csv", index=False
+            )
             build_predictions_frame(signals, top_n).to_csv(
                 directory / "predictions.csv", index=False
             )
             metrics: dict[str, Any] = {
                 "schema_version": 2,
-                "accounting_schema_version": 2,
+                "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
                 "results": {str(result.top_n): result.metrics for result in results},
             }
             _write_json(directory / "metrics.json", metrics)
@@ -207,7 +214,7 @@ class BacktestRunner:
             "end_date": end_date,
             "top_n": [result.top_n for result in results],
             "purpose": "OOS_EVIDENCE",
-            "accounting_schema_version": 2,
+            "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
             "execution": "signal_close_t_next_open",
             "holding_period_days": self.settings.backtest.holding_period_days,
             "commission": self.settings.backtest.commission,
@@ -215,11 +222,27 @@ class BacktestRunner:
             "slippage": self.settings.backtest.slippage,
             "execution_cost_policy": results[0].cost_policy,
             "cost_policy_hash": results[0].cost_policy["cost_policy_hash"],
+            "corporate_action_execution_policy": results[0].corporate_action_policy,
+            "corporate_action_execution_policy_hash": results[0].corporate_action_policy[
+                "policy_hash"
+            ],
+            "security_identity_transitions": {
+                key: results[0].execution_provenance[key]
+                for key in (
+                    "security_identity_transition_version",
+                    "security_identity_transition_hash",
+                )
+            },
+            "corporate_action_ledger_hashes": {
+                str(result.top_n): result.execution_provenance["corporate_action_ledger_hash"]
+                for result in results
+            },
             "accounting_summaries": {
                 str(result.top_n): result.accounting_summary for result in results
             },
             "benchmark_index_code": self.settings.backtest.benchmark_index_code,
             "prediction_file": "predictions.csv",
+            "corporate_action_file": "corporate_actions.csv",
         }
 
 

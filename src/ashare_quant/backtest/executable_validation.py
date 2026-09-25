@@ -13,7 +13,12 @@ from typing import Any
 import pandas as pd
 
 from ashare_quant.backtest.data import load_benchmark, load_calendar, load_execution_prices
-from ashare_quant.backtest.engine import BacktestInputs, BacktestResult, simulate_portfolio
+from ashare_quant.backtest.engine import (
+    ACCOUNTING_SCHEMA_VERSION,
+    BacktestInputs,
+    BacktestResult,
+    simulate_portfolio,
+)
 from ashare_quant.backtest.provenance import (
     require_oos_evaluation,
     resolve_model_evaluation_boundary,
@@ -196,8 +201,16 @@ class ExecutableOOSValidationEngine:
             model_id: {str(result.top_n): result.metrics for result in results}
             for model_id, results in model_results.items()
         }
+        representative = next(iter(model_results.values()))[0]
         identity = self._identity(
-            champion, challenger, prediction_manifest, horizon, top_n, execution.model_dump()
+            champion,
+            challenger,
+            prediction_manifest,
+            horizon,
+            top_n,
+            execution.model_dump(),
+            execution_provenance=representative.execution_provenance,
+            corporate_action_policy=representative.corporate_action_policy,
         )
         run_id = f"executable_oos_h{horizon}_{identity[:16]}"
         output_dir = self.reports_root / "executable_validation" / run_id
@@ -287,6 +300,8 @@ class ExecutableOOSValidationEngine:
         horizon: int,
         top_n: tuple[int, ...],
         execution: dict[str, Any],
+        execution_provenance: dict[str, object],
+        corporate_action_policy: dict[str, object],
     ) -> str:
         git = current_git_info()
         return _payload_hash(
@@ -301,6 +316,17 @@ class ExecutableOOSValidationEngine:
                 "horizon": horizon,
                 "top_n": top_n,
                 "execution": execution,
+                "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
+                "security_identity_transition_version": execution_provenance[
+                    "security_identity_transition_version"
+                ],
+                "security_identity_transition_hash": execution_provenance[
+                    "security_identity_transition_hash"
+                ],
+                "corporate_action_execution_policy_version": execution_provenance[
+                    "corporate_action_execution_policy_version"
+                ],
+                "corporate_action_execution_policy_hash": corporate_action_policy["policy_hash"],
                 "config_hash": config_hash(self.config_path),
                 "git_commit": git["commit"],
             }
@@ -329,12 +355,32 @@ class ExecutableOOSValidationEngine:
             "horizon": prediction_manifest["horizon"],
             "holding_period": prediction_manifest["holding_period"],
             "execution_rule": "signal_close_t_next_open_entry_and_horizon_open_exit",
-            "accounting_schema_version": 2,
+            "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
             "terminal_untradable_policy": "explicit_terminal_event_only; unresolved_fails_closed",
             "execution_cost_policy": next(iter(model_results.values()))[0].cost_policy,
             "cost_policy_hash": next(iter(model_results.values()))[0].cost_policy[
                 "cost_policy_hash"
             ],
+            "corporate_action_execution_policy": next(iter(model_results.values()))[
+                0
+            ].corporate_action_policy,
+            "corporate_action_execution_policy_hash": next(iter(model_results.values()))[
+                0
+            ].corporate_action_policy["policy_hash"],
+            "security_identity_transitions": {
+                key: next(iter(model_results.values()))[0].execution_provenance[key]
+                for key in (
+                    "security_identity_transition_version",
+                    "security_identity_transition_hash",
+                )
+            },
+            "corporate_action_ledger_hashes": {
+                model_id: {
+                    str(result.top_n): result.execution_provenance["corporate_action_ledger_hash"]
+                    for result in results
+                }
+                for model_id, results in model_results.items()
+            },
             "accounting_summaries": {
                 model_id: {str(result.top_n): result.accounting_summary for result in results}
                 for model_id, results in model_results.items()
@@ -436,10 +482,30 @@ def _summary(
         "signal_dates": len(dates),
         "top_n": list(top_n),
         "execution_config": execution,
-        "accounting_schema_version": 2,
+        "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
         "terminal_untradable_policy": "explicit_terminal_event_only; unresolved_fails_closed",
         "execution_cost_policy": next(iter(model_results.values()))[0].cost_policy,
         "cost_policy_hash": next(iter(model_results.values()))[0].cost_policy["cost_policy_hash"],
+        "corporate_action_execution_policy": next(iter(model_results.values()))[
+            0
+        ].corporate_action_policy,
+        "corporate_action_execution_policy_hash": next(iter(model_results.values()))[
+            0
+        ].corporate_action_policy["policy_hash"],
+        "security_identity_transitions": {
+            key: next(iter(model_results.values()))[0].execution_provenance[key]
+            for key in (
+                "security_identity_transition_version",
+                "security_identity_transition_hash",
+            )
+        },
+        "corporate_action_ledger_hashes": {
+            model_id: {
+                str(result.top_n): result.execution_provenance["corporate_action_ledger_hash"]
+                for result in results
+            }
+            for model_id, results in model_results.items()
+        },
         "accounting_summaries": {
             model_id: {str(result.top_n): result.accounting_summary for result in results}
             for model_id, results in model_results.items()
@@ -482,6 +548,9 @@ def _publish(
         _combined_frame(model_results, "trades").to_parquet(staging / "trades.parquet", index=False)
         _combined_frame(model_results, "holdings").to_parquet(
             staging / "holdings.parquet", index=False
+        )
+        _combined_frame(model_results, "corporate_actions").to_parquet(
+            staging / "corporate_actions.parquet", index=False
         )
         atomic_write_json(staging / "manifest.json", manifest)
         if output_dir.exists():

@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 import yaml
 
+from ashare_quant.backtest.corporate_actions import default_corporate_action_execution_policy
 from ashare_quant.cli import main
 from ashare_quant.config.settings import AppSettings, PathSettings
 from ashare_quant.data.exceptions import DataValidationError
@@ -87,6 +88,7 @@ class _Offline:
 class _Executable:
     def evaluate(self, context, offline) -> ExecutableValidationEvidence:
         del offline
+        policy = default_corporate_action_execution_policy()
         return ExecutableValidationEvidence(
             model_id=context.model.model_id,
             horizon=5,
@@ -100,6 +102,12 @@ class _Executable:
             cost_policy_hash="c" * 64,
             execution_cost_policy={"cost_policy_hash": "c" * 64},
             accounting_summaries={"10": {}, "20": {}, "50": {}},
+            security_identity_transition_version="none",
+            security_identity_transition_hash="b" * 64,
+            corporate_action_execution_policy=policy.to_dict(),
+            corporate_action_execution_policy_hash=policy.policy_hash,
+            corporate_action_ledger_hashes={"10": "d" * 64, "20": "d" * 64, "50": "d" * 64},
+            corporate_action_ledgers={"10": [], "20": [], "50": []},
         )
 
 
@@ -250,7 +258,10 @@ def test_executable_validation_uses_frozen_scores_and_execution_costs(
             self.metrics = {"annual_return": 0.01, "average_turnover": 0.1}
             self.holdings = pd.DataFrame()
             self.cost_policy = {"cost_policy_hash": "c" * 64}
-            self.accounting_summary = {"accounting_schema_version": 2}
+            self.accounting_summary = {"accounting_schema_version": 3}
+            self.corporate_action_policy = default_corporate_action_execution_policy().to_dict()
+            self.execution_provenance = {"corporate_action_ledger_hash": "d" * 64}
+            self.corporate_actions = pd.DataFrame()
 
     monkeypatch.setattr(
         "ashare_quant.retraining.validation.executable.load_calendar",

@@ -126,8 +126,9 @@ selection end is advanced through the configured forward-label maturity sessions
 exchange calendar. A fold is `STRICT_OOS` only when both parameter fitting and feature-selection
 information precede evaluation. Earlier folds remain inspectable as
 `RETROSPECTIVE_FIXED_FEATURE_REPLAY`, but their performance appears only in descriptive grouped
-statistics, not in the strict-OOS aggregate. Executable evidence requires accounting schema v2 and
-reports Top10, Top20, and Top50 results. Aggregation reports distributions across eligible folds:
+statistics, not in the strict-OOS aggregate. Executable evidence requires accounting schema v3,
+including a hash-bound corporate-action ledger, and reports Top10, Top20, and Top50 results.
+Aggregation reports distributions across eligible folds:
 mean, median, standard deviation, minimum, maximum, positive-fold ratio, and best/worst fold index.
 Feature-importance rank dispersion is observational only.
 
@@ -137,7 +138,8 @@ schema, execution mode, holding period, sell-delay policy, and effective-dated c
 Changing CPU/CUDA, cost policy, or evaluation contract creates a different immutable run and cannot
 resume into old evidence.
 
-Evaluation contract v7 includes the lifecycle-audit lineage and preserves the contract-v5
+Evaluation contract v8 adds corporate-action policy, transition, and ledger identity to the
+executable contract. It preserves the contract-v7 lifecycle-audit lineage and the contract-v5
 separation of delayed-exit alerts from final resolution for walk-forward
 execution evidence. The configured 20-session sell-delay value remains an auditable breach
 threshold. A breached position is never written off merely for exceeding it: walk-forward
@@ -272,9 +274,12 @@ succeeds. Compare the resulting immutable artifacts with `compare-training-backe
 Evidence-grade `walk-forward-run` requires a PASS lifecycle scan and one explicit identity
 transition contract. Supply either `--identity-transition-artifact PATH` or, only when the scan
 uses the same reviewed empty contract, `--no-identity-transitions`. The runner validates the
-version/hash before fitting a fold and binds it into execution identity. Crossing a known
-transition remains blocked with `CORPORATE_ACTION_EXECUTION_UNSUPPORTED`; share conversion is
-not implemented by this contract.
+version/hash before fitting a fold and binds it into execution identity. Accounting schema v3 also
+binds `corporate_action_execution_policy_v1`. A held predecessor may cross only a verified,
+one-to-one `CODE_CHANGE_CONTINUITY` whose continuity is `SAME_LISTED_ENTITY` and whose finite
+positive ratio is explicit. The engine records a zero-cash, zero-cost, zero-turnover position
+transformation before same-day sell logic. Unknown ratios, restructuring, successor entities, and
+ambiguous topology remain blocked with `CORPORATE_ACTION_EXECUTION_UNSUPPORTED`.
 
 Training uses the mature, available labeled subset and publishes per-date selection counts.
 Scoring remains label-free. Evaluation-label maturity requires a valid exchange-session

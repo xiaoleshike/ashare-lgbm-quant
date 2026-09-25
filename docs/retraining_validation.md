@@ -21,10 +21,10 @@ authorization.
 3. Score the fold's evaluation period and compute post-hoc Rank IC, ICIR,
    positive-IC ratio, Top-N observation metrics, yearly stability, and market
    regime metrics.
-4. Apply the shared accounting-schema-v2 next-open portfolio simulator with the model horizon,
-   effective-dated cost policy, suspension valuation, and price-limit constraints. Candidate
-   evaluation must begin after its immutable selection fold; every position must have a complete
-   executable or explicitly terminal lifecycle.
+4. Apply the shared accounting-schema-v3 next-open portfolio simulator with the model horizon,
+   effective-dated cost policy, suspension valuation, price-limit constraints, and governed
+   corporate-action policy. Candidate evaluation must begin after its immutable selection fold;
+   every position must have a complete executable or explicitly terminal lifecycle.
 5. Verify eligibility for a future prospective shadow-prediction adapter without
    generating a production prediction.
 6. Atomically publish immutable evidence with the root manifest written last.
@@ -35,11 +35,12 @@ selection/historical-holdout isolation checks pass. Older immutable manifests re
 history as a pristine lockbox. The executable validation is
 label-free and does not modify paper-trading state.
 
-Executable evidence freezes `accounting_schema_version=2`, the complete execution-cost schedule,
-`cost_policy_hash`, accounting diagnostics, and corrected compounded metrics. Unexpected market-data
-gaps, unresolved positions, invalid costs, unsupported execution modes, and accounting invariant
-failures block validation. Old executable evidence remains immutable but is not accepted as current
-Promotion evidence.
+Executable evidence freezes `accounting_schema_version=3`, the complete execution-cost schedule,
+`cost_policy_hash`, identity-transition version/hash, corporate-action policy version/hash,
+corporate-action ledger hashes, accounting diagnostics, and corrected compounded metrics.
+Unexpected market-data gaps, unresolved positions, invalid costs, unsupported corporate actions or
+execution modes, and accounting invariant failures block validation. Old executable evidence
+remains immutable but is not accepted as current Promotion evidence.
 
 ## Commands
 
