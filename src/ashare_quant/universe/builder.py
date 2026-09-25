@@ -19,6 +19,7 @@ from ashare_quant.data.security_identity_transition import (
     load_identity_transition_contract,
 )
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
+from ashare_quant.data.security_listing_metadata import SecurityListingMetadataResolver
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.universe.storage import UNIVERSE_COLUMNS, UniverseStore
 from ashare_quant.universe.tradability import add_tradability_flags
@@ -43,6 +44,8 @@ class UniverseBuildResult:
     security_lifecycle_policy_hash: str
     security_identity_transition_version: str
     security_identity_transition_hash: str
+    security_listing_metadata_version: str
+    security_listing_metadata_hash: str
 
 
 class UniverseBuilder:
@@ -67,6 +70,9 @@ class UniverseBuilder:
             mode=settings.security_identity.identity_transition_mode,
             artifact_path=settings.security_identity.identity_transition_path,
         )
+        self._listing_metadata = SecurityListingMetadataResolver.from_path(
+            settings.security_identity.listing_metadata_path
+        )
 
     def build(self, start_date: str, end_date: str) -> UniverseBuildResult:
         """Build and persist daily universe rows for an inclusive date range."""
@@ -76,6 +82,7 @@ class UniverseBuilder:
             self._identity_resolver,
             self._lifecycle_resolver,
             self._transition_resolver,
+            self._listing_metadata,
         )
         rows_built = 0
         rows_written = 0
@@ -112,6 +119,8 @@ class UniverseBuilder:
             security_lifecycle_policy_hash=self._lifecycle_resolver.policy_hash,
             security_identity_transition_version=(self._transition_resolver.artifact_version),
             security_identity_transition_hash=self._transition_resolver.artifact_hash,
+            security_listing_metadata_version=self._listing_metadata.overlay_version,
+            security_listing_metadata_hash=self._listing_metadata.overlay_hash,
         )
 
     def preview(self, start_date: str, end_date: str) -> DataFrame:
@@ -125,6 +134,7 @@ class UniverseBuilder:
             identity_resolver=self._identity_resolver,
             lifecycle_resolver=self._lifecycle_resolver,
             transition_resolver=self._transition_resolver,
+            listing_metadata_resolver=self._listing_metadata,
         )
 
     def _load_inputs(self) -> dict[str, DataFrame]:
@@ -148,6 +158,7 @@ def build_universe_frame(
     identity_resolver: SecurityIdentityResolver | None = None,
     lifecycle_resolver: SecurityLifecycleResolver | None = None,
     transition_resolver: SecurityIdentityTransitionResolver | None = None,
+    listing_metadata_resolver: SecurityListingMetadataResolver | None = None,
 ) -> DataFrame:
     """Build a daily universe frame from already loaded raw input frames."""
 
@@ -157,6 +168,7 @@ def build_universe_frame(
             identity_resolver or SecurityIdentityResolver.empty(),
             lifecycle_resolver or SecurityLifecycleResolver.empty(),
             transition_resolver or SecurityIdentityTransitionResolver.empty(),
+            listing_metadata_resolver or SecurityListingMetadataResolver.empty(),
         )
 
     all_trade_dates = open_trade_dates(inputs["trade_cal"], None, end_date)
@@ -206,13 +218,17 @@ def prepare_universe_inputs(
     identity_resolver: SecurityIdentityResolver | None = None,
     lifecycle_resolver: SecurityLifecycleResolver | None = None,
     transition_resolver: SecurityIdentityTransitionResolver | None = None,
+    listing_metadata_resolver: SecurityListingMetadataResolver | None = None,
 ) -> dict[str, DataFrame]:
     """Precompute full-history normalized inputs reused by chunked universe builds."""
 
     resolver = identity_resolver or SecurityIdentityResolver.empty()
     lifecycle = lifecycle_resolver or SecurityLifecycleResolver.empty()
     transitions = transition_resolver or SecurityIdentityTransitionResolver.empty()
-    prepared = canonicalize_security_datasets(inputs, resolver)
+    listing_metadata = listing_metadata_resolver or SecurityListingMetadataResolver.empty()
+    overlaid = dict(inputs)
+    overlaid["stock_basic"] = listing_metadata.apply_to_stock_basic(inputs["stock_basic"])
+    prepared = canonicalize_security_datasets(overlaid, resolver)
     prepared["_security_identity_prepared"] = pd.DataFrame()
     daily = normalize_daily(prepared["daily"])
     prepared["_daily_normalized"] = daily

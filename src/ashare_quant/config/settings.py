@@ -90,6 +90,7 @@ class SecurityIdentitySettings(BaseModel):
     mapping_path: Path = Path("config/security_identity/bse_code_aliases.json")
     lifecycle_path: Path = Path("config/security_identity/security_lifecycle_events.json")
     lifecycle_policy_path: Path = Path("config/security_identity/security_lifecycle_policy.json")
+    listing_metadata_path: Path | None = None
     identity_transition_mode: Literal["artifact", "none"] = "none"
     identity_transition_path: Path | None = None
 

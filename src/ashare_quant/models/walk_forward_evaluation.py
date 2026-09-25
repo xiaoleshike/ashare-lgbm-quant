@@ -32,6 +32,7 @@ from ashare_quant.data.security_lifecycle_audit import (
     LifecycleAuditPolicy,
     validate_pass_lifecycle_scan,
 )
+from ashare_quant.data.security_listing_metadata import SecurityListingMetadataResolver
 from ashare_quant.models.compute import lightgbm_build_identity, resolve_training_backend
 from ashare_quant.models.feature_provenance import (
     FeatureSetProvenance,
@@ -677,6 +678,9 @@ class MultiFoldEvaluationRunner:
             lifecycle_policy = LifecycleAuditPolicy.from_path(
                 self.settings.security_identity.lifecycle_policy_path
             )
+            listing_metadata = SecurityListingMetadataResolver.from_path(
+                self.settings.security_identity.listing_metadata_path
+            )
             audit = validate_pass_lifecycle_scan(
                 lifecycle_scan_manifest,
                 required_start=min(str(fold["train_start"]) for fold in folds),
@@ -687,6 +691,7 @@ class MultiFoldEvaluationRunner:
                 lifecycle_evidence=lifecycle_evidence,
                 lifecycle_policy=lifecycle_policy,
                 identity_transitions=transitions,
+                listing_metadata=listing_metadata,
             )
             execution_contract = {
                 **execution_contract,
@@ -700,6 +705,8 @@ class MultiFoldEvaluationRunner:
                         "security_identity_transition_version"
                     ],
                     "security_identity_transition_hash": audit["security_identity_transition_hash"],
+                    "listing_metadata_version": audit["listing_metadata_version"],
+                    "listing_metadata_hash": audit["listing_metadata_hash"],
                 },
             }
         identities = _experiment_identities(

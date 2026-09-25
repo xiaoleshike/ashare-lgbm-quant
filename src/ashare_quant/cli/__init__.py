@@ -62,6 +62,7 @@ from ashare_quant.data.security_lifecycle_transition_closure import (
     SecurityLifecycleTransitionClosureService,
 )
 from ashare_quant.data.security_lifecycle_triage import SecurityLifecycleTriageService
+from ashare_quant.data.security_listing_metadata import SecurityListingMetadataResolver
 from ashare_quant.data.tushare_client import TushareClient, TushareClientConfig
 from ashare_quant.data.validation import DataValidator, ValidationResult
 from ashare_quant.diagnostics import FeatureDiagnosticPipeline
@@ -1691,6 +1692,9 @@ def run_data_command(args: argparse.Namespace) -> int:
                         else None
                     ),
                 ),
+                listing_metadata=SecurityListingMetadataResolver.from_path(
+                    settings.security_identity.listing_metadata_path
+                ),
                 supersedes_scan_manifest=(
                     Path(args.supersedes_scan_manifest)
                     if args.supersedes_scan_manifest is not None
@@ -1900,6 +1904,10 @@ def run_universe_command(args: argparse.Namespace) -> int:
                     "security_identity_transition_hash": (
                         build_result.security_identity_transition_hash
                     ),
+                    "security_listing_metadata_version": (
+                        build_result.security_listing_metadata_version
+                    ),
+                    "security_listing_metadata_hash": build_result.security_listing_metadata_hash,
                 },
             )
         return 0 if build_result.validation.ok else 1

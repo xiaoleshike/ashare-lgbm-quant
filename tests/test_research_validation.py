@@ -18,6 +18,7 @@ from ashare_quant.data.security_identity_transition import (
     SecurityIdentityTransitionResolver,
 )
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
+from ashare_quant.data.security_listing_metadata import SecurityListingMetadataResolver
 from ashare_quant.models.compute.benchmark import TrainingBackendBenchmarkService
 from ashare_quant.models.feature_lists import feature_list_hash
 from ashare_quant.models.feature_provenance import (
@@ -745,6 +746,8 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
             "source_inventory_hash": "e" * 64,
             "security_identity_transition_version": transitions.artifact_version,
             "security_identity_transition_hash": transitions.artifact_hash,
+            "listing_metadata_version": "none",
+            "listing_metadata_hash": SecurityListingMetadataResolver.empty().overlay_hash,
         }
 
     monkeypatch.setattr(

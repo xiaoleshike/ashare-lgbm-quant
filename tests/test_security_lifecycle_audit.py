@@ -23,6 +23,10 @@ from ashare_quant.data.security_lifecycle_audit import (
     validate_pass_lifecycle_scan,
     validate_security_lifecycle_artifact,
 )
+from ashare_quant.data.security_listing_metadata import (
+    SecurityListingMetadataRecord,
+    SecurityListingMetadataResolver,
+)
 
 DATES = ("20200102", "20200103", "20200106", "20200107")
 
@@ -291,6 +295,54 @@ def test_verified_transition_stops_old_code_expected_quote_population(tmp_path: 
         & boundaries["boundary_type"].eq("LISTING_METADATA_MISSING")
     ).any()
     assert result.counts["unresolved"] == 0
+
+
+def test_verified_listing_metadata_overlay_resolves_missing_metadata_boundary(
+    tmp_path: Path,
+) -> None:
+    base = _fixture_scanner(tmp_path, include_unresolved=False)
+    stock_path = base.raw_root / "stock_basic" / "data.parquet"
+    stocks = pd.read_parquet(stock_path)
+    stocks = stocks.loc[stocks["ts_code"].ne("000005.SZ")]
+    stocks.to_parquet(stock_path, index=False)
+    without = base.scan(DATES[0], DATES[-1])
+    without_boundaries = pd.read_parquet(without.output_dir / "boundary_checks.parquet")
+    assert (
+        without_boundaries["canonical_ts_code"].eq("000005.SZ")
+        & without_boundaries["boundary_type"].eq("LISTING_METADATA_MISSING")
+    ).any()
+
+    metadata = SecurityListingMetadataResolver(
+        overlay_version="fixture-overlay-v1",
+        overlay_hash="a" * 64,
+        records=(
+            SecurityListingMetadataRecord(
+                canonical_ts_code="000005.SZ",
+                authoritative_list_date=DATES[0],
+                evidence_package_id="fixture-evidence",
+                evidence_package_hash="b" * 64,
+            ),
+        ),
+    )
+    scanner = SecurityLifecycleScanner(
+        raw_root=base.raw_root,
+        processed_root=base.processed_root,
+        reports_root=base.reports_root,
+        identity_resolver=base.identity,
+        lifecycle_evidence=base.evidence,
+        lifecycle_policy=base.policy,
+        identity_transitions=base.identity_transitions,
+        listing_metadata=metadata,
+    )
+    with_overlay = scanner.scan(DATES[0], DATES[-1])
+    boundaries = pd.read_parquet(with_overlay.output_dir / "boundary_checks.parquet")
+
+    assert not (
+        boundaries["canonical_ts_code"].eq("000005.SZ")
+        & boundaries["boundary_type"].eq("LISTING_METADATA_MISSING")
+    ).any()
+    manifest = validate_security_lifecycle_artifact(with_overlay.output_dir)
+    assert manifest["listing_metadata_hash"] == metadata.overlay_hash
 
 
 def test_listing_suspension_boundaries_outside_expected_listed_scope_are_ignored(

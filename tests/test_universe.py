@@ -12,6 +12,10 @@ from ashare_quant.data.security_identity_transition import (
     SecurityIdentityTransitionResolver,
 )
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
+from ashare_quant.data.security_listing_metadata import (
+    SecurityListingMetadataRecord,
+    SecurityListingMetadataResolver,
+)
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.universe import UniverseBuilder, UniverseStore, build_universe_frame
 from ashare_quant.universe.builder import add_listing_flags, build_candidates, year_date_ranges
@@ -115,6 +119,37 @@ def fixture_inputs() -> dict[str, pd.DataFrame]:
         "suspend_d": suspend_d,
         "stk_limit": stk_limit,
     }
+
+
+def test_listing_metadata_overlay_adds_authoritative_historical_candidate() -> None:
+    inputs = fixture_inputs()
+    inputs["stock_basic"] = inputs["stock_basic"].loc[
+        inputs["stock_basic"]["ts_code"].ne("000001.SZ")
+    ]
+    resolver = SecurityListingMetadataResolver(
+        overlay_version="fixture-v1",
+        overlay_hash="a" * 64,
+        records=(
+            SecurityListingMetadataRecord(
+                canonical_ts_code="000001.SZ",
+                authoritative_list_date="20230101",
+                evidence_package_id="fixture-package",
+                evidence_package_hash="b" * 64,
+            ),
+        ),
+    )
+
+    frame = build_universe_frame(
+        inputs,
+        UniverseSettings(min_list_trading_days=0, liquidity_window_days=1),
+        "20240105",
+        "20240105",
+        listing_metadata_resolver=resolver,
+    )
+
+    row = frame.loc[frame["ts_code"].eq("000001.SZ")].iloc[0]
+    assert row["list_date"] == "20230101"
+    assert bool(row["is_listed"])
 
 
 def test_universe_builder_covers_core_membership_and_tradability_rules() -> None:

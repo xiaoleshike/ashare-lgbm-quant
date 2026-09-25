@@ -21,6 +21,7 @@ from ashare_quant.data.exceptions import DataValidationError
 from ashare_quant.data.security_identity import SecurityIdentityResolver
 from ashare_quant.data.security_identity_transition import SecurityIdentityTransitionResolver
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
+from ashare_quant.data.security_listing_metadata import SecurityListingMetadataResolver
 from ashare_quant.utils.manifest import atomic_write_json
 
 type DataFrame = pd.DataFrame
@@ -34,9 +35,9 @@ type LifecycleClassification = Literal[
     "UNRESOLVED",
 ]
 
-SCANNER_SCHEMA_VERSION = 8
-LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7})
-CLASSIFICATION_CONTRACT_VERSION = 7
+SCANNER_SCHEMA_VERSION = 9
+LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8})
+CLASSIFICATION_CONTRACT_VERSION = 8
 ARTIFACT_NAME = "security_lifecycle_scan"
 REQUIRED_ARTIFACTS = frozenset(
     {
@@ -399,6 +400,7 @@ class SecurityLifecycleScanner:
         lifecycle_evidence: SecurityLifecycleResolver,
         lifecycle_policy: LifecycleAuditPolicy,
         identity_transitions: SecurityIdentityTransitionResolver,
+        listing_metadata: SecurityListingMetadataResolver | None = None,
         supersedes_scan_manifest: Path | None = None,
         supersession_reason: str | None = None,
     ) -> None:
@@ -409,6 +411,7 @@ class SecurityLifecycleScanner:
         self.evidence = lifecycle_evidence
         self.policy = lifecycle_policy
         self.identity_transitions = identity_transitions
+        self.listing_metadata = listing_metadata or SecurityListingMetadataResolver.empty()
         self.identity_transitions.validate_alias_coexistence(identity_resolver)
         self.supersedes_scan_manifest = supersedes_scan_manifest
         self.supersession_reason = supersession_reason
@@ -437,6 +440,8 @@ class SecurityLifecycleScanner:
             "lifecycle_policy_hash": self.policy.policy_hash,
             "lifecycle_evidence_version": self.evidence.policy_version,
             "lifecycle_evidence_hash": self.evidence.policy_hash,
+            "listing_metadata_version": self.listing_metadata.overlay_version,
+            "listing_metadata_hash": self.listing_metadata.overlay_hash,
             "supersedes_scan_id": None if superseded is None else superseded["scan_id"],
             "supersession_reason": self.supersession_reason,
         }
@@ -473,6 +478,8 @@ class SecurityLifecycleScanner:
             "security_identity_mapping_hash": self.identity.mapping_hash,
             "security_identity_transition_version": self.identity_transitions.artifact_version,
             "security_identity_transition_hash": self.identity_transitions.artifact_hash,
+            "listing_metadata_version": self.listing_metadata.overlay_version,
+            "listing_metadata_hash": self.listing_metadata.overlay_hash,
             "supersedes_scan_id": comparison.get("old_scan_id"),
             "supersession_reason": comparison.get("supersession_reason"),
             "supersession_comparison": comparison,
@@ -823,6 +830,7 @@ class SecurityLifecycleScanner:
             ],
         )
         con.register("security_identity_transitions", transitions)
+        con.register("listing_metadata_overlay", self.listing_metadata.frame())
         trade_cal = _parquet_glob(self.raw_root / "trade_cal")
         stock_basic = _parquet_glob(self.raw_root / "stock_basic")
         daily = _parquet_glob(self.raw_root / "daily")
@@ -876,7 +884,7 @@ class SecurityLifecycleScanner:
             FROM daily_raw GROUP BY 1,2"""
         )
         con.execute(  # noqa: S608 - validated local paths and YYYYMMDD bounds only
-            f"""CREATE TEMP TABLE stock_source AS
+            f"""CREATE TEMP TABLE stock_source_raw AS
             SELECT coalesce(a.canonical_code, upper(trim(CAST(s.ts_code AS VARCHAR))))
                      AS canonical_ts_code,
                    nullif(trim(CAST(s.list_date AS VARCHAR)), '') AS list_date,
@@ -885,6 +893,15 @@ class SecurityLifecycleScanner:
             LEFT JOIN security_aliases a
               ON upper(trim(CAST(s.ts_code AS VARCHAR)))=a.source_code
              AND a.effective_from IS NULL AND a.effective_to IS NULL"""
+        )
+        con.execute(
+            """CREATE TEMP TABLE stock_source AS
+            SELECT coalesce(o.canonical_ts_code,s.canonical_ts_code) AS canonical_ts_code,
+                   coalesce(o.authoritative_list_date,s.list_date) AS list_date,
+                   s.delist_date
+            FROM stock_source_raw s
+            FULL OUTER JOIN listing_metadata_overlay o
+              ON o.canonical_ts_code=s.canonical_ts_code"""
         )
         con.execute(
             """CREATE TEMP TABLE daily_security_bounds AS
@@ -1290,6 +1307,8 @@ class SecurityLifecycleScanner:
                 "security_identity_transition_hash": self.identity_transitions.artifact_hash,
                 "lifecycle_evidence_version": self.evidence.policy_version,
                 "lifecycle_evidence_hash": self.evidence.policy_hash,
+                "listing_metadata_version": self.listing_metadata.overlay_version,
+                "listing_metadata_hash": self.listing_metadata.overlay_hash,
                 "source_inventory_hash": canonical_payload_hash(source_inventory),
                 "supersedes_scan_id": summary.get("supersedes_scan_id"),
                 "supersession_reason": summary.get("supersession_reason"),
@@ -1323,7 +1342,7 @@ def validate_security_lifecycle_artifact(path: Path) -> JsonObject:
     schema_version = int(manifest["schema_version"])
     required_artifacts = (
         REQUIRED_ARTIFACTS
-        if schema_version in {3, 6, SCANNER_SCHEMA_VERSION}
+        if schema_version in {3, 6, 8, SCANNER_SCHEMA_VERSION}
         else LEGACY_REQUIRED_ARTIFACTS
     )
     hashes = manifest.get("artifact_hashes")
@@ -1344,7 +1363,7 @@ def validate_security_lifecycle_artifact(path: Path) -> JsonObject:
     expected_id = f"security_lifecycle_{canonical_payload_hash(logical)[:24]}"
     if expected_id != manifest.get("scan_id"):
         raise DataValidationError("SECURITY_LIFECYCLE_SCAN_ID_MISMATCH")
-    if schema_version in {6, SCANNER_SCHEMA_VERSION}:
+    if schema_version in {6, 8, SCANNER_SCHEMA_VERSION}:
         _validate_lifecycle_business_contents(path, manifest)
     return manifest
 
@@ -1405,6 +1424,10 @@ def _validate_lifecycle_business_contents(path: Path, manifest: JsonObject) -> N
     ):
         if summary.get(key) != manifest.get(key):
             raise DataValidationError("SECURITY_LIFECYCLE_SUMMARY_MISMATCH")
+    if int(manifest["schema_version"]) == SCANNER_SCHEMA_VERSION:
+        for key in ("listing_metadata_version", "listing_metadata_hash"):
+            if summary.get(key) != manifest.get(key):
+                raise DataValidationError("SECURITY_LIFECYCLE_SUMMARY_MISMATCH")
 
     classified = pd.read_parquet(path / "classified_gaps.parquet")
     unresolved = pd.read_parquet(path / "unresolved.parquet")
@@ -1508,6 +1531,13 @@ def _validate_lifecycle_business_contents(path: Path, manifest: JsonObject) -> N
         "lifecycle_evidence_version": manifest["lifecycle_evidence_version"],
         "lifecycle_evidence_hash": manifest["lifecycle_evidence_hash"],
     }
+    if int(manifest["schema_version"]) == SCANNER_SCHEMA_VERSION:
+        logical_pairs.update(
+            {
+                "listing_metadata_version": manifest["listing_metadata_version"],
+                "listing_metadata_hash": manifest["listing_metadata_hash"],
+            }
+        )
     if any(logical.get(key) != value for key, value in logical_pairs.items()):
         raise DataValidationError("SECURITY_LIFECYCLE_LOGICAL_IDENTITY_MISMATCH")
 
@@ -1543,6 +1573,7 @@ def validate_pass_lifecycle_scan(
     lifecycle_evidence: SecurityLifecycleResolver | None = None,
     lifecycle_policy: LifecycleAuditPolicy | None = None,
     identity_transitions: SecurityIdentityTransitionResolver | None = None,
+    listing_metadata: SecurityListingMetadataResolver | None = None,
 ) -> JsonObject:
     """Require one intact PASS scan covering the executable data interval."""
 
@@ -1595,6 +1626,12 @@ def validate_pass_lifecycle_scan(
         or manifest.get("policy_hash") != lifecycle_policy.policy_hash
     ):
         raise DataValidationError("SECURITY_LIFECYCLE_SOURCE_MISMATCH: lifecycle policy")
+    metadata = listing_metadata or SecurityListingMetadataResolver.empty()
+    if (
+        manifest.get("listing_metadata_version") != metadata.overlay_version
+        or manifest.get("listing_metadata_hash") != metadata.overlay_hash
+    ):
+        raise DataValidationError("SECURITY_LIFECYCLE_SOURCE_MISMATCH: listing metadata")
     return manifest
 
 

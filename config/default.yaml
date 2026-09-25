@@ -50,6 +50,7 @@ security_identity:
   mapping_path: config/security_identity/bse_code_aliases.json
   lifecycle_path: config/security_identity/security_lifecycle_events.json
   lifecycle_policy_path: config/security_identity/security_lifecycle_policy.json
+  listing_metadata_path: null
   identity_transition_mode: none
   identity_transition_path: null
 universe:

@@ -371,6 +371,7 @@ def test_paper_trading_init_cli(tmp_path: Path, capsys: pytest.CaptureFixture[st
                 f"  models: {tmp_path / 'models'}",
                 f"  reports: {tmp_path / 'reports'}",
                 f"  paper_trading: {tmp_path / 'paper'}",
+                f"  runs: {tmp_path / 'runs'}",
                 "paper_trading:",
                 "  portfolios:",
                 "    - portfolio_id: alpha",
