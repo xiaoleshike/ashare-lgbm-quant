@@ -183,7 +183,7 @@ def build_universe_frame(
 
     calendar = pd.DataFrame({"trade_date": build_dates})
     base = calendar.merge(candidates, how="cross")
-    base = apply_identity_transition_scope(base, inputs.get("_predecessor_cutoffs"))
+    base = apply_identity_transition_scope(base, inputs.get("_identity_transition_scopes"))
     base = add_listing_flags(base, all_trade_dates)
     base = merge_market_data(
         base,
@@ -229,6 +229,9 @@ def prepare_universe_inputs(
     overlaid = dict(inputs)
     overlaid["stock_basic"] = listing_metadata.apply_to_stock_basic(inputs["stock_basic"])
     prepared = canonicalize_security_datasets(overlaid, resolver)
+    prepared["suspend_d"] = transitions.normalize_source_frame(
+        prepared["suspend_d"], dataset_name="suspend_d"
+    )
     prepared["_security_identity_prepared"] = pd.DataFrame()
     daily = normalize_daily(prepared["daily"])
     prepared["_daily_normalized"] = daily
@@ -252,16 +255,35 @@ def prepare_universe_inputs(
     ).drop_duplicates()
     prepared["_limit_prices"] = normalize_limit_prices(prepared["stk_limit"])
     prepared["_candidates"] = build_candidates(prepared["stock_basic"], daily)
-    prepared["_predecessor_cutoffs"] = pd.DataFrame(
-        [
-            {
-                "ts_code": item.predecessor_ts_code,
-                "transition_effective_date": item.effective_date,
-            }
-            for item in transitions.transition_records()
-        ],
-        columns=["ts_code", "transition_effective_date"],
+    scope_rows = [
+        {
+            "ts_code": item.predecessor_ts_code,
+            "transition_valid_from": pd.NA,
+            "transition_valid_to": item.effective_date,
+        }
+        for item in transitions.transition_records()
+    ] + [
+        {
+            "ts_code": item.successor_ts_code,
+            "transition_valid_from": item.effective_date,
+            "transition_valid_to": pd.NA,
+        }
+        for item in transitions.transition_records()
+    ]
+    scopes = pd.DataFrame(
+        scope_rows,
+        columns=["ts_code", "transition_valid_from", "transition_valid_to"],
     )
+    if not scopes.empty:
+        scopes = (
+            scopes.groupby("ts_code", as_index=False)
+            .agg(
+                transition_valid_from=("transition_valid_from", "max"),
+                transition_valid_to=("transition_valid_to", "min"),
+            )
+            .reset_index(drop=True)
+        )
+    prepared["_identity_transition_scopes"] = scopes
     namechange = prepared.get("namechange", pd.DataFrame())
     if not namechange.empty:
         prepared["_st_keys"] = build_historical_st_keys(
@@ -276,18 +298,24 @@ def prepare_universe_inputs(
 
 
 def apply_identity_transition_scope(
-    base: DataFrame, predecessor_cutoffs: DataFrame | None
+    base: DataFrame, transition_scopes: DataFrame | None
 ) -> DataFrame:
-    """Stop emitting predecessor-code universe rows at a verified transition."""
+    """Emit predecessor and successor codes only inside verified effective scope."""
 
-    if predecessor_cutoffs is None or predecessor_cutoffs.empty:
+    if transition_scopes is None or transition_scopes.empty:
         return base
-    scoped = base.merge(predecessor_cutoffs, on="ts_code", how="left", validate="many_to_one")
+    scoped = base.merge(transition_scopes, on="ts_code", how="left", validate="many_to_one")
     scoped = scoped[
-        scoped["transition_effective_date"].isna()
-        | (scoped["trade_date"] < scoped["transition_effective_date"])
+        (
+            scoped["transition_valid_from"].isna()
+            | (scoped["trade_date"] >= scoped["transition_valid_from"])
+        )
+        & (
+            scoped["transition_valid_to"].isna()
+            | (scoped["trade_date"] < scoped["transition_valid_to"])
+        )
     ]
-    return scoped.drop(columns="transition_effective_date")
+    return scoped.drop(columns=["transition_valid_from", "transition_valid_to"])
 
 
 def build_historical_st_keys(namechange: DataFrame, all_trade_dates: list[str]) -> DataFrame:

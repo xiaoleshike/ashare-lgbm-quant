@@ -10,6 +10,7 @@ from ashare_quant.data.security_identity import SecurityIdentityResolver
 from ashare_quant.data.security_identity_transition import (
     SecurityIdentityTransition,
     SecurityIdentityTransitionResolver,
+    SecuritySourceRepresentationRule,
 )
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.data.security_listing_metadata import (
@@ -211,6 +212,25 @@ def test_universe_builder_covers_core_membership_and_tradability_rules() -> None
 
 def test_verified_transition_stops_predecessor_universe_rows_at_effective_date() -> None:
     inputs = fixture_inputs()
+    inputs["stock_basic"] = pd.concat(
+        [
+            inputs["stock_basic"],
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000009.SZ",
+                        "symbol": "000009",
+                        "name": "New",
+                        "market": "主板",
+                        "industry": "Test",
+                        "list_date": "20230101",
+                        "delist_date": None,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
     transition = SecurityIdentityTransitionResolver(
         artifact_version="fixture-v1",
         artifact_hash="b" * 64,
@@ -244,7 +264,66 @@ def test_verified_transition_stops_predecessor_universe_rows_at_effective_date()
     )
 
     predecessor_dates = frame.loc[frame["ts_code"] == "000001.SZ", "trade_date"].tolist()
+    successor_dates = frame.loc[frame["ts_code"] == "000009.SZ", "trade_date"].tolist()
     assert predecessor_dates == ["20240104"]
+    assert successor_dates == ["20240105"]
+
+
+def test_verified_suspend_source_representation_is_consumed_by_universe() -> None:
+    inputs = fixture_inputs()
+    inputs["suspend_d"] = pd.DataFrame(
+        [
+            {
+                "ts_code": "001001.SZ",
+                "trade_date": "20240103",
+                "suspend_type": "S",
+                "suspend_timing": None,
+            }
+        ]
+    )
+    transition = SecurityIdentityTransitionResolver(
+        artifact_version="fixture-v2",
+        artifact_hash="b" * 64,
+        transitions=(
+            SecurityIdentityTransition(
+                predecessor_ts_code="000001.SZ",
+                successor_ts_code="001001.SZ",
+                predecessor_name="old",
+                successor_name="new",
+                transition_type="CODE_CHANGE_CONTINUITY",
+                effective_date="20240104",
+                continuity_type="SAME_LISTED_ENTITY",
+                share_conversion_ratio=1.0,
+                evidence_package_id="fixture-evidence",
+                evidence_package_hash="a" * 64,
+            ),
+        ),
+        source_representation_rules=(
+            SecuritySourceRepresentationRule(
+                dataset_name="suspend_d",
+                source_ts_code="001001.SZ",
+                effective_ts_code="000001.SZ",
+                effective_from="20230101",
+                effective_to="20240103",
+                resolution_rule_id="fixture-source-rule",
+                evidence_package_id="fixture-reconciliation",
+                evidence_package_hash="c" * 64,
+            ),
+        ),
+    )
+
+    frame = build_universe_frame(
+        inputs,
+        UniverseSettings(min_list_trading_days=0, liquidity_window_days=1),
+        "20240103",
+        "20240103",
+        transition_resolver=transition,
+    ).set_index("ts_code")
+
+    row = frame.loc["000001.SZ"]
+    assert bool(row["is_ordinary_suspended"])
+    assert not bool(row["can_buy"])
+    assert not bool(row["can_sell"])
 
 
 def test_920305_alias_suspension_and_resume_are_canonicalized() -> None:

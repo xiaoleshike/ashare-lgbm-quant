@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "artifact_name": "security_lifecycle_policy",
-  "policy_version": "security_lifecycle_audit_v2_6_listing_metadata_overlay",
-  "classification_contract_version": 8,
+  "policy_version": "security_lifecycle_audit_v2_7_source_representation",
+  "classification_contract_version": 9,
   "ordinary_suspension": {
     "source": "Tushare suspend_d",
     "full_session_suspend_type": "S",
@@ -29,6 +29,13 @@
     "authoritative_overlay_allowed": true,
     "overlay_precedence": "verified_overlay_over_stock_basic",
     "first_quote_is_not_listing_evidence": true
+  },
+  "source_representation": {
+    "requires_verified_identity_continuity": true,
+    "dataset_and_date_scoped": true,
+    "preserve_source_ts_code": true,
+    "conflicting_dual_code_rows": "fail_closed",
+    "does_not_authorize_position_conversion": true
   },
   "terminal": {
     "authoritative_source": "stock_basic.delist_date",

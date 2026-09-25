@@ -73,6 +73,14 @@ events must not be appended to the BSE alias file. When supplied with
 quotes on and after the verified effective date and binds the transition artifact hash into the
 scan identity. Quote history is only a consistency check and never establishes the effective date.
 
+A provider may retain historical rows under a successor code even though the exchange still used
+the predecessor on those dates. Such storage representation is normalized only by a verified,
+dataset-and-date-scoped rule embedded in a newer transition artifact. The rule must reference a
+frozen source-reconciliation artifact and an existing same-entity transition; it preserves the
+original `source_ts_code`, rejects conflicting dual-code rows, and does not alter the exchange
+effective date or authorize portfolio conversion. Universe construction and the lifecycle scanner
+consume the same rule. An unsupported dataset or an unverified identity relationship fails closed.
+
 Ordinary-suspension Universe boundary checks apply only to sessions inside the authoritative
 listed lifecycle window. Provider suspension rows from a pre-listing venue history remain source
 evidence, but they do not require an A-share `universe_daily` row to be marked suspended. Terminal

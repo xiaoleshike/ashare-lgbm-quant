@@ -12,6 +12,7 @@ from ashare_quant.data.security_identity import SecurityIdentityResolver
 from ashare_quant.data.security_identity_transition import (
     SecurityIdentityTransition,
     SecurityIdentityTransitionResolver,
+    SecuritySourceRepresentationRule,
 )
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 from ashare_quant.data.security_lifecycle_audit import (
@@ -295,6 +296,129 @@ def test_verified_transition_stops_old_code_expected_quote_population(tmp_path: 
         & boundaries["boundary_type"].eq("LISTING_METADATA_MISSING")
     ).any()
     assert result.counts["unresolved"] == 0
+
+
+def test_scanner_consumes_verified_suspend_source_representation(tmp_path: Path) -> None:
+    base = _fixture_scanner(tmp_path, include_unresolved=True)
+    stock_path = base.raw_root / "stock_basic" / "data.parquet"
+    stocks = pd.read_parquet(stock_path)
+    stocks = pd.concat(
+        [
+            stocks,
+            pd.DataFrame([{"ts_code": "001004.SZ", "list_date": DATES[0], "delist_date": None}]),
+        ],
+        ignore_index=True,
+    )
+    stocks.to_parquet(stock_path, index=False)
+    daily_path = base.raw_root / "daily" / "data.parquet"
+    daily = pd.read_parquet(daily_path)
+    daily = daily.loc[~(daily["ts_code"].eq("000004.SZ") & daily["trade_date"].eq("20200107"))]
+    daily = pd.concat(
+        [
+            daily,
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": "001004.SZ",
+                        "trade_date": "20200107",
+                        "open": 10.0,
+                        "close": 10.0,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    daily.to_parquet(daily_path, index=False)
+    suspend_path = base.raw_root / "suspend_d" / "data.parquet"
+    suspend = pd.read_parquet(suspend_path)
+    suspend = pd.concat(
+        [
+            suspend,
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": "001004.SZ",
+                        "trade_date": "20200106",
+                        "suspend_type": "S",
+                        "suspend_timing": None,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    suspend.to_parquet(suspend_path, index=False)
+    universe_path = base.processed_root / "universe_daily" / "data.parquet"
+    universe = pd.read_parquet(universe_path)
+    universe.loc[
+        universe["ts_code"].eq("000004.SZ") & universe["trade_date"].eq("20200106"),
+        "is_suspended",
+    ] = True
+    universe = pd.concat(
+        [
+            universe,
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": "001004.SZ",
+                        "trade_date": "20200107",
+                        "is_listed": True,
+                        "is_suspended": False,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    universe.to_parquet(universe_path, index=False)
+    transition = SecurityIdentityTransition(
+        predecessor_ts_code="000004.SZ",
+        successor_ts_code="001004.SZ",
+        predecessor_name="old",
+        successor_name="new",
+        transition_type="CODE_CHANGE_CONTINUITY",
+        effective_date="20200107",
+        continuity_type="SAME_LISTED_ENTITY",
+        share_conversion_ratio=1.0,
+        evidence_package_id="fixture-evidence",
+        evidence_package_hash="a" * 64,
+    )
+    scanner = SecurityLifecycleScanner(
+        raw_root=base.raw_root,
+        processed_root=base.processed_root,
+        reports_root=base.reports_root,
+        identity_resolver=base.identity,
+        lifecycle_evidence=base.evidence,
+        lifecycle_policy=base.policy,
+        identity_transitions=SecurityIdentityTransitionResolver(
+            artifact_version="fixture-v2",
+            artifact_hash="b" * 64,
+            transitions=(transition,),
+            source_representation_rules=(
+                SecuritySourceRepresentationRule(
+                    dataset_name="suspend_d",
+                    source_ts_code="001004.SZ",
+                    effective_ts_code="000004.SZ",
+                    effective_from="20200102",
+                    effective_to="20200106",
+                    resolution_rule_id="fixture-rule",
+                    evidence_package_id="fixture-reconciliation",
+                    evidence_package_hash="c" * 64,
+                ),
+            ),
+        ),
+    )
+
+    result = scanner.scan(DATES[0], DATES[-1])
+    classified = pd.read_parquet(result.output_dir / "classified_gaps.parquet")
+    selected = classified[classified["canonical_ts_code"].eq("000004.SZ")]
+
+    assert selected["classification"].tolist() == ["ORDINARY_SUSPENSION"]
+    assert selected["session_count"].tolist() == [1]
+    assert not classified["canonical_ts_code"].eq("001004.SZ").any()
+    assert result.counts["unresolved"] == 0
+    assert result.counts["boundary_inconsistencies"] == 0
 
 
 def test_verified_listing_metadata_overlay_resolves_missing_metadata_boundary(

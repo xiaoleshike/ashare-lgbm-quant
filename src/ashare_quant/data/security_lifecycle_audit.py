@@ -35,9 +35,9 @@ type LifecycleClassification = Literal[
     "UNRESOLVED",
 ]
 
-SCANNER_SCHEMA_VERSION = 9
-LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8})
-CLASSIFICATION_CONTRACT_VERSION = 8
+SCANNER_SCHEMA_VERSION = 10
+LEGACY_SCANNER_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9})
+CLASSIFICATION_CONTRACT_VERSION = 9
 ARTIFACT_NAME = "security_lifecycle_scan"
 REQUIRED_ARTIFACTS = frozenset(
     {
@@ -830,6 +830,28 @@ class SecurityLifecycleScanner:
             ],
         )
         con.register("security_identity_transitions", transitions)
+        representation_rules = pd.DataFrame(
+            [
+                {
+                    "dataset_name": item.dataset_name,
+                    "source_ts_code": item.source_ts_code,
+                    "effective_ts_code": item.effective_ts_code,
+                    "effective_from": item.effective_from,
+                    "effective_to": item.effective_to,
+                    "resolution_rule_id": item.resolution_rule_id,
+                }
+                for item in self.identity_transitions.source_representation_records()
+            ],
+            columns=[
+                "dataset_name",
+                "source_ts_code",
+                "effective_ts_code",
+                "effective_from",
+                "effective_to",
+                "resolution_rule_id",
+            ],
+        )
+        con.register("security_source_representation_rules", representation_rules)
         con.register("listing_metadata_overlay", self.listing_metadata.frame())
         trade_cal = _parquet_glob(self.raw_root / "trade_cal")
         stock_basic = _parquet_glob(self.raw_root / "stock_basic")
@@ -928,7 +950,11 @@ class SecurityLifecycleScanner:
              AND (s.delist_date IS NULL OR c.trade_date<s.delist_date)
             LEFT JOIN security_identity_transitions t
               ON t.predecessor_ts_code=s.canonical_ts_code
-            WHERE t.effective_date IS NULL OR c.trade_date<t.effective_date"""
+            LEFT JOIN security_identity_transitions successor_transition
+              ON successor_transition.successor_ts_code=s.canonical_ts_code
+            WHERE (t.effective_date IS NULL OR c.trade_date<t.effective_date)
+              AND (successor_transition.effective_date IS NULL
+                OR c.trade_date>=successor_transition.effective_date)"""
         )
         con.execute(
             """CREATE TEMP TABLE missing_candidates AS
@@ -955,18 +981,42 @@ class SecurityLifecycleScanner:
             WHERE trade_date BETWEEN '{start}' AND '{end}' GROUP BY 1,2"""
         )
         con.execute(
-            f"""CREATE TEMP TABLE suspend_events AS
-            SELECT coalesce(a.canonical_code, upper(trim(CAST(s.ts_code AS VARCHAR))))
-                     AS canonical_ts_code,
+            f"""CREATE TEMP TABLE suspend_events_raw AS
+            SELECT upper(trim(CAST(s.ts_code AS VARCHAR))) AS source_ts_code,
+                   coalesce(r.effective_ts_code,a.canonical_code,
+                     upper(trim(CAST(s.ts_code AS VARCHAR)))) AS canonical_ts_code,
                    CAST(s.trade_date AS VARCHAR) AS trade_date,
                    upper(trim(CAST(s.suspend_type AS VARCHAR))) AS suspend_type,
                    CAST(s.suspend_timing AS VARCHAR) AS suspend_timing
             FROM read_parquet('{suspend}', union_by_name=true, hive_partitioning=false) s
+            LEFT JOIN security_source_representation_rules r
+              ON r.dataset_name='suspend_d'
+             AND upper(trim(CAST(s.ts_code AS VARCHAR)))=r.source_ts_code
+             AND CAST(s.trade_date AS VARCHAR) BETWEEN r.effective_from AND r.effective_to
             LEFT JOIN security_aliases a
               ON upper(trim(CAST(s.ts_code AS VARCHAR)))=a.source_code
              AND (a.effective_from IS NULL OR CAST(s.trade_date AS VARCHAR)>=a.effective_from)
              AND (a.effective_to IS NULL OR CAST(s.trade_date AS VARCHAR)<=a.effective_to)
             WHERE s.trade_date BETWEEN '{start}' AND '{end}'"""
+        )
+        conflicts = con.execute(
+            """WITH source_signatures AS (
+              SELECT canonical_ts_code,trade_date,source_ts_code,
+                     string_agg(DISTINCT suspend_type||'|'||coalesce(suspend_timing,'<NULL>'),
+                       ',' ORDER BY suspend_type||'|'||coalesce(suspend_timing,'<NULL>'))
+                       AS signature
+              FROM suspend_events_raw GROUP BY 1,2,3
+            )
+            SELECT canonical_ts_code,trade_date
+            FROM source_signatures GROUP BY 1,2
+            HAVING count(*)>1 AND count(DISTINCT signature)>1"""
+        ).fetchall()
+        if conflicts:
+            raise DataValidationError("SECURITY_SOURCE_REPRESENTATION_CONFLICT")
+        con.execute(
+            """CREATE TEMP TABLE suspend_events AS
+            SELECT DISTINCT canonical_ts_code,trade_date,suspend_type,suspend_timing
+            FROM suspend_events_raw"""
         )
 
     def _classify_daily(self, con: duckdb.DuckDBPyConnection) -> DataFrame:
@@ -1147,12 +1197,10 @@ class SecurityLifecycleScanner:
               SELECT b.canonical_ts_code,b.trade_date,'LISTING_START',
                      'BOUNDARY_INCONSISTENCY',TRUE,
                      'universe_daily is not listed on first expected listed session',
-                     'stock_basic.list_date/daily first date'
+                     'transition-scoped expected_listed first session'
               FROM (
-                SELECT s.canonical_ts_code,min(c.trade_date) AS trade_date
-                FROM securities s JOIN open_sessions c ON c.trade_date>=s.list_date
-                CROSS JOIN calendar_bounds bounds
-                WHERE s.list_date BETWEEN bounds.first_date AND bounds.last_date GROUP BY 1
+                SELECT canonical_ts_code,min(trade_date) AS trade_date
+                FROM expected_listed GROUP BY 1
               ) b
               LEFT JOIN universe_state u ON u.canonical_ts_code=b.canonical_ts_code
                 AND u.trade_date=b.trade_date
@@ -1342,7 +1390,7 @@ def validate_security_lifecycle_artifact(path: Path) -> JsonObject:
     schema_version = int(manifest["schema_version"])
     required_artifacts = (
         REQUIRED_ARTIFACTS
-        if schema_version in {3, 6, 8, SCANNER_SCHEMA_VERSION}
+        if schema_version in {3, 6, 8, 9, SCANNER_SCHEMA_VERSION}
         else LEGACY_REQUIRED_ARTIFACTS
     )
     hashes = manifest.get("artifact_hashes")
@@ -1363,7 +1411,7 @@ def validate_security_lifecycle_artifact(path: Path) -> JsonObject:
     expected_id = f"security_lifecycle_{canonical_payload_hash(logical)[:24]}"
     if expected_id != manifest.get("scan_id"):
         raise DataValidationError("SECURITY_LIFECYCLE_SCAN_ID_MISMATCH")
-    if schema_version in {6, 8, SCANNER_SCHEMA_VERSION}:
+    if schema_version in {6, 8, 9, SCANNER_SCHEMA_VERSION}:
         _validate_lifecycle_business_contents(path, manifest)
     return manifest
 
@@ -1424,7 +1472,7 @@ def _validate_lifecycle_business_contents(path: Path, manifest: JsonObject) -> N
     ):
         if summary.get(key) != manifest.get(key):
             raise DataValidationError("SECURITY_LIFECYCLE_SUMMARY_MISMATCH")
-    if int(manifest["schema_version"]) == SCANNER_SCHEMA_VERSION:
+    if int(manifest["schema_version"]) in {9, SCANNER_SCHEMA_VERSION}:
         for key in ("listing_metadata_version", "listing_metadata_hash"):
             if summary.get(key) != manifest.get(key):
                 raise DataValidationError("SECURITY_LIFECYCLE_SUMMARY_MISMATCH")
@@ -1531,7 +1579,7 @@ def _validate_lifecycle_business_contents(path: Path, manifest: JsonObject) -> N
         "lifecycle_evidence_version": manifest["lifecycle_evidence_version"],
         "lifecycle_evidence_hash": manifest["lifecycle_evidence_hash"],
     }
-    if int(manifest["schema_version"]) == SCANNER_SCHEMA_VERSION:
+    if int(manifest["schema_version"]) in {9, SCANNER_SCHEMA_VERSION}:
         logical_pairs.update(
             {
                 "listing_metadata_version": manifest["listing_metadata_version"],
