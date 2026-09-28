@@ -242,6 +242,22 @@ ashare-quant --config config/default.yaml models walk-forward-run \
   --feature-provenance reports/feature_selection/FEATURE_SET_ID/feature_set.json
 ```
 
+Before a full run, execute exactly one deterministic smoke fold through the same loader, trainer,
+simulator, lifecycle preflight, and accounting contracts:
+
+```bash
+ashare-quant --config config/default.yaml models walk-forward-smoke \
+  --experiment-id EXPERIMENT_ID \
+  --experiment-manifest reports/horizon_experiments/RUN/experiment_manifest.json \
+  --feature-provenance reports/feature_selection/FEATURE_SET_ID/feature_set.json \
+  --lifecycle-scan-manifest reports/security_lifecycle/SCAN_ID/manifest.json \
+  --identity-transition-artifact reports/security_identity_transitions/ARTIFACT_ID
+```
+
+The smoke rule is fixed to the chronologically earliest `STRICT_OOS` fold. Its scope and selected
+fold enter the run identity, and its output is published under `research/walk_forward_smoke/`; it
+cannot masquerade as a completed all-fold run.
+
 `--ranking-only` explicitly records executable evidence as not required. It must not be used where
 the research contract requires executable accounting.
 
@@ -285,3 +301,8 @@ Training uses the mature, available labeled subset and publishes per-date select
 Scoring remains label-free. Evaluation-label maturity requires a valid exchange-session
 sequence, T+1 entry, the configured H-session endpoint, an actual exit no earlier than that
 endpoint, and an exit no later than the governed cutoff.
+
+Processed label and feature manifests bind the exact Universe manifest SHA256. When their raw root
+is an immutable `ResearchSourceSnapshot`, they also bind its snapshot ID and manifest SHA256.
+Horizon-plan label inventory identities are content-defined from relative paths, sizes, and file
+SHA256 values; mtimes are not logical provenance.

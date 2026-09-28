@@ -163,6 +163,7 @@ from ashare_quant.utils.manifest import (
     parquet_artifact_statistics,
     processed_source_fingerprint,
     raw_source_fingerprints,
+    research_source_snapshot_fingerprint,
     utc_now_iso,
     write_build_manifest,
 )
@@ -754,6 +755,18 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         action="store_true",
         help="Do not require executable portfolio evidence for this research run.",
     )
+    walk_forward_smoke = commands.add_parser(
+        "walk-forward-smoke",
+        help="Execute the chronologically earliest STRICT_OOS fold from one experiment.",
+    )
+    walk_forward_smoke.add_argument("--experiment-id", required=True)
+    walk_forward_smoke.add_argument("--experiment-manifest", required=True)
+    walk_forward_smoke.add_argument("--feature-provenance", required=True)
+    walk_forward_smoke.add_argument("--lifecycle-scan-manifest", required=True)
+    smoke_transition_group = walk_forward_smoke.add_mutually_exclusive_group(required=True)
+    smoke_transition_group.add_argument("--identity-transition-artifact")
+    smoke_transition_group.add_argument("--no-identity-transitions", action="store_true")
+    walk_forward_smoke.add_argument("--ranking-only", action="store_true")
     walk_forward_status_parser = commands.add_parser(
         "walk-forward-status", help="Validate one completed multi-fold experiment."
     )
@@ -1980,6 +1993,9 @@ def run_labels_command(args: argparse.Namespace) -> int:
                 min_date=universe_status.min_date,
                 max_date=universe_status.max_date,
             )
+            snapshot_fingerprint = research_source_snapshot_fingerprint(raw_store)
+            if snapshot_fingerprint is not None:
+                source_fingerprints["research_source_snapshot"] = snapshot_fingerprint
             write_build_manifest(
                 label_store.dataset_dir,
                 artifact_name="labels_forward",
@@ -2080,6 +2096,9 @@ def run_features_command(args: argparse.Namespace) -> int:
             min_date=universe_statistics.min_date,
             max_date=universe_statistics.max_date,
         )
+        snapshot_fingerprint = research_source_snapshot_fingerprint(raw_store)
+        if snapshot_fingerprint is not None:
+            source_fingerprints["research_source_snapshot"] = snapshot_fingerprint
         canonical_statistics = parquet_artifact_statistics(feature_store.dataset_dir)
         canonical_feature_count = len(
             set(canonical_statistics.column_names) - {"trade_date", "ts_code"}
@@ -2656,7 +2675,7 @@ def run_models_command(args: argparse.Namespace) -> int:
             f"folds={walk_forward_result.fold_count} output={walk_forward_result.output_dir}"
         )
         return 0
-    if args.models_command == "walk-forward-run":
+    if args.models_command in {"walk-forward-run", "walk-forward-smoke"}:
         raw_root = (
             settings.paths.parquet_store if args.storage_root is None else Path(args.storage_root)
         )
@@ -2687,6 +2706,9 @@ def run_models_command(args: argparse.Namespace) -> int:
                     else Path(args.identity_transition_artifact)
                 ),
                 explicit_no_identity_transitions=args.no_identity_transitions,
+                smoke_selection_rule=(
+                    "earliest_strict_oos" if args.models_command == "walk-forward-smoke" else None
+                ),
             )
         except (DataValidationError, OSError, ValueError) as error:
             print(f"walk-forward execution failed: {error}", file=sys.stderr)

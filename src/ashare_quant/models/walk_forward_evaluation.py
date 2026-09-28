@@ -71,6 +71,7 @@ OLDER_EVALUATION_CONTRACT_VERSION = 3
 EXECUTION_TAIL_POLICY_VERSION = 2
 EXECUTION_TAIL_LOAD_CHUNK_SESSIONS = 252
 EXECUTION_TAIL_POLICY = "carry_to_source_or_lockbox_cutoff"
+SMOKE_SELECTION_RULE = "earliest_strict_oos"
 REQUIRED_FOLD_ARTIFACTS = frozenset(
     {
         "model.txt",
@@ -651,6 +652,7 @@ class MultiFoldEvaluationRunner:
         lifecycle_scan_manifest: Path | None = None,
         identity_transition_artifact: Path | None = None,
         explicit_no_identity_transitions: bool = False,
+        smoke_selection_rule: str | None = None,
     ) -> WalkForwardEvaluationResult:
         plan = _load_json(experiment_manifest, "horizon experiment manifest")
         experiment = _select_experiment(plan, experiment_id)
@@ -671,10 +673,10 @@ class MultiFoldEvaluationRunner:
             provenance.selection_end,
             diagnostics_horizon,
         )
-        folds = tuple(
+        classified_folds = tuple(
             _with_research_classification(fold, selection_information_end) for fold in raw_folds
         )
-        for fold in folds:
+        for fold in classified_folds:
             evaluation_information_end = self.executor.mature_information_end(
                 str(fold["evaluation_end"]), horizon
             )
@@ -684,6 +686,29 @@ class MultiFoldEvaluationRunner:
                 start_date=str(fold["evaluation_start"]),
                 end_date=evaluation_information_end,
             )
+        folds = classified_folds
+        run_scope: JsonObject = {"mode": "all_eligible_folds"}
+        if smoke_selection_rule is not None:
+            if smoke_selection_rule != SMOKE_SELECTION_RULE:
+                raise DataValidationError("WALK_FORWARD_SMOKE_SELECTION_RULE_INVALID")
+            strict_folds = sorted(
+                (
+                    fold
+                    for fold in classified_folds
+                    if cast(JsonObject, fold["research_validity"])["research_classification"]
+                    == "STRICT_OOS"
+                ),
+                key=lambda fold: (str(fold["evaluation_start"]), str(fold["fold_id"])),
+            )
+            if not strict_folds:
+                raise DataValidationError("WALK_FORWARD_SMOKE_STRICT_OOS_FOLD_REQUIRED")
+            folds = (strict_folds[0],)
+            run_scope = {
+                "mode": "single_fold_smoke",
+                "selection_rule": smoke_selection_rule,
+                "selected_fold_id": str(folds[0]["fold_id"]),
+                "eligible_fold_count": len(classified_folds),
+            }
         if require_executable and self.lifecycle_audit_required and lifecycle_scan_manifest is None:
             raise DataValidationError("SECURITY_LIFECYCLE_AUDIT_REQUIRED")
         transitions: SecurityIdentityTransitionResolver | None = None
@@ -769,10 +794,12 @@ class MultiFoldEvaluationRunner:
             semantic_parameters=ranker_semantic_parameters(self.settings.ranker),
             source_identity=current_source_identity,
             execution_contract=execution_contract,
+            run_scope=run_scope,
         )
         identity = str(identities["run_identity"])
-        run_id = f"walk_forward_{identity[:16]}"
-        output_dir = self.reports_root / "research" / "walk_forward" / run_id
+        prefix = "walk_forward_smoke" if smoke_selection_rule is not None else "walk_forward"
+        run_id = f"{prefix}_{identity[:16]}"
+        output_dir = self.reports_root / "research" / prefix / run_id
         existing = _existing_complete(output_dir, identity)
         if existing is not None:
             return existing
@@ -839,6 +866,7 @@ class MultiFoldEvaluationRunner:
             horizon_plan_hash=_file_hash(experiment_manifest),
             research_policy_path=str(self.research_policy_path),
             research_policy_hash=policy.policy_hash,
+            run_scope=run_scope,
             folds=fold_manifests,
             aggregate=aggregate,
         )
@@ -1211,6 +1239,7 @@ def _experiment_identities(
     semantic_parameters: JsonObject,
     source_identity: JsonObject,
     execution_contract: JsonObject,
+    run_scope: JsonObject,
 ) -> JsonObject:
     modeling = {
         "schema_version": SCHEMA_VERSION,
@@ -1222,6 +1251,7 @@ def _experiment_identities(
         "research_policy_hash": research_policy_hash,
         "semantic_parameters": semantic_parameters,
         "source_identity": source_identity,
+        "run_scope": run_scope,
     }
     modeling_identity = _payload_hash(modeling)
     execution_identity = _payload_hash(execution_contract)
@@ -1361,6 +1391,7 @@ def _publish_aggregate(
     horizon_plan_hash: str,
     research_policy_path: str,
     research_policy_hash: str,
+    run_scope: JsonObject,
     folds: list[JsonObject],
     aggregate: JsonObject,
 ) -> None:
@@ -1432,6 +1463,7 @@ def _publish_aggregate(
         "horizon_plan_hash": horizon_plan_hash,
         "research_policy_path": research_policy_path,
         "research_policy_hash": research_policy_hash,
+        "run_scope": run_scope,
         "fold_manifest_hashes": fold_hashes,
         "aggregate_metrics_sha256": _file_hash(output_dir / "aggregate_metrics.json"),
         "fold_summary_sha256": _file_hash(output_dir / "fold_summary.parquet"),

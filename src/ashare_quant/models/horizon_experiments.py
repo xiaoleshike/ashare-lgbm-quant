@@ -582,13 +582,13 @@ def _load_label_availability(
 
 
 def dataset_fingerprint(files: list[Path], root: Path) -> str:
-    """Return the deterministic inventory identity used by horizon plans."""
+    """Return the content-defined inventory identity used by horizon plans."""
 
     entries = [
         {
             "path": str(path.relative_to(root)),
             "size": path.stat().st_size,
-            "mtime_ns": path.stat().st_mtime_ns,
+            "sha256": _file_hash(path),
         }
         for path in files
     ]

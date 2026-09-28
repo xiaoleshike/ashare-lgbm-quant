@@ -283,7 +283,40 @@ def processed_source_fingerprint(
         "max_date": max_date,
         "manifest_git_commit": None if manifest is None else manifest.get("git_commit"),
         "manifest_config_hash": None if manifest is None else manifest.get("config_hash"),
+        "manifest_sha256": file_sha256(manifest_path(artifact_dir)),
     }
+
+
+def research_source_snapshot_fingerprint(store: ParquetDataStore) -> dict[str, Any] | None:
+    """Return the immutable snapshot identity when a store points at snapshot datasets."""
+
+    if store.root.name != "datasets":
+        return None
+    snapshot_manifest = store.root.parent / "manifest.json"
+    if not snapshot_manifest.is_file():
+        return None
+    try:
+        payload = json.loads(snapshot_manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"invalid research source snapshot manifest: {snapshot_manifest}"
+        ) from error
+    snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise ValueError(f"research source snapshot identity is missing: {snapshot_manifest}")
+    return {
+        "exists": True,
+        "snapshot_id": snapshot_id,
+        "manifest_sha256": file_sha256(snapshot_manifest),
+    }
+
+
+def file_sha256(path: Path) -> str | None:
+    """Return a file's SHA256, or ``None`` when the governed input is absent."""
+
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

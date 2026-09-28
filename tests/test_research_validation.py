@@ -315,6 +315,65 @@ def test_multi_fold_runner_executes_all_folds_and_is_idempotent(tmp_path: Path) 
     }
 
 
+def test_walk_forward_smoke_executes_only_earliest_strict_oos_fold(tmp_path: Path) -> None:
+    plan, provenance = _research_fixture(tmp_path)
+    executor = FakeExecutor()
+    runner = MultiFoldEvaluationRunner(
+        reports_root=tmp_path / "reports",
+        settings=AppSettings.model_validate({}),
+        executor=executor,
+        research_policy_path=Path("config/research_policy.yaml"),
+        lifecycle_audit_required=False,
+    )
+
+    result = runner.run(
+        experiment_manifest=plan,
+        experiment_id="h5_fixture",
+        feature_provenance_path=provenance,
+        require_executable=True,
+        smoke_selection_rule="earliest_strict_oos",
+    )
+
+    assert result.fold_count == 1
+    assert executor.calls == ["fold_1"]
+    assert result.output_dir.parent.name == "walk_forward_smoke"
+    manifest = json.loads((result.output_dir / "manifest.json").read_text())
+    assert manifest["run_scope"] == {
+        "mode": "single_fold_smoke",
+        "selection_rule": "earliest_strict_oos",
+        "selected_fold_id": "fold_1",
+        "eligible_fold_count": 3,
+    }
+
+
+def test_walk_forward_smoke_identity_is_distinct_from_full_run(tmp_path: Path) -> None:
+    plan, provenance = _research_fixture(tmp_path)
+    settings = AppSettings.model_validate({})
+    full = MultiFoldEvaluationRunner(
+        reports_root=tmp_path / "reports",
+        settings=settings,
+        executor=FakeExecutor(),
+        lifecycle_audit_required=False,
+    ).run(
+        experiment_manifest=plan,
+        experiment_id="h5_fixture",
+        feature_provenance_path=provenance,
+    )
+    smoke = MultiFoldEvaluationRunner(
+        reports_root=tmp_path / "reports",
+        settings=settings,
+        executor=FakeExecutor(),
+        lifecycle_audit_required=False,
+    ).run(
+        experiment_manifest=plan,
+        experiment_id="h5_fixture",
+        feature_provenance_path=provenance,
+        smoke_selection_rule="earliest_strict_oos",
+    )
+
+    assert smoke.experiment_id != full.experiment_id
+
+
 def test_multi_fold_runner_reuses_completed_folds_before_final_manifest(tmp_path: Path) -> None:
     plan, provenance = _research_fixture(tmp_path)
     executor = FakeExecutor(fail_once="fold_3")

@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.utils.manifest import (
     artifact_manifest_status,
     atomic_write_json,
@@ -13,6 +14,8 @@ from ashare_quant.utils.manifest import (
     current_git_info,
     manifest_path,
     parquet_artifact_statistics,
+    processed_source_fingerprint,
+    research_source_snapshot_fingerprint,
     write_build_manifest,
 )
 
@@ -224,3 +227,28 @@ def test_failed_incremental_manifest_write_preserves_previous_manifest(
     assert json.loads(manifest_path(artifact_dir).read_text(encoding="utf-8")) == {
         "sentinel": "previous-valid"
     }
+
+
+def test_processed_source_fingerprint_binds_exact_manifest_bytes(tmp_path: Path) -> None:
+    artifact = tmp_path / "universe_daily"
+    atomic_write_json(manifest_path(artifact), {"identity": "first"})
+    first = processed_source_fingerprint(
+        artifact, rows=1, partitions=1, min_date="20240102", max_date="20240102"
+    )
+    atomic_write_json(manifest_path(artifact), {"identity": "second"})
+    second = processed_source_fingerprint(
+        artifact, rows=1, partitions=1, min_date="20240102", max_date="20240102"
+    )
+
+    assert first["manifest_sha256"] != second["manifest_sha256"]
+
+
+def test_research_source_snapshot_fingerprint_binds_manifest(tmp_path: Path) -> None:
+    snapshot = tmp_path / "research_source_snapshot_fixture"
+    atomic_write_json(snapshot / "manifest.json", {"snapshot_id": snapshot.name})
+
+    fingerprint = research_source_snapshot_fingerprint(ParquetDataStore(snapshot / "datasets"))
+
+    assert fingerprint is not None
+    assert fingerprint["snapshot_id"] == snapshot.name
+    assert len(str(fingerprint["manifest_sha256"])) == 64
