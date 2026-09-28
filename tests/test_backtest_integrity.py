@@ -27,6 +27,19 @@ from ashare_quant.data.security_identity_transition import SecurityIdentityTrans
 from ashare_quant.data.security_lifecycle import SecurityLifecycleResolver
 
 
+@pytest.mark.parametrize("dates", [("20260710",), ("20260710", "20260713")])
+def test_next_open_and_holding_exit_cannot_clamp_to_calendar_end(dates: tuple[str, ...]) -> None:
+    inputs = _inputs([_price(date, 10.0, 10.0) for date in dates], calendar=dates)
+    inputs.signals.loc[:, "trade_date"] = "20260710"
+    with pytest.raises(DataValidationError, match="BACKTEST_EXECUTION_CALENDAR_INSUFFICIENT"):
+        simulate_portfolio(
+            inputs,
+            top_n=1,
+            settings=_settings(holding_period_days=5),
+            purpose="executable_validation",
+        )
+
+
 def test_evidence_model_manifest_is_required(tmp_path: Path) -> None:
     with pytest.raises(DataValidationError, match="BACKTEST_MODEL_PROVENANCE_REQUIRED"):
         resolve_model_evaluation_boundary(tmp_path)
@@ -93,6 +106,7 @@ def test_920305_suspension_uses_last_valid_close_and_resumes_current_valuation()
         "20250430",
         "20250506",
         "20250507",
+        "20250508",
     )
     inputs = _inputs(
         [
@@ -103,6 +117,7 @@ def test_920305_suspension_uses_last_valid_close_and_resumes_current_valuation()
             _price("20250430", np.nan, np.nan, can_sell=False, suspended=True),
             _price("20250506", 12.79, 12.79),
             _price("20250507", 14.18, 14.18),
+            _price("20250508", 14.18, 14.18),
         ],
         calendar=dates,
     )

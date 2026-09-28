@@ -767,6 +767,15 @@ def add_models_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     smoke_transition_group.add_argument("--identity-transition-artifact")
     smoke_transition_group.add_argument("--no-identity-transitions", action="store_true")
     walk_forward_smoke.add_argument("--ranking-only", action="store_true")
+    for execution_parser in (walk_forward_run, walk_forward_smoke):
+        execution_parser.add_argument(
+            "--execution-processed-root",
+            default=None,
+            help=(
+                "Executable Universe root; defaults to --processed-root. "
+                "Modeling features, labels and Universe still use --processed-root."
+            ),
+        )
     walk_forward_status_parser = commands.add_parser(
         "walk-forward-status", help="Validate one completed multi-fold experiment."
     )
@@ -2686,6 +2695,11 @@ def run_models_command(args: argparse.Namespace) -> int:
                 raw_root=raw_root,
                 processed_root=processed_root,
                 settings=settings,
+                execution_processed_root=(
+                    None
+                    if args.execution_processed_root is None
+                    else Path(args.execution_processed_root)
+                ),
             ),
             lifecycle_audit_required=True,
         )

@@ -258,6 +258,31 @@ The smoke rule is fixed to the chronologically earliest `STRICT_OOS` fold. Its s
 fold enter the run identity, and its output is published under `research/walk_forward_smoke/`; it
 cannot masquerade as a completed all-fold run.
 
+Execution contract 9 separates modeling and execution coverage. Both `walk-forward-run` and
+`walk-forward-smoke` accept `--execution-processed-root PATH` after the subcommand; omission
+uses the modeling `--processed-root`. Feature, label, modeling Universe and plan identities
+remain bound to the modeling root. Label maturity still uses the modeling coverage cutoff.
+Execution prices, tradability, lifecycle PASS validation and the execution cutoff use the
+execution root, with the same frozen raw source. The execution contract binds
+`execution_universe_manifest_hash`, `execution_universe_min_date`,
+`execution_universe_max_date` and optional row/partition counts. Paths are operational locators,
+not identity fields. A tail Universe requires its own PASS lifecycle scan; the old modeling
+scan cannot authorize different execution source bytes.
+
+Before any fold trains, tail policy 3 checks every selected fold's final signal against the
+frozen open-session calendar: next-open entry plus H holding sessions must fit within the
+execution Universe and before the prospective lockbox. Insufficient coverage raises
+`WALK_FORWARD_EXECUTION_TAIL_INSUFFICIENT` with fold, signal end, required planned exit and
+cutoff. This requires H+1 sessions, not the sell-delay alert threshold. Actual delayed exits
+still carry to the governed cutoff and fail closed if unresolved. Simulator date offsets
+raise `BACKTEST_EXECUTION_CALENDAR_INSUFFICIENT` instead of clamping entry or exit to the last
+session. No signals are removed and no evaluation periods are clipped.
+
+Accounting schema remains 3. Contract-8 completed evidence remains readable as legacy;
+the old 117-fold incomplete run remains immutable and has no migration path to contract 9.
+Changing execution coverage changes execution/run identity, not modeling identity. Building
+and validating a new execution Universe is a separate operator activation step before rerunning.
+
 `--ranking-only` explicitly records executable evidence as not required. It must not be used where
 the research contract requires executable accounting.
 

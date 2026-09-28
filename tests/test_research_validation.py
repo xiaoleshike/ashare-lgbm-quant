@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -446,7 +447,7 @@ def test_walk_forward_execution_tail_contract_is_bounded_by_source_and_lockbox(
     universe.mkdir(parents=True)
     atomic_write_json(
         universe / "_manifest.json",
-        {"canonical_artifact": {"max_date": "20260930"}},
+        {"canonical_artifact": {"min_date": "20100104", "max_date": "20260930"}},
     )
     executor = RankerFoldExecutor(
         raw_root=tmp_path / "raw",
@@ -466,6 +467,275 @@ def test_walk_forward_execution_tail_contract_is_bounded_by_source_and_lockbox(
     assert tail["sell_delay_alert_sessions"] == 20
     assert tail["security_lifecycle_policy_version"] == "security_lifecycle_events_v3"
     assert _governed_execution_cutoff(tail) == "20260809"
+
+
+def _tail_fixture(tmp_path: Path) -> tuple[RankerFoldExecutor, dict[str, object]]:
+    modeling = tmp_path / "modeling"
+    execution = tmp_path / "execution"
+    for root, end in ((modeling, "20260710"), (execution, "20260807")):
+        atomic_write_json(
+            root / "universe_daily" / "_manifest.json",
+            {"canonical_artifact": {"min_date": "20100104", "max_date": end}},
+        )
+    atomic_write_json(modeling / "features_daily" / "_manifest.json", {"fixture": "features"})
+    labels = modeling / "labels_forward"
+    labels.mkdir()
+    pd.DataFrame({"trade_date": ["20260710"]}).to_parquet(labels / "data.parquet")
+    from ashare_quant.models.horizon_experiments import dataset_fingerprint
+
+    plan: dict[str, object] = {
+        "features_manifest_hash": hashlib.sha256(
+            (modeling / "features_daily" / "_manifest.json").read_bytes()
+        ).hexdigest(),
+        "universe_hash": hashlib.sha256(
+            (modeling / "universe_daily" / "_manifest.json").read_bytes()
+        ).hexdigest(),
+        "labels_fingerprint": dataset_fingerprint([labels / "data.parquet"], labels),
+    }
+    calendar = tmp_path / "raw" / "trade_cal"
+    calendar.mkdir(parents=True)
+    # Synthetic governed calendar: July 13 is closed to test session, not weekday, offsets.
+    dates = pd.bdate_range("2020-01-01", "2026-08-14").strftime("%Y%m%d")
+    pd.DataFrame(
+        {"cal_date": dates, "is_open": [int(date != "20260713") for date in dates]}
+    ).to_parquet(calendar / "data.parquet")
+    executor = RankerFoldExecutor(
+        raw_root=tmp_path / "raw",
+        processed_root=modeling,
+        execution_processed_root=execution,
+        settings=AppSettings.model_validate({}),
+    )
+    return executor, plan
+
+
+def test_execution_universe_changes_only_execution_identity(tmp_path: Path) -> None:
+    from ashare_quant.models.walk_forward_evaluation import _experiment_identities
+
+    executor, plan = _tail_fixture(tmp_path)
+    original = RankerFoldExecutor(
+        raw_root=executor.raw_root,
+        processed_root=executor.processed_root,
+        settings=executor.settings,
+    )
+    assert original.execution_processed_root == original.processed_root
+    source = executor.validate_sources(plan)
+    assert source == original.validate_sources(plan)
+    contracts = [
+        item.execution_contract(
+            horizon=5, require_executable=True, prospective_lockbox_start="20260810"
+        )
+        for item in (original, executor)
+    ]
+    assert contracts[0]["execution_universe_manifest_hash"] == plan["universe_hash"]
+    assert contracts[1]["execution_universe_manifest_hash"] != plan["universe_hash"]
+    assert contracts[1]["execution_universe_max_date"] == "20260807"
+    assert executor._modeling_data_end() == "20260710"
+    folds = (
+        {
+            "fold_id": "fold_0118_202607",
+            "evaluation_start": "20260701",
+            "evaluation_end": "20260710",
+        },
+    )
+    with pytest.raises(DataValidationError, match="required_planned_exit=20260721"):
+        original.validate_execution_tail(folds, 5, contracts[0])
+    executor.validate_execution_tail(folds, 5, contracts[1])
+    identities = [
+        _experiment_identities(
+            plan=plan,
+            experiment={"experiment_id": "fixture"},
+            fold_contracts=folds,
+            feature_set_id="fixture",
+            feature_provenance_hash="a" * 64,
+            research_policy_hash="b" * 64,
+            semantic_parameters={},
+            source_identity=source,
+            execution_contract=contract,
+            run_scope={"mode": "all_eligible_folds"},
+        )
+        for contract in contracts
+    ]
+    assert identities[0]["modeling_identity"] == identities[1]["modeling_identity"]
+    assert identities[0]["execution_identity"] != identities[1]["execution_identity"]
+    assert identities[0]["run_identity"] != identities[1]["run_identity"]
+
+
+def test_executable_metrics_reads_actual_tail_universe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor, plan = _tail_fixture(tmp_path)
+    dates = pd.bdate_range("2026-07-10", "2026-08-07").strftime("%Y%m%d").tolist()
+    dates.remove("20260713")
+    keys = pd.DataFrame({"trade_date": dates, "ts_code": "000001.SZ"})
+    for dataset, frame in (
+        ("daily", keys.assign(open=10.0, close=10.0)),
+        ("stk_limit", keys.assign(up_limit=11.0, down_limit=9.0)),
+    ):
+        root = executor.raw_root / dataset
+        root.mkdir()
+        frame.to_parquet(root / "data.parquet")
+    universe = keys.assign(is_suspended=False, is_st=False, is_listed=True, delist_date=None)
+    universe.to_parquet(executor.execution_processed_root / "universe_daily" / "data.parquet")
+    universe.iloc[:1].to_parquet(executor.processed_root / "universe_daily" / "data.parquet")
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.load_benchmark",
+        lambda *args, **kwargs: pd.DataFrame({"trade_date": dates, "close": 100.0}),
+    )
+    contract = executor.execution_contract(
+        horizon=5, require_executable=True, prospective_lockbox_start="20260810"
+    )
+    metrics = executor._executable_metrics(keys.iloc[:1].assign(prediction_score=1.0), 5, contract)
+    assert metrics["status"] == "COMPLETE"
+    assert metrics["execution_tail"]["actual_execution_end"] == "20260721"
+    assert executor.validate_sources(plan)["universe_manifest_hash"] == plan["universe_hash"]
+
+
+def test_execution_tail_does_not_extend_ranking_label_maturity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor, _ = _tail_fixture(tmp_path)
+    frame = pd.DataFrame({"trade_date": ["20260710"], "ts_code": ["000001.SZ"], "f1": [1.0]})
+    dataset = SimpleNamespace(frame=frame, features=frame[["f1"]])
+    observations: list[tuple[str, pd.DataFrame]] = []
+
+    def attach(predictions: pd.DataFrame, *args: object, **kwargs: object) -> None:
+        observations.append((str(kwargs["maturity_cutoff"]), predictions.copy()))
+        raise RuntimeError("LABEL_ATTACHMENT_OBSERVED")
+
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.RankerDataLoader",
+        lambda *args, **kwargs: SimpleNamespace(
+            load=lambda *args: dataset,
+            load_prediction_universe=lambda *args: dataset,
+            attach_evaluation_labels=attach,
+        ),
+    )
+    monkeypatch.setattr(
+        "ashare_quant.models.walk_forward_evaluation.fit_ranker",
+        lambda *args: SimpleNamespace(predict=lambda features: np.ones(len(features))),
+    )
+    fold = {
+        "train_start": "20200101",
+        "train_end": "20241231",
+        "validation_start": "20250101",
+        "validation_end": "20251231",
+        "evaluation_start": "20260710",
+        "evaluation_end": "20260710",
+    }
+    original = RankerFoldExecutor(
+        raw_root=executor.raw_root,
+        processed_root=executor.processed_root,
+        settings=executor.settings,
+    )
+    for item in (original, executor):
+        contract = item.execution_contract(
+            horizon=5, require_executable=True, prospective_lockbox_start="20260810"
+        )
+        with pytest.raises(RuntimeError, match="LABEL_ATTACHMENT_OBSERVED"):
+            item.execute(
+                fold=fold,
+                horizon=5,
+                features=("f1",),
+                require_executable=True,
+                execution_contract=contract,
+            )
+    assert [cutoff for cutoff, _ in observations] == ["20260710", "20260710"]
+    pd.testing.assert_frame_equal(observations[0][1], observations[1][1])
+
+
+def test_tail_fails_at_lockbox_even_with_later_execution_universe(tmp_path: Path) -> None:
+    executor, _ = _tail_fixture(tmp_path)
+    contract = executor.execution_contract(
+        horizon=5, require_executable=True, prospective_lockbox_start="20260810"
+    )
+    contract["execution_tail"]["processed_data_end"] = "20260814"
+    folds = ({"fold_id": "last", "evaluation_start": "20260803", "evaluation_end": "20260807"},)
+    with pytest.raises(DataValidationError, match="UNAVAILABLE_BEFORE_LOCKBOX"):
+        executor.validate_execution_tail(folds, 5, contract)
+
+
+@pytest.mark.parametrize("cutoff", ["20260720", "20260721"])
+def test_tail_requires_only_normal_exit_not_sell_delay_buffer(tmp_path: Path, cutoff: str) -> None:
+    executor, _ = _tail_fixture(tmp_path)
+    contract = executor.execution_contract(
+        horizon=5, require_executable=True, prospective_lockbox_start="20260810"
+    )
+    contract["execution_tail"]["processed_data_end"] = cutoff
+    folds = ({"fold_id": "last", "evaluation_start": "20260701", "evaluation_end": "20260710"},)
+    if cutoff == "20260720":
+        with pytest.raises(DataValidationError, match="WALK_FORWARD_EXECUTION_TAIL_INSUFFICIENT"):
+            executor.validate_execution_tail(folds, 5, contract)
+    else:
+        executor.validate_execution_tail(folds, 5, contract)
+
+
+def test_runner_rejects_last_fold_tail_before_any_training(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor, _ = _tail_fixture(tmp_path)
+    executor.execution_processed_root = executor.processed_root
+    plan_path, provenance = _research_fixture(tmp_path)
+    plan = json.loads(plan_path.read_text())
+    plan["experiments"][0]["final_test_period"]["folds"][0].update(
+        evaluation_start="20260701", evaluation_end="20260710"
+    )
+    atomic_write_json(plan_path, plan)
+    monkeypatch.setattr(executor, "validate_sources", lambda plan: {})
+    monkeypatch.setattr(executor, "mature_information_end", lambda date, horizon: date)
+    monkeypatch.setattr(executor, "execute", lambda **kwargs: pytest.fail("fold training started"))
+    runner = MultiFoldEvaluationRunner(
+        reports_root=tmp_path / "reports",
+        settings=executor.settings,
+        executor=executor,
+        lifecycle_audit_required=False,
+    )
+    with pytest.raises(
+        DataValidationError, match="WALK_FORWARD_EXECUTION_TAIL_INSUFFICIENT"
+    ) as error:
+        runner.run(
+            experiment_manifest=plan_path,
+            experiment_id="h5_fixture",
+            feature_provenance_path=provenance,
+        )
+    assert "fold_id=fold_3 evaluation_end=20260710" in str(error.value)
+    assert "execution_universe_max_date=20260710" in str(error.value)
+
+
+@pytest.mark.parametrize("command", ["walk-forward-run", "walk-forward-smoke"])
+def test_cli_wires_separate_execution_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    from ashare_quant.cli import main
+
+    def inspect_run(runner: MultiFoldEvaluationRunner, **kwargs: object) -> None:
+        assert isinstance(runner.executor, RankerFoldExecutor)
+        assert runner.executor.processed_root == tmp_path / "modeling"
+        assert runner.executor.execution_processed_root == tmp_path / "execution"
+        raise DataValidationError("FIXTURE_CLI_ROOTS_VERIFIED")
+
+    monkeypatch.setattr(MultiFoldEvaluationRunner, "run", inspect_run)
+    assert (
+        main(
+            [
+                "models",
+                "--processed-root",
+                str(tmp_path / "modeling"),
+                command,
+                "--execution-processed-root",
+                str(tmp_path / "execution"),
+                "--experiment-id",
+                "fixture",
+                "--experiment-manifest",
+                "fixture.json",
+                "--feature-provenance",
+                "features.json",
+                "--lifecycle-scan-manifest",
+                "scan.json",
+                "--no-identity-transitions",
+            ]
+        )
+        == 2
+    )
 
 
 def test_delayed_exit_evidence_records_exact_resolution_date() -> None:
@@ -614,7 +884,7 @@ def test_walk_forward_executable_metrics_carries_suspension_to_resume(
 def test_ranker_executor_passes_bound_transition_to_simulator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    dates = ("20240102", "20240103", "20240104", "20240105")
+    dates = ("20240102", "20240103", "20240104", "20240105", "20240108", "20240109", "20240110")
     prices = pd.DataFrame(
         [
             {
@@ -630,7 +900,7 @@ def test_ranker_executor_passes_bound_transition_to_simulator(
             }
             for date, code in zip(
                 dates,
-                ("000001.SZ", "000001.SZ", "001001.SZ", "001001.SZ"),
+                ("000001.SZ", "000001.SZ", *(["001001.SZ"] * 5)),
                 strict=True,
             )
         ]
@@ -715,8 +985,9 @@ def test_ranker_executor_passes_bound_transition_to_simulator(
     }
 
 
+@pytest.mark.parametrize("old_modeling_scan", [False, True])
 def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old_modeling_scan: bool
 ) -> None:
     plan, provenance = _research_fixture(tmp_path)
     dates = ("20200102", "20200103", "20200106", "20200107", "20200108", "20200109", "20200110")
@@ -756,6 +1027,7 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
     executor = RankerFoldExecutor(
         raw_root=tmp_path / "raw",
         processed_root=tmp_path / "processed",
+        execution_processed_root=tmp_path / "execution",
         settings=AppSettings.model_validate(
             {
                 "backtest": {
@@ -807,6 +1079,9 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
     )
 
     def validate_scan(*args: object, **kwargs: object) -> dict[str, object]:
+        assert kwargs["processed_root"] == tmp_path / "execution"
+        if old_modeling_scan:
+            raise DataValidationError("SECURITY_LIFECYCLE_SOURCE_MISMATCH")
         observed["preflight_transitions"] = kwargs["identity_transitions"]
         return {
             "scan_id": "fixture-scan",
@@ -825,13 +1100,18 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
     monkeypatch.setattr(executor, "validate_sources", lambda plan: {})
     monkeypatch.setattr(executor, "mature_information_end", lambda date, horizon: date)
     monkeypatch.setattr(executor, "execution_contract", lambda **kwargs: execution_contract)
+    monkeypatch.setattr(executor, "validate_execution_tail", lambda *args: None)
     monkeypatch.setattr(
         "ashare_quant.models.walk_forward_evaluation.load_calendar",
         lambda *args, **kwargs: list(dates),
     )
+
+    def execution_prices(*args: object, **kwargs: object) -> pd.DataFrame:
+        assert args[1] == tmp_path / "execution"
+        return prices
+
     monkeypatch.setattr(
-        "ashare_quant.models.walk_forward_evaluation.load_execution_prices",
-        lambda *args, **kwargs: prices,
+        "ashare_quant.models.walk_forward_evaluation.load_execution_prices", execution_prices
     )
     monkeypatch.setattr(
         "ashare_quant.models.walk_forward_evaluation.load_benchmark",
@@ -867,7 +1147,11 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
         executor=executor,
     )
 
-    with pytest.raises(RuntimeError, match="SIMULATOR_WIRING_VERIFIED"):
+    expected_error = DataValidationError if old_modeling_scan else RuntimeError
+    expected_message = (
+        "SECURITY_LIFECYCLE_SOURCE_MISMATCH" if old_modeling_scan else "SIMULATOR_WIRING_VERIFIED"
+    )
+    with pytest.raises(expected_error, match=expected_message):
         runner.run(
             experiment_manifest=plan,
             experiment_id="h5_fixture",
@@ -876,6 +1160,9 @@ def test_runner_preflight_binds_same_transition_contract_used_by_simulator(
             identity_transition_artifact=tmp_path / "fixture-transitions",
         )
 
+    if old_modeling_scan:
+        assert observed == {}
+        return
     assert observed == {
         "preflight_transitions": transitions,
         "executor_transitions": transitions,
@@ -1372,6 +1659,11 @@ class FakeExecutor:
     def mature_information_end(self, signal_end: str, horizon: int) -> str:
         del horizon
         return signal_end
+
+    def validate_execution_tail(
+        self, folds: tuple[dict[str, object], ...], horizon: int, contract: dict[str, object]
+    ) -> None:
+        pass
 
     def execute(
         self,

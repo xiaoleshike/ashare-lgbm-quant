@@ -40,11 +40,15 @@ def test_unknown_conversion_resolves_identity_but_blocks_execution() -> None:
                 _price("20240103", "000001.SZ"),
                 _price("20240104", "001001.SZ"),
                 _price("20240105", "001001.SZ"),
+                _price("20240108", "001001.SZ"),
             ]
         ),
-        calendar=("20240102", "20240103", "20240104", "20240105"),
+        calendar=("20240102", "20240103", "20240104", "20240105", "20240108"),
         benchmark=pd.DataFrame(
-            {"trade_date": ["20240102", "20240103", "20240104", "20240105"], "close": [100.0] * 4}
+            {
+                "trade_date": ["20240102", "20240103", "20240104", "20240105", "20240108"],
+                "close": [100.0] * 5,
+            }
         ),
         identity_transitions=(transition,),
         identity_transition_version="fixture-v1",

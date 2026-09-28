@@ -741,8 +741,18 @@ def _frame_hash(frame: DataFrame) -> str:
 
 
 def _calendar_offset(calendar: list[str], date: str, offset: int) -> str:
+    if date not in calendar:
+        raise DataValidationError(
+            f"BACKTEST_EXECUTION_CALENDAR_INSUFFICIENT: date={date} is not an open session"
+        )
     index = calendar.index(date)
-    return calendar[min(index + offset, len(calendar) - 1)]
+    target = index + offset
+    if target < 0 or target >= len(calendar):
+        raise DataValidationError(
+            "BACKTEST_EXECUTION_CALENDAR_INSUFFICIENT: "
+            f"date={date} offset={offset} calendar_end={calendar[-1]}"
+        )
+    return calendar[target]
 
 
 def _price_map(prices: DataFrame) -> dict[tuple[str, str], PriceRow]:

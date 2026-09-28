@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import tempfile
+from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -62,13 +63,14 @@ from ashare_quant.utils.manifest import atomic_write_json
 
 SCHEMA_VERSION = 3
 LEGACY_SCHEMA_VERSION = 2
-EVALUATION_CONTRACT_VERSION = 8
+EVALUATION_CONTRACT_VERSION = 9
+PRE_D7_EVALUATION_CONTRACT_VERSION = 8
 PRE_D5_EVALUATION_CONTRACT_VERSION = 7
 PREVIOUS_EVALUATION_CONTRACT_VERSION = 6
 PREVIOUS_POST_H5_EVALUATION_CONTRACT_VERSION = 5
 LEGACY_EVALUATION_CONTRACT_VERSION = 4
 OLDER_EVALUATION_CONTRACT_VERSION = 3
-EXECUTION_TAIL_POLICY_VERSION = 2
+EXECUTION_TAIL_POLICY_VERSION = 3
 EXECUTION_TAIL_LOAD_CHUNK_SESSIONS = 252
 EXECUTION_TAIL_POLICY = "carry_to_source_or_lockbox_cutoff"
 SMOKE_SELECTION_RULE = "earliest_strict_oos"
@@ -115,6 +117,10 @@ class FoldExecutor(Protocol):
 
     def mature_information_end(self, signal_end: str, horizon: int) -> str: ...
 
+    def validate_execution_tail(
+        self, folds: tuple[JsonObject, ...], horizon: int, contract: JsonObject
+    ) -> None: ...
+
     def execute(
         self,
         *,
@@ -143,9 +149,13 @@ class RankerFoldExecutor:
         raw_root: Path,
         processed_root: Path,
         settings: AppSettings,
+        execution_processed_root: Path | None = None,
     ) -> None:
         self.raw_root = raw_root
         self.processed_root = processed_root
+        self.execution_processed_root = (
+            processed_root if execution_processed_root is None else execution_processed_root
+        )
         self.settings = settings
         self._runtime: Any | None = None
         self._identity_transitions: SecurityIdentityTransitionResolver | None = (
@@ -202,7 +212,8 @@ class RankerFoldExecutor:
         )
         cost_policy = ExecutionCostPolicy.from_backtest_settings(execution)
         corporate_action_policy = default_corporate_action_execution_policy()
-        processed_data_end = self._processed_execution_data_end()
+        execution_universe = self._execution_universe_identity()
+        processed_data_end = execution_universe["execution_universe_max_date"]
         lifecycle = SecurityLifecycleResolver.from_path(
             self.settings.security_identity.lifecycle_path
         )
@@ -216,6 +227,7 @@ class RankerFoldExecutor:
             "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
             "accounting_schema_version": ACCOUNTING_SCHEMA_VERSION,
             "require_executable": require_executable,
+            **execution_universe,
             "execution_mode": execution.execution,
             "holding_period_days": execution.holding_period_days,
             "top_n": list(REQUIRED_TOP_N),
@@ -243,6 +255,86 @@ class RankerFoldExecutor:
         }
 
     def _processed_execution_data_end(self) -> str:
+        return str(self._execution_universe_identity()["execution_universe_max_date"])
+
+    def _execution_universe_identity(self) -> JsonObject:
+        path = self.execution_processed_root / "universe_daily" / "_manifest.json"
+        manifest = _load_json(path, "walk-forward execution universe manifest")
+        canonical = manifest.get("canonical_artifact")
+        if not isinstance(canonical, dict):
+            raise DataValidationError("WALK_FORWARD_EXECUTION_UNIVERSE_INVALID")
+        dates: dict[str, str] = {}
+        for key in ("min_date", "max_date"):
+            value = canonical.get(key)
+            try:
+                valid = isinstance(value, str) and (
+                    datetime.strptime(value, "%Y%m%d").strftime("%Y%m%d") == value
+                )
+            except ValueError:
+                valid = False
+            if not valid:
+                raise DataValidationError(f"WALK_FORWARD_EXECUTION_UNIVERSE_INVALID: {key}")
+            dates[key] = str(value)
+        if dates["min_date"] > dates["max_date"]:
+            raise DataValidationError("WALK_FORWARD_EXECUTION_UNIVERSE_INVALID: date order")
+        identity: JsonObject = {
+            "execution_universe_manifest_hash": _file_hash(path),
+            "execution_universe_min_date": dates["min_date"],
+            "execution_universe_max_date": dates["max_date"],
+        }
+        for key in ("row_count", "partition_count"):
+            if key in canonical:
+                value = canonical[key]
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise DataValidationError(f"WALK_FORWARD_EXECUTION_UNIVERSE_INVALID: {key}")
+                identity[f"execution_universe_{key}"] = value
+        return identity
+
+    def validate_execution_tail(
+        self, folds: tuple[JsonObject, ...], horizon: int, contract: JsonObject
+    ) -> None:
+        """Check normal next-open exits for every selected fold before any fit.
+
+        This does not guarantee settlement of delayed exits. Only the frozen
+        calendar is read, bounded before the prospective lockbox.
+        """
+        tail = _validated_execution_tail_contract(contract)
+        cutoff = _governed_execution_cutoff(tail)
+        lockbox_end = (
+            datetime.strptime(str(tail["prospective_lockbox_start_exclusive"]), "%Y%m%d")
+            - timedelta(days=1)
+        ).strftime("%Y%m%d")
+        dates = load_calendar(
+            self.raw_root,
+            min(str(fold["evaluation_start"]) for fold in folds),
+            lockbox_end,
+            None,
+            maximum_date=lockbox_end,
+        )
+        if dates != sorted(set(dates)):
+            raise DataValidationError("WALK_FORWARD_EXECUTION_CALENDAR_INVALID")
+        for fold in folds:
+            end = str(fold["evaluation_end"])
+            signal_index = bisect_right(dates, end) - 1
+            exit_index = signal_index + required_temporal_gap_sessions(horizon)
+            required_exit = (
+                dates[exit_index] if signal_index >= 0 and exit_index < len(dates) else None
+            )
+            if (
+                required_exit is None
+                or required_exit > cutoff
+                or end > cutoff
+                or dates[signal_index] < str(fold["evaluation_start"])
+            ):
+                raise DataValidationError(
+                    "WALK_FORWARD_EXECUTION_TAIL_INSUFFICIENT: "
+                    f"fold_id={fold['fold_id']} evaluation_end={end} "
+                    f"required_planned_exit={required_exit or 'UNAVAILABLE_BEFORE_LOCKBOX'} "
+                    f"execution_universe_max_date={tail['processed_data_end']} "
+                    f"governed_cutoff={cutoff}"
+                )
+
+    def _modeling_data_end(self) -> str:
         manifest = _load_json(
             self.processed_root / "universe_daily" / "_manifest.json",
             "walk-forward universe manifest",
@@ -311,7 +403,10 @@ class RankerFoldExecutor:
         validation_predictions = np.asarray(model.predict(validation.features), dtype=float)
         evaluation_predictions = np.asarray(model.predict(evaluation.features), dtype=float)
         predictions = _build_prediction_frame(evaluation.frame, evaluation_predictions)
-        label_cutoff = _governed_execution_cutoff(execution_contract["execution_tail"])
+        label_cutoff = min(
+            self._modeling_data_end(),
+            _governed_execution_cutoff(execution_contract["execution_tail"]),
+        )
         label_calendar = load_calendar(
             self.raw_root,
             str(predictions["trade_date"].astype(str).min()),
@@ -423,7 +518,7 @@ class RankerFoldExecutor:
             calendar = full_calendar[: calendar_end_index + 1]
             prices = load_execution_prices(
                 self.raw_root,
-                self.processed_root,
+                self.execution_processed_root,
                 calendar[0],
                 calendar[-1],
                 self.settings.universe.price_tolerance,
@@ -676,16 +771,6 @@ class MultiFoldEvaluationRunner:
         classified_folds = tuple(
             _with_research_classification(fold, selection_information_end) for fold in raw_folds
         )
-        for fold in classified_folds:
-            evaluation_information_end = self.executor.mature_information_end(
-                str(fold["evaluation_end"]), horizon
-            )
-            enforce_research_window(
-                policy,
-                consumer="walk_forward_evaluation",
-                start_date=str(fold["evaluation_start"]),
-                end_date=evaluation_information_end,
-            )
         folds = classified_folds
         run_scope: JsonObject = {"mode": "all_eligible_folds"}
         if smoke_selection_rule is not None:
@@ -733,6 +818,18 @@ class MultiFoldEvaluationRunner:
             require_executable=require_executable,
             prospective_lockbox_start=policy.prospective_lockbox.start_date,
         )
+        if require_executable:
+            self.executor.validate_execution_tail(folds, horizon, execution_contract)
+        for fold in classified_folds:
+            evaluation_information_end = self.executor.mature_information_end(
+                str(fold["evaluation_end"]), horizon
+            )
+            enforce_research_window(
+                policy,
+                consumer="walk_forward_evaluation",
+                start_date=str(fold["evaluation_start"]),
+                end_date=evaluation_information_end,
+            )
         if require_executable and self.lifecycle_audit_required:
             if lifecycle_scan_manifest is None:
                 raise DataValidationError("SECURITY_LIFECYCLE_AUDIT_REQUIRED")
@@ -755,7 +852,7 @@ class MultiFoldEvaluationRunner:
                 required_start=min(str(fold["train_start"]) for fold in folds),
                 required_end=_governed_execution_cutoff(execution_contract["execution_tail"]),
                 raw_root=self.executor.raw_root,
-                processed_root=self.executor.processed_root,
+                processed_root=self.executor.execution_processed_root,
                 identity_resolver=identity_resolver,
                 lifecycle_evidence=lifecycle_evidence,
                 lifecycle_policy=lifecycle_policy,
@@ -1640,6 +1737,7 @@ def validate_completed_walk_forward_artifact(
             PREVIOUS_EVALUATION_CONTRACT_VERSION,
             PREVIOUS_POST_H5_EVALUATION_CONTRACT_VERSION,
             PRE_D5_EVALUATION_CONTRACT_VERSION,
+            PRE_D7_EVALUATION_CONTRACT_VERSION,
             EVALUATION_CONTRACT_VERSION,
         }
         or not isinstance(manifest.get("modeling_identity"), str)
