@@ -19,6 +19,8 @@ from ashare_quant.backtest import (
 from ashare_quant.backtest.executable_validation import ExecutableOOSValidationEngine
 from ashare_quant.backtest.invalidation import BacktestInvalidationService
 from ashare_quant.cli.economic_events import add_economic_parsers, run_economic_command
+from ashare_quant.cli.economic_review import COMMANDS as ECONOMIC_REVIEW_COMMANDS
+from ashare_quant.cli.economic_review import add_review_parsers, run_review_command
 from ashare_quant.config import load_settings
 from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS, get_dataset_spec
 from ashare_quant.data.exceptions import DataIngestionError, DataValidationError
@@ -225,6 +227,7 @@ def add_data_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     )
     data_subparsers = data_parser.add_subparsers(dest="data_command", required=True)
     add_economic_parsers(data_subparsers)
+    add_review_parsers(data_subparsers)
 
     init_parser = data_subparsers.add_parser("init", help="Run full historical data download.")
     add_dataset_args(init_parser)
@@ -1346,6 +1349,12 @@ def run_data_command(args: argparse.Namespace) -> int:
 
     settings = load_settings(args.config)
     configure_logging(settings.logging.level, settings.logging.json_logs)
+    if args.data_command in ECONOMIC_REVIEW_COMMANDS:
+        try:
+            return run_review_command(args, settings)
+        except (DataIngestionError, OSError, ValueError, KeyError) as error:
+            print(f"economic review failed: {error}", file=sys.stderr)
+            return 2
     if args.data_command in {
         "economic-evidence-preflight",
         "economic-dividend-probe",
