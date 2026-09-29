@@ -58,6 +58,8 @@ class BacktestResult:
     cost_policy: dict[str, object] = field(default_factory=dict)
     corporate_action_policy: dict[str, object] = field(default_factory=dict)
     execution_provenance: dict[str, object] = field(default_factory=dict)
+    execution_intents: DataFrame = field(default_factory=pd.DataFrame)
+    terminal_events: DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass(slots=True)
@@ -99,6 +101,7 @@ def simulate_portfolio(
     settings: BacktestSettings,
     purpose: BacktestPurpose = "diagnostic",
     delayed_exit_policy: DelayedExitPolicy = "fail_at_alert",
+    record_execution_audit: bool = False,
 ) -> BacktestResult:
     """Simulate equal-weight Top-N signals with next-open execution.
 
@@ -142,6 +145,8 @@ def simulate_portfolio(
     trade_rows: list[dict[str, object]] = []
     holding_rows: list[dict[str, object]] = []
     corporate_action_rows: list[dict[str, object]] = []
+    intent_rows: list[dict[str, object]] = []
+    terminal_rows: list[dict[str, object]] = []
     counters = {
         "stale_valuation_days": 0,
         "maximum_stale_days": 0,
@@ -179,6 +184,23 @@ def simulate_portfolio(
                 continue
             price = price_map.get((current_date, code))
             if _is_explicit_terminal(price, current_date):
+                if record_execution_audit:
+                    terminal_rows.append(
+                        {
+                            "trade_date": current_date,
+                            "top_n": top_n,
+                            "position_id": position.position_id,
+                            "ts_code": code,
+                            "entry_date": position.entry_date,
+                            "target_exit_date": position.target_exit_date,
+                            "holding_sessions": calendar_index[current_date]
+                            - position.entry_calendar_index,
+                            "last_valid_close": position.last_valid_close,
+                            "last_valid_price_date": position.last_valid_price_date,
+                            "pre_writeoff_mark_value": position.shares * position.last_valid_close,
+                            "cash_recovery": 0.0,
+                        }
+                    )
                 trade_rows.append(
                     _terminal_position(
                         current_date,
@@ -250,6 +272,28 @@ def simulate_portfolio(
         candidates = [
             code for code in signal_by_entry.get(current_date, []) if code not in positions
         ]
+        day_intents: dict[str, dict[str, object]] = {}
+        if record_execution_audit:
+            for rank, code in enumerate(signal_by_entry.get(current_date, []), start=1):
+                price = price_map.get((current_date, code))
+                reason = "NO_AVAILABLE_CASH"
+                if code in positions:
+                    reason = "ALREADY_HELD"
+                elif _is_explicit_terminal(price, current_date):
+                    reason = "TERMINAL"
+                elif price is None or not _can_buy(price):
+                    reason = "NOT_BUYABLE"
+                day_intents[code] = {
+                    "signal_date": calendar[calendar_index[current_date] - 1],
+                    "trade_date": current_date,
+                    "ts_code": code,
+                    "top_n": top_n,
+                    "selected": True,
+                    "selected_rank": rank,
+                    "outcome": reason,
+                    "cash_before_entries": cash,
+                    "position_id": positions[code].position_id if code in positions else None,
+                }
         executable = [
             code
             for code in candidates
@@ -272,6 +316,8 @@ def simulate_portfolio(
                 costs = cost_policy.calculate(current_date, "buy", gross_notional)
                 total_cash_used = gross_notional + costs.total
                 if shares <= 0 or total_cash_used > cash * (1.0 + 1e-9):
+                    if record_execution_audit:
+                        day_intents[code]["outcome"] = "INSUFFICIENT_AFFORDABLE_GROSS"
                     continue
                 exit_date = _calendar_offset(calendar, current_date, settings.holding_period_days)
                 position_id = f"{top_n}:{current_date}:{code}"
@@ -287,6 +333,9 @@ def simulate_portfolio(
                     last_valid_price_date=current_date,
                 )
                 positions[code] = position
+                if record_execution_audit:
+                    day_intents[code]["outcome"] = "FILLED"
+                    day_intents[code]["position_id"] = position_id
                 cash -= total_cash_used
                 day_cost += costs.total
                 trade_rows.append(
@@ -301,6 +350,7 @@ def simulate_portfolio(
                     )
                 )
 
+        intent_rows.extend(day_intents.values())
         holdings_value = 0.0
         for position in positions.values():
             market_value = _market_value(
@@ -401,6 +451,36 @@ def simulate_portfolio(
             "corporate_action_count": len(corporate_actions),
             "corporate_action_ledger_hash": _frame_hash(corporate_actions),
         },
+        execution_intents=pd.DataFrame(
+            intent_rows,
+            columns=[
+                "signal_date",
+                "trade_date",
+                "ts_code",
+                "top_n",
+                "selected",
+                "selected_rank",
+                "outcome",
+                "cash_before_entries",
+                "position_id",
+            ],
+        ),
+        terminal_events=pd.DataFrame(
+            terminal_rows,
+            columns=[
+                "trade_date",
+                "top_n",
+                "position_id",
+                "ts_code",
+                "entry_date",
+                "target_exit_date",
+                "holding_sessions",
+                "last_valid_close",
+                "last_valid_price_date",
+                "pre_writeoff_mark_value",
+                "cash_recovery",
+            ],
+        ),
     )
 
 
@@ -576,6 +656,8 @@ def _apply_effective_corporate_actions(
                     f"security-code transition position_id={position.position_id} "
                     f"predecessor={transition.predecessor_ts_code} "
                     f"successor={transition.successor_ts_code} "
+                    f"top_n={top_n} entry_date={position.entry_date} "
+                    f"target_exit_date={position.target_exit_date} "
                     f"effective_date={transition.effective_date} reason={eligibility.reason}"
                 )
             seen.add(current_code)

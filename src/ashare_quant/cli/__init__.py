@@ -952,6 +952,19 @@ def add_backtest_parser(subparsers: argparse._SubParsersAction[argparse.Argument
         "--output-root", default=None, help="Override the configured backtest output root."
     )
     commands = parser.add_subparsers(dest="backtest_command", required=True)
+    continuous = commands.add_parser(
+        "continuous-oos", help="Replay frozen STRICT_OOS predictions without labels or training."
+    )
+    continuous.add_argument("--walk-forward-run-id", required=True)
+    continuous.add_argument("--walk-forward-reports-root", required=True)
+    continuous.add_argument("--execution-processed-root", required=True)
+    continuous.add_argument("--lifecycle-scan-manifest", required=True)
+    continuous.add_argument("--identity-transition-artifact", required=True)
+    continuous.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Read-only source and execution checks; do not simulate or publish.",
+    )
     run_parser = commands.add_parser("run", help="Run Top-N executable backtests.")
     run_parser.add_argument(
         "--model-dir",
@@ -3072,6 +3085,28 @@ def run_backtest_command(args: argparse.Namespace) -> int:
     )
     models_root = settings.paths.models if args.models_root is None else Path(args.models_root)
     output_root = settings.paths.backtests if args.output_root is None else Path(args.output_root)
+    if args.backtest_command == "continuous-oos":
+        from ashare_quant.backtest.continuous import ContinuousStrictOOSReplayService
+
+        if Path(args.walk_forward_run_id).name != args.walk_forward_run_id:
+            raise DataValidationError("CONTINUOUS_SOURCE_RUN_ID_INVALID")
+        service = ContinuousStrictOOSReplayService(
+            source_run=Path(args.walk_forward_reports_root)
+            / "research"
+            / "walk_forward"
+            / args.walk_forward_run_id,
+            raw_root=raw_root,
+            execution_processed_root=Path(args.execution_processed_root),
+            lifecycle_scan_manifest=Path(args.lifecycle_scan_manifest),
+            identity_transition_artifact=Path(args.identity_transition_artifact),
+            config_path=Path(args.config),
+            output_root=output_root,
+        )
+        if args.preflight_only:
+            print(json.dumps(service.preflight().summary(), indent=2, sort_keys=True))
+        else:
+            print(f"continuous_strict_oos: status=COMPLETE output={service.run()}")
+        return 0
     if args.backtest_command == "invalidate":
         try:
             invalidation_result = BacktestInvalidationService(

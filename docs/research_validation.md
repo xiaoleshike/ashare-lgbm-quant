@@ -77,6 +77,10 @@ window was invented.
 
 ## Multi-Fold Execution
 
+Frozen STRICT_OOS predictions can also be evaluated through a single persistent account per
+Top-N using the separate [continuous replay evidence contract](continuous_strict_oos.md).
+This label-free replay is not a new training run and does not compound monthly fold results.
+
 The runner consumes one exact multi-horizon experiment manifest and executes every referenced
 selection and historical-holdout fold. Training and fit-validation continue to require mature
 labels. Evaluation first scores the signal-date model universe without reading `labels_forward`,
