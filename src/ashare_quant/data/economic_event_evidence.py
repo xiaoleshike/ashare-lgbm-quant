@@ -11,6 +11,7 @@ import pandas as pd
 from ashare_quant.backtest.continuous_source import file_hash, payload_hash, read_json
 from ashare_quant.data.economic_event_sources import (
     EconomicExposureSource,
+    compatible_implementation,
     content_hash,
     implementation_hash,
     load_exposure_source,
@@ -505,7 +506,7 @@ def _validate_compilation(path: Path, source: EconomicExposureSource) -> dict[st
         and logical["contract"] == CONTRACT
         and logical["normalization_contract"] == NORMALIZATION
         and logical.get("evidence_use") == "POST_HOC_ACCOUNTING_EVIDENCE"
-        and logical["implementation_hash"] == implementation_hash(),
+        and compatible_implementation(logical["implementation_hash"]),
         "COMPILE_CONTRACT_MISMATCH",
     )
     provider = Path(loc["provider_source"])

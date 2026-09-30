@@ -10,7 +10,62 @@ or review. The continuous/audit/provider/D1 identities are explicit inputs.
 `economic_event_review_v1` first recursively validates the D1 compilation,
 including the existing continuous artifact validator and audit hashes. It also
 validates the supplied provider copy, rather than trusting an equivalent manifest
-with unvalidated children. All original D1 implementation files remain unchanged.
+with unvalidated children. Historical D1 content fingerprints are explicitly
+recognized for reading; every derived table is still recomputed with current
+validators. New D1 publications bind current implementation content.
+
+## Official nullable-field supplementation
+
+The [Tushare dividend field reference](https://tushare.pro/document/2?doc_id=103)
+defines total distribution, bonus, reserve conversion and both cash fields. It does
+**not** establish a universal null-to-zero convention. Neither `stk_div=0` nor a
+factor movement authorizes filling missing components. Missing pay/share-listing
+dates are distinct from the five-field economics completeness check.
+
+`economic_official_field_supplement_v1` is an additive, evidence-only path over an
+exact validated D2 parent. It does not reinterpret or replace its revision groups,
+queue membership, original nullable terms, conflicts or terminal coverage.
+
+- `economic-review-supplement --parent ... --parent-manifest-sha256 ...
+  --supplements ... --output-root ...` publishes a new immutable qualification
+  artifact. `economic-review-supplement-validate --artifact ...` recursively
+  validates its parent and independently rederives proposals and review outputs.
+- Input JSON contains `contract`, `parent_manifest_hash`, `documents`,
+  `supplements` and `decisions`. A supplement binds the exact event/group, canonical
+  security, record/ex dates, **all** provider-row hashes, and page-specific identity
+  citations. Each amount claim binds document SHA256, page, verbatim clause,
+  field/value, disclosed value and explicit per-share/per-ten-shares/zero basis.
+- Original PDF/UTF-8 HTML bytes are copied into `documents/` and hashed. PDFs use
+  native `pdftotext` (required on the host), not OCR. Authority is restricted to
+  exchange/CNINFO HTTPS domains. Every cited document must separately contain the
+  security/date identity. Quote presence is a locator guard, **not** a machine
+  assertion that the quoted words establish the economics. That is a human duty.
+- Only missing amounts may be supplemented. Known provider amounts, missing or
+  differing record/ex dates, nearby dates and conflicting revisions cannot be
+  overridden. Payment/listing dates stay nullable; no execution date is invented.
+- `decisions: []` publishes proposals and a blank `review_template.json`, never
+  approves them. A separate explicit decision binds `supplement_hash`, reviewer,
+  reason and `APPROVE_AS_EVIDENCE`/rejection/further-document requirement. The hash
+  binds all claims and cited document hashes. Timestamp is non-logical metadata.
+- An explicit approval additionally requires a single exact candidate, no original
+  conflicts, complete consistent supplemented amounts and valid dates. It publishes
+  `reviewed_corporate_actions.parquet`, still **qualification only**; it cannot
+  authorize engine execution or make global economic completeness PASS.
+- `field_proposals.json` preserves raw versus proposed versus reviewed terms and
+  field-level source claims. The copied queue keeps all original columns unchanged
+  and adds supplement status only. Cash tax semantics remain
+  `UNRESOLVED_EXECUTION_POLICY`. Terminal recovery remains a separate evidence track.
+
+To review, create a **new** local input JSON retaining the frozen documents and
+supplements, fill only the decisions actually reviewed using the published template,
+and compile to the same output root. Never edit a published artifact. Changed
+decisions produce a new content identity; unchanged inputs validate and reuse.
+
+The D1 terminal guard now normalizes blank effective/settlement strings to null.
+They can no longer satisfy `EVIDENCE_COMPLETE`. The explicitly pinned pre-fix D1
+fingerprint is readable only with full current business reconstruction; it is not
+a blanket exemption for old unsafe terminal-completeness results. No accounting,
+writeoff, cost, dividend-tax or portfolio behavior changes in this contract.
 
 Candidate canonical codes come from the already validated D1 alias resolver.
 Provider codes and every raw-row hash are preserved. No name/price/factor-based

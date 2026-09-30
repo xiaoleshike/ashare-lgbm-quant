@@ -118,6 +118,18 @@ def implementation_hash() -> str:
     )
 
 
+def compatible_implementation(digest: str) -> bool:
+    """Read v1 inputs, but always rederive their business tables with hardened dates.
+
+    The pinned pre-fix implementation is readable, not authorization to reuse its
+    terminal completeness result. New publications bind the current content hash.
+    """
+    return digest in {
+        implementation_hash(),
+        "b6b3bdc88be0be193f225b58141e3186dfd239b03dad1318a29fdad5ff8289c4",
+    }
+
+
 def publish(
     root: Path,
     kind: str,
@@ -505,7 +517,7 @@ def validate_provider_source(path: Path, source: EconomicExposureSource) -> dict
     require(
         logical["source"] == source.identity
         and logical["contract"] == CONTRACT
-        and logical["implementation_hash"] == implementation_hash(),
+        and compatible_implementation(logical["implementation_hash"]),
         "SOURCE_CONTRACT_MISMATCH",
     )
     require(

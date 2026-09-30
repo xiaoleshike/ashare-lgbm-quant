@@ -151,6 +151,8 @@ class TerminalEconomicRecord(StrictRecord):
     def semantics(self) -> TerminalEconomicRecord:
         for v in (self.terminal_date, self.effective_date, self.settlement_date):
             date_value(v)
+        self.effective_date = date_value(self.effective_date)
+        self.settlement_date = date_value(self.settlement_date)
         for numeric in (self.cash_per_share, self.share_conversion_ratio):
             amount(numeric)
         require(bool(self.ts_code and self.terminal_date), "TERMINAL_IDENTITY_MISSING")
