@@ -37,6 +37,11 @@ KIND = "economic_event_revision_resolution"
 MODE = "OFFICIAL_FIELD_RECONCILIATION_NO_PROVIDER_SUPERSESSION"
 AMOUNT_FIELDS = frozenset(AMOUNTS)
 UNRESOLVED_FIELDS = AMOUNT_FIELDS | {"pay_date"}
+# Source bytes are preserved by commit 7e93b68; the exact component SHA256s are
+# recorded in tests/fixtures/economic_revision_v1_legacy_implementation.json.
+LEGACY_IMPLEMENTATION_HASHES = frozenset(
+    {"9526e33335ca257761bb2506e9271de6b1397d28a835f8356c5ecefb0d127242"}
+)
 REVIEWED_COLUMNS = [
     "resolution_hash",
     "review_event_id",
@@ -228,9 +233,7 @@ def _official_terms(
         )
         terms.append(claim.model_dump())
     require(fields <= AMOUNT_FIELDS, "REVISION_FIELD_UNSUPPORTED")
-    pay_date_unknown = all(
-        json.loads(r["raw_row_json"]).get("pay_date") is None for r in observations
-    )
+    pay_date_unknown = _provider_pay_date_unresolved(observations)
     unresolved = _exact_set(
         proposal.unresolved_fields,
         set(AMOUNT_FIELDS - fields) | ({"pay_date"} if pay_date_unknown else set()),
@@ -238,6 +241,14 @@ def _official_terms(
     )
     require(set(unresolved) <= UNRESOLVED_FIELDS, "REVISION_UNRESOLVED_FIELDS")
     return sorted(terms, key=lambda item: item["field"]), unresolved
+
+
+def _provider_pay_date_unresolved(observations: list[dict[str, Any]]) -> bool:
+    require(bool(observations), "REVISION_PROVIDER_OBSERVATIONS_REQUIRED")
+    pay_dates = [
+        date_value(json.loads(row["raw_row_json"]).get("pay_date")) for row in observations
+    ]
+    return any(value is None for value in pay_dates) or len(set(pay_dates)) != 1
 
 
 def derive(
@@ -435,22 +446,31 @@ def derive(
     return table, objects, semantic
 
 
-def _identity(parent: Path, semantic: dict[str, Any]) -> dict[str, Any]:
+def _current_implementation_hash() -> str:
     base = Path(__file__).parent
+    return payload_hash(
+        {
+            name: file_hash(base / name)
+            for name in (
+                "economic_event_revision_resolution.py",
+                "economic_event_supplements.py",
+                "economic_events.py",
+            )
+        }
+    )
+
+
+def compatible_revision_implementation(digest: str) -> bool:
+    """Accept only the current producer or explicitly pinned compatible source bytes."""
+    return digest == _current_implementation_hash() or digest in LEGACY_IMPLEMENTATION_HASHES
+
+
+def _identity(parent: Path, semantic: dict[str, Any]) -> dict[str, Any]:
     return {
         "contract": CONTRACT,
         "parent_artifact_id": parent.name,
         "parent_manifest_hash": file_hash(parent / "manifest.json"),
-        "implementation_hash": payload_hash(
-            {
-                name: file_hash(base / name)
-                for name in (
-                    "economic_event_revision_resolution.py",
-                    "economic_event_supplements.py",
-                    "economic_events.py",
-                )
-            }
-        ),
+        "implementation_hash": _current_implementation_hash(),
         "resolution_semantic_hash": payload_hash(semantic),
         "qualification_only": True,
         "execution_authorized": False,
@@ -460,8 +480,15 @@ def _identity(parent: Path, semantic: dict[str, Any]) -> dict[str, Any]:
 def _validate(path: Path, parent: Path) -> dict[str, Any]:
     manifest = validate_envelope(path, KIND)
     body = read_json(path / "resolution_input.json")
+    producer_hash = manifest["logical_identity"].get("implementation_hash")
+    require(
+        isinstance(producer_hash, str) and compatible_revision_implementation(producer_hash),
+        "REVISION_IMPLEMENTATION_UNSUPPORTED",
+    )
     table, objects, semantic = derive(parent, body)
-    require(manifest["logical_identity"] == _identity(parent, semantic), "REVISION_IDENTITY")
+    expected_identity = _identity(parent, semantic)
+    expected_identity["implementation_hash"] = producer_hash
+    require(manifest["logical_identity"] == expected_identity, "REVISION_IDENTITY")
     require(
         set(manifest["artifact_hashes"])
         == set(objects) | {"resolution_input.json", "reviewed_revision_resolutions.parquet"},
@@ -491,7 +518,7 @@ def compile_revision_resolutions(
         {"parent": str(parent.resolve())},
         {},
         objects | {"resolution_input.json": body},
-        lambda path: _validate(path, parent),
+        validate_revision_resolution_artifact,
         {"reviewed_revision_resolutions.parquet": table.to_parquet(index=False)},
     )
 

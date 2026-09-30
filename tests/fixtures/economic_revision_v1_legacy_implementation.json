@@ -1,0 +1,9 @@
+{
+  "source_commit": "7e93b68b3c858fcb545e81931bb8d9f2074bfcae",
+  "component_sha256": {
+    "economic_event_revision_resolution.py": "fe3b4091b0661afbe3c6222342fb5df69e0ebf0a1466379af701565737e76fbe",
+    "economic_event_supplements.py": "e042ad10bfb797aa52584f92386fa233a0c07802a5cef40c00ad698c4b0ae8fe",
+    "economic_events.py": "82e42f227821c910e01a4626801c2d881355312a74ee319b6d7afc0d92e25236"
+  },
+  "implementation_hash": "9526e33335ca257761bb2506e9271de6b1397d28a835f8356c5ecefb0d127242"
+}

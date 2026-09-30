@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from ashare_quant.backtest.continuous_source import file_hash, read_json
+from ashare_quant.backtest.continuous_source import file_hash, payload_hash, read_json
 from ashare_quant.cli import main
 from ashare_quant.data.economic_event_revision_resolution import (
+    _provider_pay_date_unresolved,
+    compatible_revision_implementation,
     compile_revision_resolutions,
     derive,
     validate_revision_resolution_artifact,
@@ -22,8 +25,7 @@ from test_economic_event_evidence import dividend, source  # noqa: F401
 from test_economic_event_supplements import add_conflicting_supplement, publish, setup  # noqa: F401
 
 
-@pytest.fixture
-def conflict_fixture(setup, tmp_path):  # noqa: F811
+def _make_conflict_fixture(setup_fn, tmp_path, pay_dates):
     from ashare_quant.data.economic_event_revision_resolution import CONTRACT
 
     rows = [
@@ -33,7 +35,7 @@ def conflict_fixture(setup, tmp_path):  # noqa: F811
             stk_bo_rate=None,
             stk_co_rate=0.49,
             stk_div=0.49,
-            pay_date=None,
+            pay_date=pay_dates[0],
             div_listdate="20240104",
         ),
         dividend(
@@ -42,12 +44,12 @@ def conflict_fixture(setup, tmp_path):  # noqa: F811
             stk_bo_rate=None,
             stk_co_rate=0.49,
             stk_div=0.49,
-            pay_date=None,
+            pay_date=pay_dates[1],
             div_listdate="20240104",
             ann_date="20231225",
         ),
     ]
-    d2, supplement_input = setup(rows)
+    d2, supplement_input = setup_fn(rows)
     add_conflicting_supplement(d2, supplement_input)
     html = tmp_path / "documents/fixture.html"
     html.write_text(
@@ -136,6 +138,11 @@ def conflict_fixture(setup, tmp_path):  # noqa: F811
         resolutions=[proposal],
         decisions=[],
     )
+
+
+@pytest.fixture
+def conflict_fixture(setup, tmp_path):  # noqa: F811
+    return _make_conflict_fixture(setup, tmp_path, (None, None))
 
 
 def test_proposal_and_approved_fixture_are_distinct(conflict_fixture, tmp_path):
@@ -443,3 +450,132 @@ def test_cli_compiles_and_validates_offline_fixture(conflict_fixture, tmp_path, 
         == 0
     )
     assert json.loads(capsys.readouterr().out)["validation"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    "pay_dates,unresolved",
+    [
+        ((None, None), True),
+        ((None, "20240105"), True),
+        (("20240105", None), True),
+        (("20240105", "20240106"), True),
+        (("20240105", "20240105"), False),
+    ],
+)
+def test_provider_pay_date_conflict_policy(pay_dates, unresolved):
+    observations = [{"raw_row_json": json.dumps({"pay_date": date})} for date in pay_dates]
+    assert _provider_pay_date_unresolved(observations) is unresolved
+
+
+@pytest.mark.parametrize(
+    "pay_dates,unresolved",
+    [
+        ((None, None), True),
+        ((None, "20240105"), True),
+        (("20240105", None), True),
+        (("20240105", "20240106"), True),
+        (("20240105", "20240105"), False),
+    ],
+)
+def test_provider_pay_dates_reconcile_through_compiler(setup, tmp_path, pay_dates, unresolved):  # noqa: F811
+    parent, body = _make_conflict_fixture(setup, tmp_path, pay_dates)
+    body["resolutions"][0]["unresolved_fields"] = ["pay_date"] if unresolved else []
+    path = compile_revision_resolutions(
+        parent, file_hash(parent / "manifest.json"), _input_path(tmp_path, body), tmp_path / "out"
+    )
+    validate_revision_resolution_artifact(path)
+    proposal = read_json(path / "resolution_proposals.json")["proposals"][0]["proposal"]
+    assert ("pay_date" in proposal["unresolved_fields"]) is unresolved
+
+
+@pytest.mark.parametrize("invalid", ["20240230", "2024010X", "", "99991231"])
+def test_invalid_pay_date_fails_closed(invalid):
+    observations = [
+        {"raw_row_json": json.dumps({"pay_date": "20240105"})},
+        {"raw_row_json": json.dumps({"pay_date": invalid})},
+    ]
+    if invalid == "":
+        assert _provider_pay_date_unresolved(observations)
+    else:
+        with pytest.raises(DataValidationError, match="INVALID_DATE"):
+            _provider_pay_date_unresolved(observations)
+
+
+def _legacy_fingerprint():
+    fixture = Path(__file__).parent / "fixtures/economic_revision_v1_legacy_implementation.json"
+    value = read_json(fixture)
+    assert payload_hash(value["component_sha256"]) == value["implementation_hash"]
+    return value["implementation_hash"]
+
+
+def _reidentify_artifact(artifact, digest, target_root):
+    manifest = read_json(artifact / "manifest.json")
+    manifest["logical_identity"]["implementation_hash"] = digest
+    artifact_id = (
+        "economic_event_revision_resolution_" + payload_hash(manifest["logical_identity"])[:24]
+    )
+    target = target_root / artifact_id
+    shutil.copytree(artifact, target)
+    manifest["artifact_id"] = artifact_id
+    atomic_write_json(target / "manifest.json", manifest)
+    return target
+
+
+@pytest.fixture
+def legacy_artifact(conflict_fixture, tmp_path):
+    parent, body = conflict_fixture
+    current = compile_revision_resolutions(
+        parent, file_hash(parent / "manifest.json"), _input_path(tmp_path, body), tmp_path / "out"
+    )
+    validate_revision_resolution_artifact(current)
+    legacy = _reidentify_artifact(current, _legacy_fingerprint(), tmp_path / "legacy")
+    return parent, current, legacy
+
+
+def test_pinned_legacy_implementation_recursively_validates(legacy_artifact):
+    _, current, legacy = legacy_artifact
+    assert validate_revision_resolution_artifact(current)["status"] == "COMPLETE"
+    assert compatible_revision_implementation(_legacy_fingerprint())
+    assert validate_revision_resolution_artifact(legacy)["status"] == "COMPLETE"
+
+
+def test_unknown_implementation_hash_fails_closed(legacy_artifact, tmp_path):
+    _, current, _ = legacy_artifact
+    unknown = _reidentify_artifact(current, "f" * 64, tmp_path / "unknown")
+    assert not compatible_revision_implementation("f" * 64)
+    with pytest.raises(DataValidationError, match="REVISION_IMPLEMENTATION_UNSUPPORTED"):
+        validate_revision_resolution_artifact(unknown)
+
+
+def test_legacy_child_rehash_cannot_bypass_business_reconstruction(legacy_artifact):
+    _, _, legacy = legacy_artifact
+    child = legacy / "authoritative_event_terms.json"
+    value = read_json(child)
+    value["events"][0]["terms"][0]["value"] = 99
+    atomic_write_json(child, value)
+    manifest = read_json(legacy / "manifest.json")
+    manifest["artifact_hashes"][child.name] = file_hash(child)
+    atomic_write_json(legacy / "manifest.json", manifest)
+    with pytest.raises(DataValidationError, match="REVISION_BUSINESS_MISMATCH"):
+        validate_revision_resolution_artifact(legacy)
+
+
+@pytest.mark.parametrize("tamper", ["parent", "raw", "document"])
+def test_legacy_path_still_validates_parent_raw_and_documents(legacy_artifact, tamper):
+    parent, _, legacy = legacy_artifact
+    if tamper == "parent":
+        child = parent / "summary.json"
+        value = read_json(child)
+        value["qualification_only"] = False
+        atomic_write_json(child, value)
+    elif tamper == "raw":
+        d2 = Path(read_json(parent / "manifest.json")["locators"]["parent"])
+        child = d2 / "relevant_provider_rows.parquet"
+        frame = pd.read_parquet(child)
+        frame.loc[0, "raw_row_json"] = "{}"
+        frame.to_parquet(child, index=False)
+    else:
+        child = parent / "documents/fixture.html"
+        child.write_text("altered fixture document")
+    with pytest.raises(DataValidationError):
+        validate_revision_resolution_artifact(legacy)

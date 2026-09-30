@@ -88,7 +88,11 @@ the identity locator must contain the security, period and effective dates. Loca
 presence does **not** prove the economic interpretation; a human reviewer must
 read the clause. Values use explicit per-share, per-ten-shares or zero basis. The
 five cash/share amounts must be complete and internally consistent for approval;
-payment date may remain explicitly unknown. Nothing is backsolved from factor
+payment date may remain explicitly unknown. Provider payment date is non-unresolved
+only when **every** conflicting observation supplies the same valid Gregorian date.
+All-null, mixed null/date and disagreeing dates remain `pay_date`-unresolved;
+malformed dates fail closed. No row is chosen to supply a missing payment date.
+Nothing is backsolved from factor
 movement, provider nulls or total distribution. Cash-tax execution policy remains
 `UNRESOLVED_EXECUTION_POLICY`.
 
@@ -110,6 +114,17 @@ economic-review-revision-resolution-validate --artifact ARTIFACT`. These are API
 descriptions, not authorization to compile any real event. New artifacts use
 content-defined identity, staging, manifest-last publication and full business
 reconstruction on validation. Existing v2 supplement artifacts remain immutable.
+Producer identity binds the current revision module, supplement citation contract
+and economic field/date parser content. The validator accepts only the current
+implementation hash or the explicitly pinned compatible hash
+`9526e33335ca257761bb2506e9271de6b1397d28a835f8356c5ecefb0d127242`
+from source commit `7e93b68` (component SHA256s are frozen in the offline test
+fixture). An accepted historical hash is a read-compatibility claim, **not** an
+exemption: parent validation, raw-row and conflict closure derivation, official
+citations, terms and every child are rechecked under the current v1 rules.
+Unknown hashes fail closed. If a future semantic change cannot reconstruct an old
+artifact, it requires an explicitly versioned validator; the manifest must not be
+rewritten to make it pass. New publications always use the current producer hash.
 
 The D1 terminal guard now normalizes blank effective/settlement strings to null.
 They can no longer satisfy `EVIDENCE_COMPLETE`. The explicitly pinned pre-fix D1
