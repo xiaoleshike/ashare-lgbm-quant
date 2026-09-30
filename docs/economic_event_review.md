@@ -289,3 +289,53 @@ ARTIFACT="$(.venv/bin/python -c 'import json; print(json.load(open("reports/rese
 
 Stop here. No accounting-engine repair, corrected replay, model training, label
 support, lot-size policy change or portfolio optimization is authorized.
+
+## Supplement citation and decision status contract
+
+The supplement input format remains `economic_official_field_supplement_v1`.
+New publications bind `status_contract_version = 2` and the current supplement
+module SHA256 in their logical identity. This does not change D1/D2 fingerprints.
+
+Claim and identity citations share the same locator check: after the existing
+Unicode whitespace normalization, an empty quote fails with
+`ECONOMIC_EVIDENCE_OFFICIAL_QUOTE_EMPTY`. Original quotations and document bytes
+are preserved. Nonempty multiline quotations retain the existing matching rules.
+A located quote is not machine verification of economic meaning; a separate
+human interpretation and hash-bound decision remain necessary.
+
+| Decision | Proposal / single-state queue status | Blank template item |
+| --- | --- | --- |
+| None | `PENDING_HUMAN_REVIEW` | Yes |
+| `APPROVE_AS_EVIDENCE` | `REVIEWED_QUALIFICATION_ONLY` | No |
+| `REJECT_NOT_SAME_EVENT` | `REJECTED_NOT_SAME_EVENT` | No |
+| `REQUIRE_OFFICIAL_DOCUMENT` | `OFFICIAL_DOCUMENT_REQUIRED` | No |
+
+Conflict is an independent flag and still prevents approval. For multiple
+supplements on one event, `supplement_states` records each hash, status and
+conflict; mixed states use `MULTIPLE_SUPPLEMENT_DECISION_STATES`. Thus a request
+for additional documents remains discoverable even alongside another decision.
+Non-approval decisions have null `reviewed_terms` and never enter the reviewed
+catalog. New claims or citations change the supplement hash; an old decision
+cannot transfer automatically. All outputs remain `qualification_only=true`,
+`execution_authorized=false`, and global evidence status `BLOCKED`.
+
+### Strict legacy reading
+
+The sole recognized pre-status-version supplement implementation is SHA256
+`474e92e3807715bb7944f1ee513e7bf55476bf2a8292096693c39d8f6ac7793c`.
+Its no-decision artifacts are read with their original status rendering, not
+relabeled as v2. Parent recursion, complete child inventory/hashes, identity,
+document checks and business recomputation all remain mandatory. The current
+empty-quote guard applies to legacy inputs too. No manifest rewrite is needed.
+
+Legacy artifacts containing decisions are intentionally rejected with
+`ECONOMIC_EVIDENCE_LEGACY_SUPPLEMENT_DECISIONS_REQUIRE_REVIEW`; their historical
+status output is not certified as the new contract. They remain immutable and
+require explicit operator review before any new-version publication. Unknown
+implementation fingerprints are rejected, not treated as legacy-compatible.
+
+`tests/fixtures/economic_event_supplements_v1.py.txt` freezes the exact known
+source bytes solely to construct independent offline compatibility fixtures.
+Tests verify its SHA256 before loading it. Production never imports this fixture
+or executes historical code. Real artifact validation/publication remains an
+operator action, separate from offline regression checks.

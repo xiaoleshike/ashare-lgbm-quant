@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
+from copy import deepcopy
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -20,6 +25,222 @@ from test_economic_event_evidence import (
     source,  # noqa: F401
     terminal_package,
 )
+
+
+@pytest.mark.parametrize("quote", [" ", "\t", "\n", "\u00a0\u2003\u3000"])
+@pytest.mark.parametrize("kind", ["claims", "identity_citations"])
+def test_blank_citation_cannot_publish_approval(setup, tmp_path, quote, kind):
+    parent, body = setup()
+    body["supplements"][0][kind][0]["quote"] = quote
+    approve(body)
+    with pytest.raises(DataValidationError, match="OFFICIAL_QUOTE_EMPTY"):
+        publish(parent, body, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "decision,status",
+    [
+        (None, "PENDING_HUMAN_REVIEW"),
+        ("APPROVE_AS_EVIDENCE", "REVIEWED_QUALIFICATION_ONLY"),
+        ("REJECT_NOT_SAME_EVENT", "REJECTED_NOT_SAME_EVENT"),
+        ("REQUIRE_OFFICIAL_DOCUMENT", "OFFICIAL_DOCUMENT_REQUIRED"),
+    ],
+)
+def test_decision_status_consumer_consistency(setup, tmp_path, decision, status):
+    parent, body = setup()
+    if decision:
+        approve(body)
+        body["decisions"][0]["decision"] = decision
+    out = publish(parent, body, tmp_path)
+    supplements.validate_supplements(out)
+    proposal = read_json(out / "field_proposals.json")["proposals"][0]
+    assert proposal["status"] == status
+    queue = pd.read_parquet(out / "economic_event_review_queue.parquet")
+    assert queue.iloc[0].supplement_status == status
+    assert len(read_json(out / "review_template.json")["decisions"]) == (decision is None)
+    approved = decision == "APPROVE_AS_EVIDENCE"
+    assert (proposal["reviewed_terms"] is not None) == approved
+    assert len(pd.read_parquet(out / "reviewed_corporate_actions.parquet")) == approved
+
+
+@pytest.fixture
+def legacy_module():
+    path = Path(__file__).parent / "fixtures/economic_event_supplements_v1.py.txt"
+    assert file_hash(path) == supplements.LEGACY_IMPLEMENTATION_HASH
+    loader = SourceFileLoader("supplements_legacy_fixture", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    try:
+        loader.exec_module(module)
+        yield module
+    finally:
+        sys.modules.pop(loader.name, None)
+
+
+def legacy_publish(legacy_module, parent, body, tmp_path):
+    path = tmp_path / "legacy_input.json"
+    atomic_write_json(path, body)
+    return legacy_module.compile_supplements(
+        parent, file_hash(parent / "manifest.json"), path, tmp_path / "legacy_output"
+    )
+
+
+def add_conflicting_supplement(parent, body):
+    first = body["supplements"][0]
+    groups = pd.read_parquet(parent / "provider_revision_groups.parquet")
+    other = groups[groups.candidate_group_id.ne(first["candidate_group_id"])].iloc[0]
+    second = deepcopy(first)
+    second["candidate_group_id"] = other.candidate_group_id
+    second["source_row_hashes"] = json.loads(other.source_row_hashes)
+    body["supplements"].append(second)
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_pinned_legacy_no_decisions_readable(setup, tmp_path, legacy_module, conflict):
+    rows = [dividend(stk_bo_rate=None, stk_co_rate=None)]
+    if conflict:
+        rows.append(dividend(stk_bo_rate=None, stk_co_rate=None, cash_div_tax=0.2))
+    parent, body = setup(rows)
+    if conflict:
+        add_conflicting_supplement(parent, body)
+    before = {p.name: file_hash(p) for p in parent.iterdir() if p.is_file()}
+    old = legacy_publish(legacy_module, parent, body, tmp_path)
+    frozen = {str(p.relative_to(old)): file_hash(p) for p in old.rglob("*") if p.is_file()}
+    result = supplements.validate_supplements(old)
+    assert "status_contract_version" not in result["logical_identity"]
+    new = publish(parent, body, tmp_path)
+    assert new != old
+    assert read_json(new / "manifest.json")["logical_identity"]["status_contract_version"] == 2
+    assert frozen == {str(p.relative_to(old)): file_hash(p) for p in old.rglob("*") if p.is_file()}
+    assert before == {p.name: file_hash(p) for p in parent.iterdir() if p.is_file()}
+
+
+def test_multiple_conflicting_supplements_keep_each_decision_visible(setup, tmp_path):
+    parent, body = setup(
+        [
+            dividend(stk_bo_rate=None, stk_co_rate=None),
+            dividend(stk_bo_rate=None, stk_co_rate=None, cash_div_tax=0.2),
+        ]
+    )
+    add_conflicting_supplement(parent, body)
+    approve(body)
+    body["decisions"][0]["decision"] = "REQUIRE_OFFICIAL_DOCUMENT"
+    out = publish(parent, body, tmp_path)
+    supplements.validate_supplements(out)
+    q = pd.read_parquet(out / "economic_event_review_queue.parquet").iloc[0]
+    states = json.loads(q.supplement_states)
+    assert q.supplement_status == "MULTIPLE_SUPPLEMENT_DECISION_STATES"
+    assert {s["status"] for s in states} == {"OFFICIAL_DOCUMENT_REQUIRED", "PENDING_HUMAN_REVIEW"}
+    assert all(s["conflict"] for s in states)
+    template = read_json(out / "review_template.json")["decisions"]
+    assert [d["supplement_hash"] for d in template] == [payload_hash(body["supplements"][1])]
+    assert pd.read_parquet(out / "reviewed_corporate_actions.parquet").empty
+
+
+@pytest.mark.parametrize("kind", ["claims", "identity_citations"])
+def test_legacy_hash_does_not_exempt_blank_citation(setup, tmp_path, legacy_module, kind):
+    parent, body = setup()
+    s = body["supplements"][0]
+    if kind == "claims":
+        s[kind][0]["quote"] = "\t\u3000"
+    else:
+        s[kind].append(dict(s[kind][0], quote="\t\u3000"))
+    old = legacy_publish(legacy_module, parent, body, tmp_path)
+    with pytest.raises(DataValidationError, match="OFFICIAL_QUOTE_EMPTY"):
+        supplements.validate_supplements(old)
+
+
+@pytest.mark.parametrize(
+    "decision", ["APPROVE_AS_EVIDENCE", "REJECT_NOT_SAME_EVENT", "REQUIRE_OFFICIAL_DOCUMENT"]
+)
+def test_legacy_decided_artifact_not_misrepresented(setup, tmp_path, legacy_module, decision):
+    parent, body = setup()
+    approve(body)
+    body["decisions"][0]["decision"] = decision
+    old = legacy_publish(legacy_module, parent, body, tmp_path)
+    with pytest.raises(DataValidationError, match="LEGACY_SUPPLEMENT_DECISIONS_REQUIRE_REVIEW"):
+        supplements.validate_supplements(old)
+
+
+def test_arbitrary_legacy_implementation_rejected(setup, tmp_path, legacy_module, monkeypatch):
+    parent, body = setup()
+    original = legacy_module._identity
+    monkeypatch.setattr(
+        legacy_module, "_identity", lambda p, b: original(p, b) | {"implementation_hash": "f" * 64}
+    )
+    old = legacy_publish(legacy_module, parent, body, tmp_path)
+    with pytest.raises(DataValidationError, match="SUPPLEMENT_IDENTITY"):
+        supplements.validate_supplements(old)
+
+
+def test_legacy_rehashed_child_still_recomputed(setup, tmp_path, legacy_module):
+    parent, body = setup()
+    old = legacy_publish(legacy_module, parent, body, tmp_path)
+    value = read_json(old / "field_proposals.json")
+    value["proposals"][0]["proposed_terms"]["stk_bo_rate"] = 9
+    atomic_write_json(old / "field_proposals.json", value)
+    manifest = read_json(old / "manifest.json")
+    manifest["artifact_hashes"]["field_proposals.json"] = file_hash(old / "field_proposals.json")
+    atomic_write_json(old / "manifest.json", manifest)
+    with pytest.raises(DataValidationError, match="BUSINESS_MISMATCH"):
+        supplements.validate_supplements(old)
+
+
+@pytest.mark.parametrize("kind", ["claims", "identity_citations"])
+def test_layout_whitespace_preserved_and_wrong_page_rejected(setup, tmp_path, kind):
+    parent, body = setup()
+    citation = body["supplements"][0][kind][0]
+    citation["quote"] = citation["quote"].replace(" ", "\n\t\u3000")
+    approve(body)
+    out = publish(parent, body, tmp_path)
+    assert read_json(out / "supplements.json")["supplements"][0][kind][0] == citation
+    citation["page"] = 2
+    approve(body)
+    with pytest.raises(DataValidationError, match="OFFICIAL_DOCUMENT_PAGE"):
+        publish(parent, body, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "decision,status",
+    [
+        ("REJECT_NOT_SAME_EVENT", "REJECTED_NOT_SAME_EVENT"),
+        ("REQUIRE_OFFICIAL_DOCUMENT", "OFFICIAL_DOCUMENT_REQUIRED"),
+    ],
+)
+def test_conflict_flag_and_nonapproval_remain_independent(setup, tmp_path, decision, status):
+    parent, body = setup(
+        [
+            dividend(stk_bo_rate=None, stk_co_rate=None),
+            dividend(stk_bo_rate=None, stk_co_rate=None, cash_div_tax=0.2),
+        ]
+    )
+    approve(body)
+    body["decisions"][0]["decision"] = decision
+    out = publish(parent, body, tmp_path)
+    p = read_json(out / "field_proposals.json")["proposals"][0]
+    assert p["conflict"] and p["status"] == status and p["reviewed_terms"] is None
+    assert read_json(out / "review_template.json")["decisions"] == []
+    assert pd.read_parquet(out / "reviewed_corporate_actions.parquet").empty
+    approve(body)
+    with pytest.raises(DataValidationError, match="SUPPLEMENT_NOT_APPROVABLE"):
+        publish(parent, body, tmp_path)
+
+
+def test_nonapproval_changes_identity_and_does_not_follow_new_evidence(setup, tmp_path):
+    parent, body = setup()
+    pending = publish(parent, body, tmp_path)
+    approve(body)
+    body["decisions"][0]["decision"] = "REQUIRE_OFFICIAL_DOCUMENT"
+    required = publish(parent, body, tmp_path)
+    assert required != pending
+    body["decisions"][0]["review_timestamp"] = "2026-09-30"
+    assert publish(parent, body, tmp_path) == required
+    body["decisions"][0]["decision"] = "REJECT_NOT_SAME_EVENT"
+    assert publish(parent, body, tmp_path) not in (pending, required)
+    body["supplements"][0]["claims"][0]["quote"] = "no reserve conversion."
+    with pytest.raises(DataValidationError, match="UNKNOWN_SUPPLEMENT_DECISION"):
+        publish(parent, body, tmp_path)
 
 
 @pytest.fixture

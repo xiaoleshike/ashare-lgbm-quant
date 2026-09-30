@@ -35,8 +35,6 @@ from ashare_quant.data.economic_review_artifacts import (
 
 CONTRACT = "economic_official_field_supplement_v1"
 KIND = "economic_event_supplement_review"
-STATUS_CONTRACT_VERSION = 2
-LEGACY_IMPLEMENTATION_HASH = "474e92e3807715bb7944f1ee513e7bf55476bf2a8292096693c39d8f6ac7793c"
 
 
 class Document(StrictRecord):
@@ -112,20 +110,16 @@ def _compact(text: str) -> str:
 
 
 def _cite(c: Citation, pages: dict[str, list[str]]) -> str:
-    quote = _compact(c.quote)
-    require(bool(quote), "OFFICIAL_QUOTE_EMPTY")
     require(c.document_sha256 in pages, "OFFICIAL_DOCUMENT_REFERENCE")
     text = pages[c.document_sha256]
     require(c.page <= len(text), "OFFICIAL_DOCUMENT_PAGE")
-    require(quote in _compact(text[c.page - 1]), "OFFICIAL_QUOTE_MISMATCH")
-    return quote
+    require(_compact(c.quote) in _compact(text[c.page - 1]), "OFFICIAL_QUOTE_MISMATCH")
+    return _compact(c.quote)
 
 
 def derive(
-    parent: Path, body: dict[str, Any], document_root: Path, *, legacy_no_decisions: bool = False
+    parent: Path, body: dict[str, Any], document_root: Path
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
-    if legacy_no_decisions:
-        require(not body.get("decisions"), "LEGACY_SUPPLEMENT_DECISIONS_REQUIRE_REVIEW")
     require(body.get("contract") == CONTRACT, "SUPPLEMENT_CONTRACT")
     require(
         set(body) == {"contract", "parent_manifest_hash", "documents", "supplements", "decisions"},
@@ -247,17 +241,6 @@ def derive(
             ),
             "SUPPLEMENT_NOT_APPROVABLE",
         )
-        status = (
-            {
-                "APPROVE_AS_EVIDENCE": "REVIEWED_QUALIFICATION_ONLY",
-                "REJECT_NOT_SAME_EVENT": "REJECTED_NOT_SAME_EVENT",
-                "REQUIRE_OFFICIAL_DOCUMENT": "OFFICIAL_DOCUMENT_REQUIRED",
-            }[d.decision]
-            if d
-            else "PENDING_HUMAN_REVIEW"
-        )
-        if legacy_no_decisions and blocked:
-            status = "CONFLICT_REQUIRES_SEPARATE_REVIEW"
         proposals.append(
             dict(
                 supplement_hash=digest,
@@ -269,7 +252,11 @@ def derive(
                 issues=issues,
                 conflict=blocked,
                 field_claims=[c.model_dump() for c in s.claims],
-                status=status,
+                status="REVIEWED_QUALIFICATION_ONLY"
+                if approved
+                else "CONFLICT_REQUIRES_SEPARATE_REVIEW"
+                if blocked
+                else "PENDING_HUMAN_REVIEW",
                 reviewed_terms=terms if approved else None,
                 review=d.model_dump(exclude={"review_timestamp"}) if d else None,
                 cash_tax_semantics="UNRESOLVED_EXECUTION_POLICY",
@@ -286,19 +273,6 @@ def derive(
         q["supplement_status"] = (
             linked[0]["status"] if len(linked) == 1 else "NO_REVIEWED_SUPPLEMENT"
         )
-        if not legacy_no_decisions:
-            statuses = sorted({p["status"] for p in linked})
-            q["supplement_status"] = (
-                statuses[0]
-                if len(statuses) == 1
-                else "MULTIPLE_SUPPLEMENT_DECISION_STATES"
-                if statuses
-                else "NO_REVIEWED_SUPPLEMENT"
-            )
-            # Keep every candidate's decision and conflict visible even for mixed decisions.
-            q["supplement_states"] = json.dumps(
-                [{k: p[k] for k in ("supplement_hash", "status", "conflict")} for p in linked]
-            )
         q["execution_authorized"] = False
     summary = read_json(parent / "summary.json") | {
         "contract": CONTRACT,
@@ -323,9 +297,6 @@ def derive(
             if p["review"] is None
         ],
     }
-    if not legacy_no_decisions:
-        summary["status_contract_version"] = STATUS_CONTRACT_VERSION
-        template["status_contract_version"] = STATUS_CONTRACT_VERSION
     accepted = [
         {
             "supplement_hash": p["supplement_hash"],
@@ -370,7 +341,6 @@ def _identity(parent: Path, body: dict[str, Any]) -> dict[str, Any]:
     ]
     return dict(
         contract=CONTRACT,
-        status_contract_version=STATUS_CONTRACT_VERSION,
         parent_id=parent.name,
         parent_manifest_hash=file_hash(parent / "manifest.json"),
         proposal_hash=payload_hash(semantic),
@@ -391,18 +361,8 @@ def _table(frame: pd.DataFrame) -> pd.DataFrame:
 def _validate(path: Path, parent: Path) -> dict[str, Any]:
     m = validate_envelope(path, KIND)
     body = read_json(path / "supplements.json")
-    expected_identity = _identity(parent, body)
-    identity = m["logical_identity"]
-    legacy = (
-        "status_contract_version" not in identity
-        and identity.get("implementation_hash") == LEGACY_IMPLEMENTATION_HASH
-    )
-    if legacy:
-        # Narrow read-only compatibility. Historical decision output is not v2 evidence.
-        expected_identity.pop("status_contract_version")
-        expected_identity["implementation_hash"] = LEGACY_IMPLEMENTATION_HASH
-    require(identity == expected_identity, "SUPPLEMENT_IDENTITY")
-    tables, objects = derive(parent, body, path, legacy_no_decisions=legacy)
+    require(m["logical_identity"] == _identity(parent, body), "SUPPLEMENT_IDENTITY")
+    tables, objects = derive(parent, body, path)
     expected = (
         set(tables) | set(objects) | {"supplements.json"} | {d["file"] for d in body["documents"]}
     )
