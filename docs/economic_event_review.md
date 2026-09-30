@@ -61,6 +61,56 @@ supplements, fill only the decisions actually reviewed using the published templ
 and compile to the same output root. Never edit a published artifact. Changed
 decisions produce a new content identity; unchanged inputs validate and reuse.
 
+## Conflicting provider observations: official event reconciliation
+
+`economic_event_revision_resolution_v1` is a separate qualification layer over an
+exact, recursively validated v2 supplement artifact. It does not alter D2 candidate
+grouping, the ordinary supplement conflict gate, or any original provider row. Its
+only mode is `OFFICIAL_FIELD_RECONCILIATION_NO_PROVIDER_SUPERSESSION`, with
+`provider_supersession=UNKNOWN`. It does **not** select the latest, most complete,
+non-null or zero-valued provider observation. Only exact-date adjustment events with
+an actual conflict are in scope. A nearby event cannot qualify.
+
+The input JSON has `contract`, `parent_artifact_id`, `parent_manifest_hash`,
+`resolutions` and `decisions`. Each resolution proposal binds the review event,
+canonical code, report period, record/ex/implementation dates, implementation state,
+request ID, **all** exact conflict candidate groups, **all** raw-row hashes and
+linked supplement hashes. The service rederives that closure from validated D2 and
+the v2 parent; omission, addition or substitution fails closed. Candidate array
+order is canonicalized. `provider_observations.json` retains all original
+`raw_row_json` bytes and hashes, including disagreeing null and zero values.
+
+Official event terms are separate from provider observations. The proposal binds
+one already-frozen parent document ID/SHA256, page-specific identity citations and
+one citation per claimed amount field. The existing supplement document parser and
+nonblank quote locator guard are reused. Quotes must occur on the cited page and
+the identity locator must contain the security, period and effective dates. Locator
+presence does **not** prove the economic interpretation; a human reviewer must
+read the clause. Values use explicit per-share, per-ten-shares or zero basis. The
+five cash/share amounts must be complete and internally consistent for approval;
+payment date may remain explicitly unknown. Nothing is backsolved from factor
+movement, provider nulls or total distribution. Cash-tax execution policy remains
+`UNRESOLVED_EXECUTION_POLICY`.
+
+`decisions=[]` publishes proposals and a blank template. A separately supplied
+decision binds the entire `resolution_hash`, reviewer and reason. Supported decisions
+are `APPROVE_OFFICIAL_RECONCILIATION_AS_EVIDENCE`, `REQUIRE_OFFICIAL_DOCUMENT` and
+`REJECT_NOT_SAME_EVENT`. Timestamp is non-logical provenance. An approved decision
+creates one event-level row in `reviewed_revision_resolutions.parquet`; it never
+rewrites a provider row or the parent's conflict flag. Rejection and document
+requests create no reviewed row. `qualification_only=true`,
+`execution_authorized=false` and global `economic_event_evidence_status=BLOCKED`
+remain fixed even for an approved **fixture**. This contract does not establish
+cash/share execution accounting, tax treatment or production readiness.
+
+The thin CLI is `ashare-quant data economic-review-revision-resolution --parent
+PARENT --parent-manifest-sha256 SHA256 --resolutions INPUT.json --output-root ROOT`;
+recursive validation is `ashare-quant data
+economic-review-revision-resolution-validate --artifact ARTIFACT`. These are API
+descriptions, not authorization to compile any real event. New artifacts use
+content-defined identity, staging, manifest-last publication and full business
+reconstruction on validation. Existing v2 supplement artifacts remain immutable.
+
 The D1 terminal guard now normalizes blank effective/settlement strings to null.
 They can no longer satisfy `EVIDENCE_COMPLETE`. The explicitly pinned pre-fix D1
 fingerprint is readable only with full current business reconstruction; it is not

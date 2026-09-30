@@ -7,6 +7,10 @@ import json
 from pathlib import Path
 
 from ashare_quant.config.settings import AppSettings
+from ashare_quant.data.economic_event_revision_resolution import (
+    compile_revision_resolutions,
+    validate_revision_resolution_artifact,
+)
 from ashare_quant.data.economic_event_supplements import compile_supplements, validate_supplements
 from ashare_quant.data.economic_review_artifacts import (
     compile_review,
@@ -23,6 +27,8 @@ COMMANDS = {
     "terminal-announcement-probe",
     "economic-review-supplement",
     "economic-review-supplement-validate",
+    "economic-review-revision-resolution",
+    "economic-review-revision-resolution-validate",
 }
 
 
@@ -31,13 +37,23 @@ def add_review_parsers(commands: argparse._SubParsersAction[argparse.ArgumentPar
         p = commands.add_parser(
             name, help="Evidence review only; never approve automatically or execute a portfolio."
         )
-        if name in {"economic-review-validate", "economic-review-supplement-validate"}:
+        if name in {
+            "economic-review-validate",
+            "economic-review-supplement-validate",
+            "economic-review-revision-resolution-validate",
+        }:
             p.add_argument("--artifact", type=Path, required=True)
             continue
         if name == "economic-review-supplement":
             p.add_argument("--parent", type=Path, required=True)
             p.add_argument("--parent-manifest-sha256", required=True)
             p.add_argument("--supplements", type=Path, required=True)
+            p.add_argument("--output-root", type=Path, required=True)
+            continue
+        if name == "economic-review-revision-resolution":
+            p.add_argument("--parent", type=Path, required=True)
+            p.add_argument("--parent-manifest-sha256", required=True)
+            p.add_argument("--resolutions", type=Path, required=True)
             p.add_argument("--output-root", type=Path, required=True)
             continue
         p.add_argument("--initial-evidence", type=Path, required=True)
@@ -52,6 +68,16 @@ def add_review_parsers(commands: argparse._SubParsersAction[argparse.ArgumentPar
 
 
 def run_review_command(args: argparse.Namespace, settings: AppSettings) -> int:
+    if args.data_command == "economic-review-revision-resolution-validate":
+        manifest = validate_revision_resolution_artifact(args.artifact)
+        print(json.dumps({"artifact_id": manifest["artifact_id"], "validation": "PASS"}))
+        return 0
+    if args.data_command == "economic-review-revision-resolution":
+        path = compile_revision_resolutions(
+            args.parent, args.parent_manifest_sha256, args.resolutions, args.output_root
+        )
+        print(json.dumps({"artifact": str(path.resolve())}))
+        return 0
     if args.data_command == "economic-review-supplement-validate":
         manifest = validate_supplements(args.artifact)
         print(json.dumps({"artifact_id": manifest["artifact_id"], "validation": "PASS"}))
