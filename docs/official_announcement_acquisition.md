@@ -24,7 +24,8 @@ Interface references were reviewed in
 and the operator's local `cninfo_announcement` implementation. Their observed
 30-row limit and field names are a versioned adapter assumption, not a promise
 that the remote website will remain stable. A bounded live test on 2026-10-09
-established the v2 adapter rules below. No source code from those projects was copied.
+established the v2 adapter rules below. V3 adds strict topSearch evidence consistency
+without changing HTTP, pagination or PDF behavior. No reference-project code was copied.
 
 Queries require one exact `NNNNNN.SH/SZ/BJ` code and inclusive real calendar
 dates in `YYYYMMDD`, with optional keyword/category. Query dates are not inferred
@@ -39,7 +40,15 @@ establish exchange. Actual topSearch responses can omit those fields; v2 allows
 an exact `category=A股` organization match to remain pending until each returned
 announcement proves exchange via `pageColumn`: SZZB/SZCY/SZSM for SZ and
 SHZB/SHKCB for SH. Announcement security and orgId must also match. Unknown boards,
-contradictory exchanges and ambiguous organizations fail closed. The catalog binds
+ambiguous organizations fail closed. V3 also checks every present topSearch
+`column` against the requested exchange before any announcement query: SH requires
+`sse`, SZ/BJ require `szse` under the existing query-column semantics. Unknown or
+contradictory columns fail `ORG_COLUMN_CONFLICT`; every recognized `plate`/`exchange`
+must agree with the requested exchange. A pending identity cannot discard a
+conflict and `pageColumn` cannot override it. Missing column is not a conflict.
+`category=A股` proves only category and `type=shj` is not an exchange mapping.
+V3 summaries include `identity_conflict`, independently of completeness.
+The catalog binds
 `exchange_evidence` and `exchange_response_hash` to the actual proving response.
 There is no code-prefix inference. An empty window with pending exchange remains
 unverified; it cannot establish an exchange or a complete absence observation.
@@ -54,7 +63,7 @@ orgId response hash, request ID and raw row hash remain in the catalog.
 
 ## Pagination and completeness
 
-Page size is 1..30 (CLI uses 30). V2 accepts the two observed counter conventions:
+Page size is 1..30 (CLI uses 30). V2 and v3 accept the two observed counter conventions:
 `totalpages=floor(totalAnnouncement/pageSize)` and the original ceil convention.
 The declared value must stay consistent across pages. Actual page progression
 is derived from totalAnnouncement and pageSize, never from totalpages alone:
@@ -113,7 +122,7 @@ entries can be used offline. `--retry-failed` additionally requires
 
 ## Original PDF evidence
 
-`official_announcement_source_v2` freezes request descriptions, each captured
+`official_announcement_source_v3` freezes request descriptions, each captured
 response body, normalized catalog, worklist and document inventory. Original PDF
 bytes are copied to `documents/<sha256>.pdf`. HTTP status, size, `%PDF-` header,
 EOF marker, native parseability, encryption and page-count bounds are checked.
@@ -192,9 +201,10 @@ No retrieval time, host, PID, mtime or absolute path enters logical identity.
 
 ## Source producer compatibility
 
-`SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 2` dispatches reconstruction by
-the explicit source contract. New publication uses official_announcement_source_v2
-and binds current component bytes. V2 does not accept v1 producer hashes. V1
+`SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 3` dispatches reconstruction by
+the explicit source contract. New publication uses official_announcement_source_v3
+and binds current component bytes. Historical producers are scoped to their exact
+contract; v1/v2 fingerprints cannot masquerade as v3. V1
 reading retains its strict org exchange and ceil-only pagination rules, original
 catalog columns and original summaries; old FAILED results are not upgraded.
 V1 accepts only the following pinned producers, with no manifest modification:
@@ -210,14 +220,25 @@ commit: 829f2d52d77217753be3ee47b87743da8bb43614
 implementation: 42eff8cd0c14d0d014b80a979eec784372f84f0d5a1733b95953adeaee85f4b6
 announcement_sources.py: 9edb5617a0577051e640e0612f6ad64e7d47384b5679ac94ae93e7af3e91d2a5
 other three component hashes: unchanged from the preceding producer
+
+contract: official_announcement_source_v2
+commit: c5b1d22061c698714204cb92d002d65f4f200405
+implementation: a810eef8756c8a2492eb377b2efd739bc6e1afc02f25907ab8b2f04cee65976c
+announcement_sources.py: 759dbfeb1ac443d653d29095d2cb94815d3771c480455b55cfa77b282faaa3ef
+cninfo_announcement_provider.py: e430a0a2e78f3ae1a6f5e8c5e77d5992d5475b66b230c4326187c3b317f1c309
+HTTP/document component hashes: unchanged from the preceding producers
 ```
 
 The aggregate uses the existing canonical `payload_hash(component_sha256)` rule.
 The test-only JSON fixtures freeze these exact UTF-8 source bytes and provenance.
 Tests execute the old producer in a temporary module context to publish synthetic
 discovery, acquisition and text artifacts, then validate them with current code.
-Production never loads or executes those fixtures. V1 and v2 use explicitly
-different org/pagination rules. HTTP and PDF processing remain unchanged.
+Production never loads or executes those fixtures. V1/v2 retain their original
+org/pagination rules, catalogs and summaries. V2's missing-exchange pending path
+historically accepted a contradictory `column=szse` for SH; reconstruction retains
+that historical result, not a v3 identity authorization. New acquisition reruns
+v3 discovery checks before any GET and rejects such historical contradictory input.
+HTTP and PDF processing remain unchanged.
 Future compatibility entries require explicit source review and regression proof;
 unknown or malformed hashes fail `SOURCE_IMPLEMENTATION_UNSUPPORTED`.
 
@@ -237,6 +258,25 @@ has no new compatibility allowance: its exact parser identity remains required
 and mismatches fail `PARSER_ENVIRONMENT_UNSUPPORTED`. A text artifact can reference
 a compatible legacy source without changing its own identity. No validator uses
 the network, rewrites old children, or silently substitutes newer parser results.
+
+### Frozen pagination evidence
+
+The 31-record observation above is locally traceable, not a new network test:
+
+```text
+root: reports/cninfo_adapter_fix_829f2d5_20261009/live_v2/sources/300750.SZ/
+artifact: official_announcement_source_286934920adde03b11365425
+manifest SHA256: 1e4ae882a108ca7fc6dcfce50e4567fc976921ee62ec94468b490d3c327486f0
+query: 300750.SZ, 20260910..20261009, page_size=30, max_pages=3, no keyword/category
+topSearch response SHA256: 932c5dcb4fe346825e158c6d9a5efbefb7ee3d744b772880fa6994648394d5bd
+page 1 response SHA256: 4cd3a4df4f95b37bef5dca1e1b440c15329014056b3a8b4fed50fbdf527f1f51
+page 2 response SHA256: 83f42c57597f0e16c2b97f41fb43a33ca99bc846b5b4b5e562d08965db35dfee
+pages: 2; announcements: 31
+```
+
+The fixed original Jinbo Pilot remains v1 FAILED with ORG_EXCHANGE_UNVERIFIED;
+neither v2 nor v3 reinterprets that failure. Intermediate uncommitted producer
+fingerprints are not added to compatibility merely because a directory exists.
 
 ## Operator workflow
 

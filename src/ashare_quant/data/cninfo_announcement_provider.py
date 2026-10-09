@@ -125,7 +125,9 @@ def org_identity(
     response: dict[str, Any] | list[Any],
     *,
     allow_pending_exchange: bool = False,
+    contract_version: int = 3,
 ) -> str:
+    check(contract_version in (1, 2, 3), "DISCOVERY_CONTRACT_UNSUPPORTED")
     rows = response.get("stockList") if isinstance(response, dict) else response
     check(isinstance(rows, list), "ORG_RESPONSE_SCHEMA")
     assert isinstance(rows, list)
@@ -136,6 +138,10 @@ def org_identity(
         if query.ts_code[:6] not in codes:
             continue
         check(codes == {query.ts_code[:6]}, "ORG_CODE_CONFLICT")
+        if contract_version == 3 and row.get("column") is not None:
+            # A pending identity cannot erase contradictory evidence already present.
+            expected_column = "sse" if query.ts_code.endswith(".SH") else "szse"
+            check(row["column"] == expected_column, "ORG_COLUMN_CONFLICT")
         if allow_pending_exchange:
             check(
                 all(row.get(k) is None or str(row[k]) in EXCHANGES for k in ("plate", "exchange")),
@@ -144,6 +150,8 @@ def org_identity(
         exchanges = {
             EXCHANGES[str(row[k])] for k in ("plate", "exchange") if str(row.get(k)) in EXCHANGES
         }
+        if contract_version == 3:
+            check(exchanges <= {query.ts_code[-2:]}, "ORG_EXCHANGE_MISMATCH")
         if not exchanges and row.get("column") == "sse":
             exchanges = {"SH"}
         pending = not exchanges and allow_pending_exchange and row.get("category") == "A股"
@@ -187,7 +195,7 @@ def announcement_record(
     capture: dict[str, Any],
     org_hash: str,
     *,
-    contract_version: int = 2,
+    contract_version: int = 3,
     org_exchange_verified: bool = True,
 ) -> dict[str, Any]:
     check(
@@ -237,7 +245,7 @@ def announcement_record(
         "fetch_status": "NOT_ATTEMPTED",
         "extraction_status": "NOT_ATTEMPTED",
     }
-    if contract_version == 2:
+    if contract_version >= 2:
         board = row.get("pageColumn")
         if board is not None:
             check(
@@ -260,10 +268,10 @@ def analyze_search(
     captures: list[dict[str, Any]],
     blobs: dict[str, bytes],
     *,
-    contract_version: int = 2,
+    contract_version: int = 3,
 ) -> SearchProgress:
     """One shared state machine for acquisition and independent business reconstruction."""
-    check(contract_version in (1, 2), "DISCOVERY_CONTRACT_UNSUPPORTED")
+    check(contract_version in (1, 2, 3), "DISCOVERY_CONTRACT_UNSUPPORTED")
     records: list[dict[str, Any]] = []
     initial = request_spec(TOP_SEARCH, {"keyWord": query.ts_code[:6], "maxNum": "10"})
     if not captures:
@@ -280,11 +288,16 @@ def analyze_search(
         )
     try:
         org_response = response_json(captures[0], blobs)
-        org = org_identity(query, org_response, allow_pending_exchange=contract_version == 2)
+        org = org_identity(
+            query,
+            org_response,
+            allow_pending_exchange=contract_version >= 2,
+            contract_version=contract_version,
+        )
         org_exchange_verified = True
-        if contract_version == 2:
+        if contract_version >= 2:
             try:
-                org_identity(query, org_response)
+                org_identity(query, org_response, contract_version=contract_version)
             except AnnouncementError as error:
                 check(str(error) == "ORG_EXCHANGE_UNVERIFIED", "ORG_IDENTITY_CONFLICT")
                 org_exchange_verified = False
@@ -336,7 +349,7 @@ def analyze_search(
                 )
                 check(pages in allowed_pages, "PAGE_TOTAL_INCONSISTENT")
                 check(total is None or total == count, "PAGINATION_TOTAL_CHANGED")
-                if contract_version == 2:
+                if contract_version >= 2:
                     check(
                         declared_pages is None or declared_pages == pages,
                         "PAGINATION_PAGES_CHANGED",
@@ -371,7 +384,7 @@ def analyze_search(
                     page_rows.append(record)
                 records.extend(page_rows)
                 if not more:
-                    if contract_version == 2:
+                    if contract_version >= 2:
                         check(org_exchange_verified or bool(records), "ORG_EXCHANGE_UNVERIFIED")
                     check(len(records) == count, "ANNOUNCEMENT_TOTAL_MISMATCH")
                     check(len(captures) == page + 1, "EXTRA_SEARCH_CAPTURE")

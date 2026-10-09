@@ -115,6 +115,71 @@ def web_org(code="688598", org_id="fixture-org"):
 
 
 @pytest.mark.parametrize(
+    "fields",
+    [{"column": "szse"}, {"plate": "SH", "column": "szse"}],
+)
+def test_conflicting_column_stops_before_announcement_query(tmp_path, fields):
+    c = client(
+        [
+            reply([web_org(org_id="9900041577")[0] | fields]),
+            reply(page([announcement(orgId="9900041577", pageColumn="SHKCB")], pages=0)),
+        ]
+    )
+    path = probe(query(), c, tmp_path)
+    summary = read_json(path / "acquisition_summary.json")
+    assert summary["discovery_status"] == "FAILED"
+    assert summary["discovery_issues"] == ["ORG_COLUMN_CONFLICT"]
+    assert summary["identity_conflict"] is True
+    assert len(c.transport.calls) == 1
+    validate_announcement_source(path)
+
+
+@pytest.mark.parametrize(
+    "rows,error",
+    [
+        ([web_org()[0] | {"exchange": "SZ"}], "ORG_EXCHANGE_MISMATCH"),
+        ([web_org()[0] | {"plate": "SH", "exchange": "SZ"}], "ORG_EXCHANGE_MISMATCH"),
+        ([web_org()[0] | {"column": "unknown"}], "ORG_COLUMN_CONFLICT"),
+        ([web_org()[0] | {"plate": "unknown"}], "ORG_EXCHANGE_UNVERIFIED"),
+        (web_org() + web_org(org_id="different-org"), "ORG_NOT_FOUND_OR_AMBIGUOUS"),
+        (web_org() + org(plate="SZ"), "ORG_EXCHANGE_MISMATCH"),
+    ],
+)
+def test_topsearch_inconsistent_identity_never_queries_pages(tmp_path, rows, error):
+    c = client([reply(rows), reply(page([announcement(pageColumn="SHKCB")]))])
+    path = probe(query(), c, tmp_path)
+    summary = read_json(path / "acquisition_summary.json")
+    assert summary["discovery_status"] == "FAILED"
+    assert summary["discovery_issues"] == [error]
+    assert len(c.transport.calls) == 1
+    validate_announcement_source(path)
+
+
+@pytest.mark.parametrize("exchange", ["SZ", "BJ"])
+def test_sse_column_cannot_support_non_sh_query(tmp_path, exchange):
+    q = AnnouncementQuery(ts_code=f"688598.{exchange}", start_date="20240701", end_date="20240705")
+    c = client([reply([web_org()[0] | {"column": "sse"}])])
+    path = probe(q, c, tmp_path)
+    summary = read_json(path / "acquisition_summary.json")
+    assert summary["discovery_issues"] == ["ORG_COLUMN_CONFLICT"]
+    assert summary["identity_conflict"] is True
+    assert len(c.transport.calls) == 1
+
+
+@pytest.mark.parametrize("fields", [{"plate": "SH"}, {"exchange": "SH"}, {"column": "sse"}])
+def test_consistent_explicit_sh_identity_still_supported(tmp_path, fields):
+    path = probe(
+        query(),
+        client([reply([web_org()[0] | fields]), reply(page([announcement()]))]),
+        tmp_path,
+    )
+    summary = read_json(path / "acquisition_summary.json")
+    assert summary["discovery_status"] == "COMPLETE"
+    assert summary["identity_conflict"] is False
+    validate_announcement_source(path)
+
+
+@pytest.mark.parametrize(
     "code,exchange,board",
     [
         ("002713", "SZ", "SZZB"),
@@ -342,7 +407,11 @@ def rehash(root, name):
 
 
 @pytest.fixture(
-    params=["announcement_source_v1_5692b05.json", "announcement_source_v1_829f2d5.json"]
+    params=[
+        "announcement_source_v1_5692b05.json",
+        "announcement_source_v1_829f2d5.json",
+        "announcement_source_v2_c5b1d22.json",
+    ]
 )
 def legacy_source(tmp_path, monkeypatch, request):
     """Run exact frozen producer bytes, not a current artifact relabeled as legacy."""
@@ -371,6 +440,7 @@ def legacy_source(tmp_path, monkeypatch, request):
             spec.loader.exec_module(module)
             modules[name] = module
         old = modules["announcement_sources"]
+        frozen["contract"] = old.CONTRACT
         assert old.implementation_hash() == frozen["implementation_hash"]
         old_http = modules["announcement_http"]
         old_query = modules["cninfo_announcement_provider"].AnnouncementQuery
@@ -391,9 +461,24 @@ def legacy_source(tmp_path, monkeypatch, request):
         old_text = text.publish_text(artifact, tmp_path / "legacy_text")
         frozen["failed_source"] = old.probe(
             old_query(**query().model_dump()),
-            fake_client([reply(web_org())]),
+            fake_client(
+                [reply([web_org()[0] | {"plate": "unknown"}])]
+                if old.CONTRACT == sources.V2_CONTRACT
+                else [reply(web_org())]
+            ),
             tmp_path / "legacy_failures",
         )
+        if old.CONTRACT == sources.V2_CONTRACT:
+            frozen["conflicting_source"] = old.probe(
+                old_query(**query().model_dump()),
+                fake_client(
+                    [
+                        reply([web_org()[0] | {"column": "szse"}]),
+                        reply(page([announcement(pageColumn="SHKCB")], pages=0)),
+                    ]
+                ),
+                tmp_path / "legacy_conflict",
+            )
     return parent, artifact, old_text, frozen
 
 
@@ -406,6 +491,23 @@ def test_v1_failure_stays_frozen_under_v2_validator(legacy_source):
     assert summary["discovery_status"] == "FAILED"
     assert summary["discovery_issues"] == ["ORG_EXCHANGE_UNVERIFIED"]
     assert file_hash(path / "manifest.json") == before
+
+
+def test_v2_conflict_keeps_historical_semantics_but_cannot_authorize_new_acquire(legacy_source):
+    _, _, _, frozen = legacy_source
+    if frozen["contract"] != sources.V2_CONTRACT:
+        pytest.skip("v2-only historical semantics")
+    path = frozen["conflicting_source"]
+    before = {p: file_hash(p) for p in path.rglob("*") if p.is_file()}
+    validate_announcement_source(path)
+    summary = read_json(path / "acquisition_summary.json")
+    assert summary["discovery_status"] == "COMPLETE"
+    assert "identity_conflict" not in summary
+    c = client([reply(pdf())])
+    with pytest.raises(AnnouncementError, match="EXTRA_SEARCH_CAPTURE|DISCOVERY_INCOMPLETE"):
+        acquire(path, ["fixture-1"], c, path.parent / "new")
+    assert c.transport.calls == []
+    assert all(file_hash(p) == h for p, h in before.items())
 
 
 def test_v1_producer_cannot_masquerade_as_v2(legacy_source):
@@ -451,7 +553,7 @@ def reseal_fixture(root, logical):
 
 def test_current_and_pinned_producers_use_distinct_unchanged_business(legacy_source, tmp_path):
     parent, artifact, _, frozen = legacy_source
-    assert sources.SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION == 2
+    assert sources.SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION == 3
     assert (
         sources.COMPATIBLE_SOURCE_COMPONENTS[frozen["source_commit"]] == frozen["component_sha256"]
     )
@@ -466,8 +568,7 @@ def test_current_and_pinned_producers_use_distinct_unchanged_business(legacy_sou
     assert current_frame[old_frame.columns].equals(old_frame)
     assert manifest["logical_identity"]["contract"] == sources.CONTRACT
     assert (
-        read_json(artifact / "manifest.json")["logical_identity"]["contract"]
-        == sources.LEGACY_CONTRACT
+        read_json(artifact / "manifest.json")["logical_identity"]["contract"] == frozen["contract"]
     )
     assert acquire(parent, ["fixture-1"], client([reply(pdf())]), tmp_path / "current") == current
 

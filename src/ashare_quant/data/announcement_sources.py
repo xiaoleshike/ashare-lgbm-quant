@@ -31,12 +31,13 @@ from ashare_quant.data.economic_event_sources import publish, safe_file, validat
 
 KIND = "official_announcement_source"
 LEGACY_CONTRACT = "official_announcement_source_v1"
-CONTRACT = "official_announcement_source_v2"
+V2_CONTRACT = "official_announcement_source_v2"
+CONTRACT = "official_announcement_source_v3"
 
-# Read compatibility v2, with pinned entries scoped to LEGACY_CONTRACT.
+# Read compatibility v3, with historical entries scoped to their source contract.
 # Entries authorize reconstruction,
 # never acceptance of historical derived results. No fixture code is imported.
-SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 2
+SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 3
 COMPATIBLE_SOURCE_COMPONENTS = {
     "5692b05331de047ef937663449ddc08cbaab031f": {
         "announcement_sources.py": (
@@ -62,6 +63,23 @@ COMPATIBLE_SOURCE_COMPONENTS = {
             "5071c5aa5bdcb4ded36993e40edce7bd3e6c1dbd2c501e9a07477cb4c2b01ef9"
         ),
     },
+    "c5b1d22061c698714204cb92d002d65f4f200405": {
+        "announcement_sources.py": (
+            "759dbfeb1ac443d653d29095d2cb94815d3771c480455b55cfa77b282faaa3ef"
+        ),
+        "announcement_http.py": "c3e6173b66509dadcbb90d696d4c9b18ba09d5dd5c474230f2008682f1101f9a",
+        "cninfo_announcement_provider.py": (
+            "e430a0a2e78f3ae1a6f5e8c5e77d5992d5475b66b230c4326187c3b317f1c309"
+        ),
+        "announcement_documents.py": (
+            "5071c5aa5bdcb4ded36993e40edce7bd3e6c1dbd2c501e9a07477cb4c2b01ef9"
+        ),
+    },
+}
+COMPATIBLE_SOURCE_CONTRACTS = {
+    "5692b05331de047ef937663449ddc08cbaab031f": LEGACY_CONTRACT,
+    "829f2d52d77217753be3ee47b87743da8bb43614": LEGACY_CONTRACT,
+    "c5b1d22061c698714204cb92d002d65f4f200405": V2_CONTRACT,
 }
 
 
@@ -80,15 +98,19 @@ def implementation_hash() -> str:
 
 
 def compatible_source_implementation(value: object, contract: str = CONTRACT) -> bool:
-    """Scope historical producers to v1 rules; v2 always uses its current producer."""
+    """Only explicitly pinned producer/contract pairs authorize historical reconstruction."""
     return (
         isinstance(value, str)
         and re.fullmatch(r"[0-9a-f]{64}", value) is not None
         and (
             (contract == CONTRACT and value == implementation_hash())
             or (
-                contract == LEGACY_CONTRACT
-                and value in {payload_hash(c) for c in COMPATIBLE_SOURCE_COMPONENTS.values()}
+                value
+                in {
+                    payload_hash(components)
+                    for commit, components in COMPATIBLE_SOURCE_COMPONENTS.items()
+                    if COMPATIBLE_SOURCE_CONTRACTS[commit] == contract
+                }
             )
         )
     )
@@ -100,7 +122,7 @@ def derive(
     *,
     contract: str = CONTRACT,
 ) -> tuple[pd.DataFrame, dict[str, Any], dict[str, bytes]]:
-    check(contract in (CONTRACT, LEGACY_CONTRACT), "ANNOUNCEMENT_SOURCE_CONTRACT")
+    check(contract in (CONTRACT, V2_CONTRACT, LEGACY_CONTRACT), "ANNOUNCEMENT_SOURCE_CONTRACT")
     query = AnnouncementQuery.model_validate(body["query"])
     policy = Limits.model_validate(body["limits"])
     captures = body["captures"]
@@ -116,7 +138,7 @@ def derive(
         query,
         captures[:search_count],
         blobs,
-        contract_version=1 if contract == LEGACY_CONTRACT else 2,
+        contract_version={LEGACY_CONTRACT: 1, V2_CONTRACT: 2, CONTRACT: 3}[contract],
     )
     selected = body["download_ids"]
     check(
@@ -208,6 +230,18 @@ def derive(
         "empty_result_semantics": "QUERY_RETURNED_ZERO_NOT_GENERAL_ABSENCE_PROOF",
         "category_semantics": "PROVIDER_QUERY_FILTER_NOT_ECONOMIC_CLASSIFICATION",
     }
+    if contract == CONTRACT:
+        summary["identity_conflict"] = bool(
+            set(progress.issues)
+            & {
+                "ORG_COLUMN_CONFLICT",
+                "ORG_CODE_CONFLICT",
+                "ORG_EXCHANGE_MISMATCH",
+                "ORG_IDENTITY_CONFLICT",
+                "ANNOUNCEMENT_IDENTITY_MISMATCH",
+                "ANNOUNCEMENT_EXCHANGE_MISMATCH",
+            }
+        )
     columns = CATALOG_COLUMNS_V1 if contract == LEGACY_CONTRACT else CATALOG_COLUMNS
     frame = pd.DataFrame(progress.records, columns=columns).astype(
         {c: "Int64" if c == "document_size" else "string" for c in columns}
@@ -341,7 +375,7 @@ def validate_announcement_source(path: Path) -> dict[str, Any]:
     manifest = validate_envelope(path, KIND)
     logical = manifest["logical_identity"]
     contract = logical.get("contract")
-    check(contract in (CONTRACT, LEGACY_CONTRACT), "ANNOUNCEMENT_SOURCE_CONTRACT")
+    check(contract in (CONTRACT, V2_CONTRACT, LEGACY_CONTRACT), "ANNOUNCEMENT_SOURCE_CONTRACT")
     assert isinstance(contract, str)
     producer = logical.get("implementation_hash")
     check(compatible_source_implementation(producer, contract), "SOURCE_IMPLEMENTATION_UNSUPPORTED")
