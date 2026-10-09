@@ -110,6 +110,160 @@ def query(**kwargs):
     )
 
 
+def web_org(code="688598", org_id="fixture-org"):
+    return [{"code": code, "orgId": org_id, "category": "A股", "type": "shj"}]
+
+
+@pytest.mark.parametrize(
+    "code,exchange,board",
+    [
+        ("002713", "SZ", "SZZB"),
+        ("300750", "SZ", "SZCY"),
+        ("688598", "SH", "SHKCB"),
+        ("600160", "SH", "SHZB"),
+    ],
+)
+def test_web_org_confirmed_by_announcement_market(tmp_path, code, exchange, board):
+    q = AnnouncementQuery(ts_code=f"{code}.{exchange}", start_date="20240701", end_date="20240705")
+    result = CNINFOAnnouncementProvider(
+        client(
+            [
+                reply(web_org(code)),
+                reply(page([announcement(secCode=code, pageColumn=board)], pages=0)),
+            ]
+        )
+    ).search(q)
+    assert result.progress.status == "COMPLETE", result.progress.issues
+    path = publish_discovery(result, Limits(), tmp_path)
+    frame = pd.read_parquet(path / "announcement_catalog.parquet")
+    assert frame.exchange.iloc[0] == exchange
+    assert frame.exchange_evidence.iloc[0] == "ANNOUNCEMENT_PAGE_COLUMN"
+    validate_announcement_source(path)
+
+
+def test_web_floor_totalpages_keeps_all_31_rows(tmp_path):
+    rows = [announcement(str(i), pageColumn="SHKCB") for i in range(31)]
+    c = client(
+        [
+            reply(web_org()),
+            reply(page(rows[:30], 31, 1, True)),
+            reply(page(rows[30:], 31, 1, False)),
+        ]
+    )
+    source = probe(query(), c, tmp_path)
+    assert read_json(source / "acquisition_summary.json")["discovery_status"] == "COMPLETE"
+    assert len(pd.read_parquet(source / "announcement_catalog.parquet")) == 31
+    assert len(c.transport.calls) == 3
+
+
+@pytest.mark.parametrize(
+    "top,items",
+    [
+        (web_org(), [announcement(pageColumn="SZCY")]),
+        (web_org(), [announcement()]),
+        (web_org(), [announcement(pageColumn="UNKNOWN")]),
+        (web_org(), [announcement(pageColumn=[])]),
+        (
+            [web_org()[0] | {"plate": "unknown"}],
+            [announcement(pageColumn="SHKCB")],
+        ),
+        (web_org(), [announcement(pageColumn="SHKCB", orgId="wrong-org")]),
+        (web_org(), []),
+        (org(), [announcement(pageColumn="SZCY")]),
+    ],
+)
+def test_web_exchange_cannot_be_guessed_or_conflicted(tmp_path, top, items):
+    result = CNINFOAnnouncementProvider(
+        client(
+            [
+                reply(top),
+                reply(page(items, pages=0 if not items else 1)),
+            ]
+        )
+    ).search(query())
+    assert result.progress.status != "COMPLETE"
+    path = publish_discovery(result, Limits(), tmp_path)
+    validate_announcement_source(path)
+
+
+@pytest.mark.parametrize("total", [0, 1, 29, 30, 31, 60, 61])
+@pytest.mark.parametrize("style", ["floor", "ceil"])
+def test_pagination_counter_styles_reconcile_count_and_more(tmp_path, total, style):
+    rows = [announcement(str(i)) for i in range(total)]
+    count_pages = (total + 29) // 30
+    declared = total // 30 if style == "floor" else count_pages
+    replies = [reply(org())] + [
+        reply(page(rows[(n - 1) * 30 : n * 30], total, declared, n < count_pages))
+        for n in range(1, max(1, count_pages) + 1)
+    ]
+    c = client(replies)
+    path = probe(query(), c, tmp_path)
+    assert read_json(path / "acquisition_summary.json")["discovery_status"] == "COMPLETE"
+    assert len(pd.read_parquet(path / "announcement_catalog.parquet")) == total
+    assert len(c.transport.calls) == 1 + max(1, count_pages)
+
+
+@pytest.mark.parametrize(
+    "last_count,last_pages,last_more", [(31, 2, False), (31, 1, True), (32, 1, False)]
+)
+def test_web_conflicting_pagination_stays_partial(tmp_path, last_count, last_pages, last_more):
+    first = [announcement(str(i)) for i in range(30)]
+    path = probe(
+        query(),
+        client(
+            [
+                reply(org()),
+                reply(page(first, 31, 1, True)),
+                reply(page([announcement("last")], last_count, last_pages, last_more)),
+            ]
+        ),
+        tmp_path,
+    )
+    assert read_json(path / "acquisition_summary.json")["discovery_status"] == "PARTIAL"
+    validate_announcement_source(path)
+
+
+def test_rehashed_exchange_evidence_still_reconstructed(tmp_path):
+    path = probe(
+        query(),
+        client([reply(web_org()), reply(page([announcement(pageColumn="SHKCB")], pages=0))]),
+        tmp_path,
+    )
+    frame = pd.read_parquet(path / "announcement_catalog.parquet")
+    frame.loc[0, "exchange_evidence"] = "CODE_PREFIX"
+    frame.to_parquet(path / "announcement_catalog.parquet", index=False)
+    rehash(path, "announcement_catalog.parquet")
+    with pytest.raises(AnnouncementError, match="CATALOG_RECONSTRUCTION"):
+        validate_announcement_source(path)
+
+
+def test_cli_published_failed_discovery_has_nonzero_exit(tmp_path, capsys):
+    cache = CaptureCache(tmp_path / "cache", Limits())
+    probe(query(), client([reply([])], cache=cache), tmp_path / "sources")
+    result = main(
+        [
+            "data",
+            "announcement-cninfo-probe",
+            "--ts-code",
+            "688598.SH",
+            "--start-date",
+            "20240701",
+            "--end-date",
+            "20240705",
+            "--max-pages",
+            "100",
+            "--cache-root",
+            str(tmp_path / "cache"),
+            "--output-root",
+            str(tmp_path / "sources"),
+        ]
+    )
+    assert result == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["discovery_status"] == "FAILED"
+    validate_announcement_source(Path(output["artifact"]))
+
+
 def pdf(pages=("Synthetic announcement", "Second page")):
     """Generate a tiny native PDF, including Unicode CMap; no downloaded fixtures."""
     chars = sorted(set("".join(pages)))
@@ -187,11 +341,13 @@ def rehash(root, name):
     atomic_write_json(root / "manifest.json", m)
 
 
-@pytest.fixture
-def legacy_source(tmp_path, monkeypatch):
+@pytest.fixture(
+    params=["announcement_source_v1_5692b05.json", "announcement_source_v1_829f2d5.json"]
+)
+def legacy_source(tmp_path, monkeypatch, request):
     """Run exact frozen producer bytes, not a current artifact relabeled as legacy."""
-    frozen = read_json(Path(__file__).parent / "fixtures/announcement_source_v1_5692b05.json")
-    assert frozen["source_commit"] == "5692b05331de047ef937663449ddc08cbaab031f"
+    frozen = read_json(Path(__file__).parent / "fixtures" / request.param)
+    assert frozen["source_commit"] in sources.COMPATIBLE_SOURCE_COMPONENTS
     hashes = {n: digest(s.encode()) for n, s in frozen["source_utf8"].items()}
     assert hashes == frozen["component_sha256"]
     assert payload_hash(hashes) == frozen["implementation_hash"]
@@ -233,7 +389,32 @@ def legacy_source(tmp_path, monkeypatch):
             parent, ["fixture-1"], fake_client([reply(pdf())]), tmp_path / "legacy"
         )
         old_text = text.publish_text(artifact, tmp_path / "legacy_text")
+        frozen["failed_source"] = old.probe(
+            old_query(**query().model_dump()),
+            fake_client([reply(web_org())]),
+            tmp_path / "legacy_failures",
+        )
     return parent, artifact, old_text, frozen
+
+
+def test_v1_failure_stays_frozen_under_v2_validator(legacy_source):
+    _, _, _, frozen = legacy_source
+    path = frozen["failed_source"]
+    before = file_hash(path / "manifest.json")
+    sources.validate_announcement_source(path)
+    summary = read_json(path / "acquisition_summary.json")
+    assert summary["discovery_status"] == "FAILED"
+    assert summary["discovery_issues"] == ["ORG_EXCHANGE_UNVERIFIED"]
+    assert file_hash(path / "manifest.json") == before
+
+
+def test_v1_producer_cannot_masquerade_as_v2(legacy_source):
+    parent, _, _, _ = legacy_source
+    logical = read_json(parent / "manifest.json")["logical_identity"]
+    logical["contract"] = sources.CONTRACT
+    path = reseal_fixture(parent, logical)
+    with pytest.raises(AnnouncementError, match="SOURCE_IMPLEMENTATION_UNSUPPORTED"):
+        sources.validate_announcement_source(path)
 
 
 def test_legacy_real_producer_survives_implementation_change(legacy_source, monkeypatch):
@@ -270,7 +451,7 @@ def reseal_fixture(root, logical):
 
 def test_current_and_pinned_producers_use_distinct_unchanged_business(legacy_source, tmp_path):
     parent, artifact, _, frozen = legacy_source
-    assert sources.SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION == 1
+    assert sources.SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION == 2
     assert (
         sources.COMPATIBLE_SOURCE_COMPONENTS[frozen["source_commit"]] == frozen["component_sha256"]
     )
@@ -280,7 +461,14 @@ def test_current_and_pinned_producers_use_distinct_unchanged_business(legacy_sou
     manifest = sources.validate_announcement_source(current)
     assert manifest["logical_identity"]["implementation_hash"] == sources.implementation_hash()
     assert current.name != artifact.name
-    assert manifest["artifact_hashes"] == read_json(artifact / "manifest.json")["artifact_hashes"]
+    old_frame = pd.read_parquet(artifact / "announcement_catalog.parquet")
+    current_frame = pd.read_parquet(current / "announcement_catalog.parquet")
+    assert current_frame[old_frame.columns].equals(old_frame)
+    assert manifest["logical_identity"]["contract"] == sources.CONTRACT
+    assert (
+        read_json(artifact / "manifest.json")["logical_identity"]["contract"]
+        == sources.LEGACY_CONTRACT
+    )
     assert acquire(parent, ["fixture-1"], client([reply(pdf())]), tmp_path / "current") == current
 
 

@@ -101,5 +101,18 @@ def run_announcement_command(args: argparse.Namespace) -> int:
                 path = probe(query, client, args.output_root)
             else:
                 path = acquire(args.source, args.announcement_id, client, args.output_root)
-    print(json.dumps({"artifact": str(path.resolve())}))
+    result = {"artifact": str(path.resolve())}
+    if args.data_command.startswith("announcement-cninfo-"):
+        summary = read_json(path / "acquisition_summary.json")
+        result.update(
+            discovery_status=summary["discovery_status"],
+            acquisition_status=summary["acquisition_status"],
+        )
+        print(json.dumps(result))
+        complete = summary["discovery_status"] == "COMPLETE" and (
+            args.data_command == "announcement-cninfo-probe"
+            or summary["acquisition_status"] == "COMPLETE"
+        )
+        return 0 if complete else 2
+    print(json.dumps(result))
     return 0

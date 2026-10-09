@@ -21,6 +21,7 @@ from ashare_quant.data.announcement_http import (
 )
 from ashare_quant.data.cninfo_announcement_provider import (
     CATALOG_COLUMNS,
+    CATALOG_COLUMNS_V1,
     AnnouncementQuery,
     CNINFOAnnouncementProvider,
     SearchResult,
@@ -29,15 +30,29 @@ from ashare_quant.data.cninfo_announcement_provider import (
 from ashare_quant.data.economic_event_sources import publish, safe_file, validate_envelope
 
 KIND = "official_announcement_source"
-CONTRACT = "official_announcement_source_v1"
+LEGACY_CONTRACT = "official_announcement_source_v1"
+CONTRACT = "official_announcement_source_v2"
 
-# Read compatibility v1, scoped only to CONTRACT. Entries authorize reconstruction,
+# Read compatibility v2, with pinned entries scoped to LEGACY_CONTRACT.
+# Entries authorize reconstruction,
 # never acceptance of historical derived results. No fixture code is imported.
-SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 1
+SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 2
 COMPATIBLE_SOURCE_COMPONENTS = {
     "5692b05331de047ef937663449ddc08cbaab031f": {
         "announcement_sources.py": (
             "ac1fcfbfd47d131b75d547918bdd16fe3b918588c1828f95b5d2e511677b2478"
+        ),
+        "announcement_http.py": "c3e6173b66509dadcbb90d696d4c9b18ba09d5dd5c474230f2008682f1101f9a",
+        "cninfo_announcement_provider.py": (
+            "7ca9f936d6db591d7a4c1098f117bec00ef16d07a224b82874276da88b78d62f"
+        ),
+        "announcement_documents.py": (
+            "5071c5aa5bdcb4ded36993e40edce7bd3e6c1dbd2c501e9a07477cb4c2b01ef9"
+        ),
+    },
+    "829f2d52d77217753be3ee47b87743da8bb43614": {
+        "announcement_sources.py": (
+            "9edb5617a0577051e640e0612f6ad64e7d47384b5679ac94ae93e7af3e91d2a5"
         ),
         "announcement_http.py": "c3e6173b66509dadcbb90d696d4c9b18ba09d5dd5c474230f2008682f1101f9a",
         "cninfo_announcement_provider.py": (
@@ -64,21 +79,28 @@ def implementation_hash() -> str:
     )
 
 
-def compatible_source_implementation(value: object) -> bool:
-    """Allow only current bytes or explicitly pinned, reviewed v1 producer bytes."""
+def compatible_source_implementation(value: object, contract: str = CONTRACT) -> bool:
+    """Scope historical producers to v1 rules; v2 always uses its current producer."""
     return (
         isinstance(value, str)
         and re.fullmatch(r"[0-9a-f]{64}", value) is not None
         and (
-            value == implementation_hash()
-            or value in {payload_hash(c) for c in COMPATIBLE_SOURCE_COMPONENTS.values()}
+            (contract == CONTRACT and value == implementation_hash())
+            or (
+                contract == LEGACY_CONTRACT
+                and value in {payload_hash(c) for c in COMPATIBLE_SOURCE_COMPONENTS.values()}
+            )
         )
     )
 
 
 def derive(
-    body: dict[str, Any], blobs: dict[str, bytes]
+    body: dict[str, Any],
+    blobs: dict[str, bytes],
+    *,
+    contract: str = CONTRACT,
 ) -> tuple[pd.DataFrame, dict[str, Any], dict[str, bytes]]:
+    check(contract in (CONTRACT, LEGACY_CONTRACT), "ANNOUNCEMENT_SOURCE_CONTRACT")
     query = AnnouncementQuery.model_validate(body["query"])
     policy = Limits.model_validate(body["limits"])
     captures = body["captures"]
@@ -90,7 +112,12 @@ def derive(
     check(set(blobs) == referenced, "RESPONSE_BLOB_SET")
     for capture in captures:
         validate_capture(capture, blobs, policy)
-    progress = analyze_search(query, captures[:search_count], blobs)
+    progress = analyze_search(
+        query,
+        captures[:search_count],
+        blobs,
+        contract_version=1 if contract == LEGACY_CONTRACT else 2,
+    )
     selected = body["download_ids"]
     check(
         isinstance(selected, list) and selected == sorted(set(selected)) and len(selected) <= 30,
@@ -166,7 +193,7 @@ def derive(
         else "FAILED"
     )
     summary = {
-        "contract": CONTRACT,
+        "contract": contract,
         "discovery_status": progress.status,
         "discovery_issues": progress.issues,
         "announcement_count": len(progress.records),
@@ -181,8 +208,9 @@ def derive(
         "empty_result_semantics": "QUERY_RETURNED_ZERO_NOT_GENERAL_ABSENCE_PROOF",
         "category_semantics": "PROVIDER_QUERY_FILTER_NOT_ECONOMIC_CLASSIFICATION",
     }
-    frame = pd.DataFrame(progress.records, columns=CATALOG_COLUMNS).astype(
-        {c: "Int64" if c == "document_size" else "string" for c in CATALOG_COLUMNS}
+    columns = CATALOG_COLUMNS_V1 if contract == LEGACY_CONTRACT else CATALOG_COLUMNS
+    frame = pd.DataFrame(progress.records, columns=columns).astype(
+        {c: "Int64" if c == "document_size" else "string" for c in columns}
     )
     objects = {
         "worklist.json": {
@@ -199,9 +227,14 @@ def derive(
     return frame, objects, files
 
 
-def _identity(body: dict[str, Any], parent_hash: str | None) -> dict[str, Any]:
+def _identity(
+    body: dict[str, Any],
+    parent_hash: str | None,
+    *,
+    contract: str = CONTRACT,
+) -> dict[str, Any]:
     return {
-        "contract": CONTRACT,
+        "contract": contract,
         "implementation_hash": implementation_hash(),
         "acquisition_content_hash": payload_hash(body),
         "parent_manifest_hash": parent_hash,
@@ -265,6 +298,10 @@ def acquire(
     source: Path, announcement_ids: list[str], client: SafeHTTPClient, output_root: Path
 ) -> Path:
     validate_announcement_source(source)
+    check(
+        read_json(source / "acquisition_summary.json")["discovery_status"] == "COMPLETE",
+        "DISCOVERY_INCOMPLETE",
+    )
     original = read_json(source / "responses.json")
     check(original["download_ids"] == [], "ACQUIRE_REQUIRES_DISCOVERY_SOURCE")
     check(original["limits"] == client.policy.model_dump(), "ACQUIRE_LIMITS_MISMATCH")
@@ -303,9 +340,11 @@ def acquire(
 def validate_announcement_source(path: Path) -> dict[str, Any]:
     manifest = validate_envelope(path, KIND)
     logical = manifest["logical_identity"]
-    check(logical.get("contract") == CONTRACT, "ANNOUNCEMENT_SOURCE_CONTRACT")
+    contract = logical.get("contract")
+    check(contract in (CONTRACT, LEGACY_CONTRACT), "ANNOUNCEMENT_SOURCE_CONTRACT")
+    assert isinstance(contract, str)
     producer = logical.get("implementation_hash")
-    check(compatible_source_implementation(producer), "SOURCE_IMPLEMENTATION_UNSUPPORTED")
+    check(compatible_source_implementation(producer, contract), "SOURCE_IMPLEMENTATION_UNSUPPORTED")
     body = read_json(path / "responses.json")
     check(
         set(body) == {"query", "limits", "captures", "search_capture_count", "download_ids"},
@@ -332,13 +371,13 @@ def validate_announcement_source(path: Path) -> dict[str, Any]:
         )
     else:
         check(body["download_ids"] == [], "DOCUMENT_PARENT_REQUIRED")
-    expected = _identity(body, parent_hash)
+    expected = _identity(body, parent_hash, contract=contract)
     check(logical.get("pdf_inspector") == expected["pdf_inspector"], "PDF_INSPECTOR_UNSUPPORTED")
     # Retain producer provenance; all other identity and business fields are current
     # reconstructions, including the exact native inspector environment.
     expected["implementation_hash"] = producer
     check(logical == expected, "ANNOUNCEMENT_SOURCE_IDENTITY")
-    frame, objects, files = derive(body, _blobs(path, body))
+    frame, objects, files = derive(body, _blobs(path, body), contract=contract)
     check(
         set(manifest["artifact_hashes"])
         == set(objects) | set(files) | {"announcement_catalog.parquet"},

@@ -1,4 +1,4 @@
-# Official announcement acquisition v1
+# Official announcement acquisition
 
 This is an independent discovery, acquisition and native-text evidence layer.
 It does not approve economic events, alter security identity mappings, or call
@@ -13,7 +13,7 @@ original response bytes, exact request identities and a completeness result.
 Using a result list alone would discard the evidence needed to distinguish a
 complete search from an interrupted one.
 
-The v1 endpoints are the public website interfaces, without a commercial SLA:
+The endpoints are the public website interfaces, without a commercial SLA:
 
 - HTTPS POST `www.cninfo.com.cn/new/information/topSearch/query`
 - HTTPS POST `www.cninfo.com.cn/new/hisAnnouncement/query`
@@ -23,8 +23,8 @@ Interface references were reviewed in
 [use_cninfo API documentation](https://github.com/rollysys/use_cninfo/blob/main/docs/api_reference.md)
 and the operator's local `cninfo_announcement` implementation. Their observed
 30-row limit and field names are a versioned adapter assumption, not a promise
-that the remote website will remain stable. No live interface certification was
-performed during implementation. No source code from those projects was copied.
+that the remote website will remain stable. A bounded live test on 2026-10-09
+established the v2 adapter rules below. No source code from those projects was copied.
 
 Queries require one exact `NNNNNN.SH/SZ/BJ` code and inclusive real calendar
 dates in `YYYYMMDD`, with optional keyword/category. Query dates are not inferred
@@ -33,14 +33,18 @@ code (for example `category_ndbg_szsh`), not an economic-event classification.
 Keywords are sent unchanged; a returned title lacking the literal keyword is
 retained as `UNVERIFIED_PROVIDER_MATCH`, not silently treated as a literal match.
 
-orgId must be tied to an exact topSearch security code and explicit returned
-`plate`/`exchange` information (or unambiguous SSE `column`). Requested suffixes
-are checked against that response. A `szse` column alone cannot distinguish
-Shenzhen from Beijing. Missing or conflicting identity evidence stops with
-`ORG_EXCHANGE_UNVERIFIED` or an identity error. There is no prefix-based orgId
-guess, orgId substring fallback, full-market fallback or historical alias claim.
-An initial operator-authorized probe may expose missing exchange fields; that
-requires review of the frozen response and an explicit adapter update.
+orgId must match the exact topSearch security code, without prefix or substring
+guesses. Explicit returned `plate`/`exchange` (or unambiguous SSE `column`) can
+establish exchange. Actual topSearch responses can omit those fields; v2 allows
+an exact `category=A股` organization match to remain pending until each returned
+announcement proves exchange via `pageColumn`: SZZB/SZCY/SZSM for SZ and
+SHZB/SHKCB for SH. Announcement security and orgId must also match. Unknown boards,
+contradictory exchanges and ambiguous organizations fail closed. The catalog binds
+`exchange_evidence` and `exchange_response_hash` to the actual proving response.
+There is no code-prefix inference. An empty window with pending exchange remains
+unverified; it cannot establish an exchange or a complete absence observation.
+Beijing queries require explicit org exchange evidence; no unobserved board label
+is guessed by this adapter.
 
 Every announcement must match the proven security/orgId and requested date
 window. `announcementTime` is converted from UTC epoch milliseconds to UTC+08.
@@ -50,7 +54,14 @@ orgId response hash, request ID and raw row hash remain in the catalog.
 
 ## Pagination and completeness
 
-Page size is 1..30 (CLI uses 30). Page number, declared total, total page count,
+Page size is 1..30 (CLI uses 30). V2 accepts the two observed counter conventions:
+`totalpages=floor(totalAnnouncement/pageSize)` and the original ceil convention.
+The declared value must stay consistent across pages. Actual page progression
+is derived from totalAnnouncement and pageSize, never from totalpages alone:
+expected rows and hasMore must match each page, and the final unique ID count must
+equal the declared total. In the live 31-record sample totalpages=1, hasMore=true
+on page 1 and false on page 2; both pages are required. Counts of exactly 30/60
+do not manufacture an additional empty page. Page number, declared total,
 hasMore, actual row count and unique announcement IDs must all reconcile.
 Changing totals, repeated IDs (including identical repeated rows), empty
 intermediate pages, missing counters, foreign securities and changed schemas
@@ -72,7 +83,11 @@ remaining worklist, which retains NOT_ATTEMPTED entries.
 
 The shared publication envelope's `status=COMPLETE` only means that the immutable
 artifact was completely written and validated. Always inspect discovery and
-acquisition status before interpreting source coverage.
+acquisition status before interpreting source coverage. Probe/acquire CLI output
+includes those statuses; exit 0 requires complete discovery (and, for acquire,
+complete selected-document acquisition). Incomplete results are still preserved
+but return exit 2. A validator may correctly return PASS for a faithfully recorded
+FAILED discovery; this does not authorize acquisition from it.
 
 ## HTTPS boundary
 
@@ -98,7 +113,7 @@ entries can be used offline. `--retry-failed` additionally requires
 
 ## Original PDF evidence
 
-`official_announcement_source_v1` freezes request descriptions, each captured
+`official_announcement_source_v2` freezes request descriptions, each captured
 response body, normalized catalog, worklist and document inventory. Original PDF
 bytes are copied to `documents/<sha256>.pdf`. HTTP status, size, `%PDF-` header,
 EOF marker, native parseability, encryption and page-count bounds are checked.
@@ -177,11 +192,12 @@ No retrieval time, host, PID, mtime or absolute path enters logical identity.
 
 ## Source producer compatibility
 
-`SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 1` is a read policy scoped to
-`official_announcement_source_v1`, not an upgrade of old manifests. New publication
-always binds the SHA256-derived identity of the current four source components.
-Validation accepts only that current digest or the following explicitly pinned
-producer from commit `5692b05331de047ef937663449ddc08cbaab031f`:
+`SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 2` dispatches reconstruction by
+the explicit source contract. New publication uses official_announcement_source_v2
+and binds current component bytes. V2 does not accept v1 producer hashes. V1
+reading retains its strict org exchange and ceil-only pagination rules, original
+catalog columns and original summaries; old FAILED results are not upgraded.
+V1 accepts only the following pinned producers, with no manifest modification:
 
 ```text
 implementation: 2044ac3cefd69cf586718e96096c3a6e2a2d9da0f4296b63e41cff71d3e36543
@@ -189,15 +205,20 @@ announcement_sources.py: ac1fcfbfd47d131b75d547918bdd16fe3b918588c1828f95b5d2e51
 announcement_http.py: c3e6173b66509dadcbb90d696d4c9b18ba09d5dd5c474230f2008682f1101f9a
 cninfo_announcement_provider.py: 7ca9f936d6db591d7a4c1098f117bec00ef16d07a224b82874276da88b78d62f
 announcement_documents.py: 5071c5aa5bdcb4ded36993e40edce7bd3e6c1dbd2c501e9a07477cb4c2b01ef9
+
+commit: 829f2d52d77217753be3ee47b87743da8bb43614
+implementation: 42eff8cd0c14d0d014b80a979eec784372f84f0d5a1733b95953adeaee85f4b6
+announcement_sources.py: 9edb5617a0577051e640e0612f6ad64e7d47384b5679ac94ae93e7af3e91d2a5
+other three component hashes: unchanged from the preceding producer
 ```
 
 The aggregate uses the existing canonical `payload_hash(component_sha256)` rule.
-The test-only JSON fixture freezes these exact UTF-8 source bytes and provenance.
+The test-only JSON fixtures freeze these exact UTF-8 source bytes and provenance.
 Tests execute the old producer in a temporary module context to publish synthetic
 discovery, acquisition and text artifacts, then validate them with current code.
-Production never loads or executes the fixture. The reviewed change only alters
-producer compatibility checks; HTTP, normalization, pagination and PDF algorithms
-are unchanged. Future entries require explicit source review and regression proof;
+Production never loads or executes those fixtures. V1 and v2 use explicitly
+different org/pagination rules. HTTP and PDF processing remain unchanged.
+Future compatibility entries require explicit source review and regression proof;
 unknown or malformed hashes fail `SOURCE_IMPLEMENTATION_UNSUPPORTED`.
 
 Accepting a producer digest permits reconstruction, not automatic acceptance of
@@ -217,7 +238,7 @@ and mismatches fail `PARSER_ENVIRONMENT_UNSUPPORTED`. A text artifact can refere
 a compatible legacy source without changing its own identity. No validator uses
 the network, rewrites old children, or silently substitutes newer parser results.
 
-## Operator workflow (not executed during implementation)
+## Operator workflow
 
 After code review and a separate explicit authorization for one small live query:
 

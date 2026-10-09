@@ -36,7 +36,10 @@ EXCHANGES = {
     "bse": "BJ",
     "BJ": "BJ",
 }
-CATALOG_COLUMNS = [
+# Exact CNINFO board labels observed in announcement responses. Unknown boards
+# cannot establish exchange identity; neither code nor orgId prefixes are evidence.
+BOARD_EXCHANGES = {"SZZB": "SZ", "SZCY": "SZ", "SZSM": "SZ", "SHZB": "SH", "SHKCB": "SH"}
+CATALOG_COLUMNS_V1 = [
     "provider",
     "provider_request_id",
     "source_sec_code",
@@ -61,6 +64,7 @@ CATALOG_COLUMNS = [
     "fetch_status",
     "extraction_status",
 ]
+CATALOG_COLUMNS = CATALOG_COLUMNS_V1 + ["exchange_evidence", "exchange_response_hash"]
 
 
 class AnnouncementQuery(BaseModel):
@@ -116,31 +120,42 @@ def title_text(text: str) -> str:
     return "".join(parser.parts).strip()
 
 
-def org_identity(query: AnnouncementQuery, response: dict[str, Any] | list[Any]) -> str:
+def org_identity(
+    query: AnnouncementQuery,
+    response: dict[str, Any] | list[Any],
+    *,
+    allow_pending_exchange: bool = False,
+) -> str:
     rows = response.get("stockList") if isinstance(response, dict) else response
     check(isinstance(rows, list), "ORG_RESPONSE_SCHEMA")
     assert isinstance(rows, list)
-    matches: set[tuple[str, str]] = set()
+    matches: set[tuple[str, str | None]] = set()
     for row in rows:
         check(isinstance(row, dict), "ORG_RESPONSE_SCHEMA")
         codes = {str(row[k]) for k in ("code", "secCode", "stockCode") if row.get(k)}
         if query.ts_code[:6] not in codes:
             continue
         check(codes == {query.ts_code[:6]}, "ORG_CODE_CONFLICT")
+        if allow_pending_exchange:
+            check(
+                all(row.get(k) is None or str(row[k]) in EXCHANGES for k in ("plate", "exchange")),
+                "ORG_EXCHANGE_UNVERIFIED",
+            )
         exchanges = {
             EXCHANGES[str(row[k])] for k in ("plate", "exchange") if str(row.get(k)) in EXCHANGES
         }
         if not exchanges and row.get("column") == "sse":
             exchanges = {"SH"}
-        check(len(exchanges) == 1, "ORG_EXCHANGE_UNVERIFIED")
+        pending = not exchanges and allow_pending_exchange and row.get("category") == "A股"
+        check(len(exchanges) == 1 or pending, "ORG_EXCHANGE_UNVERIFIED")
         if row.get("column") is not None:
             expected_column = "sse" if exchanges == {"SH"} else "szse"
             check(row["column"] == expected_column, "ORG_COLUMN_CONFLICT")
         check(isinstance(row.get("orgId"), str) and bool(row["orgId"].strip()), "ORG_ID_MISSING")
-        matches.add((row["orgId"], next(iter(exchanges))))
+        matches.add((row["orgId"], next(iter(exchanges)) if exchanges else None))
     check(len(matches) == 1, "ORG_NOT_FOUND_OR_AMBIGUOUS")
     org, exchange = next(iter(matches))
-    check(exchange == query.ts_code[-2:], "ORG_EXCHANGE_MISMATCH")
+    check(exchange is None or exchange == query.ts_code[-2:], "ORG_EXCHANGE_MISMATCH")
     return org
 
 
@@ -171,6 +186,9 @@ def announcement_record(
     org: str,
     capture: dict[str, Any],
     org_hash: str,
+    *,
+    contract_version: int = 2,
+    org_exchange_verified: bool = True,
 ) -> dict[str, Any]:
     check(
         row.get("secCode") == query.ts_code[:6] and row.get("orgId") == org,
@@ -190,7 +208,7 @@ def announcement_record(
     url = official_url(urljoin(STATIC_URL, row["adjunctUrl"]))
     check(url.startswith(STATIC_URL), "ANNOUNCEMENT_DOCUMENT_HOST")
     title = title_text(row["announcementTitle"])
-    return {
+    record = {
         "provider": PROVIDER,
         "provider_request_id": capture["request_id"],
         "source_sec_code": row["secCode"],
@@ -219,12 +237,33 @@ def announcement_record(
         "fetch_status": "NOT_ATTEMPTED",
         "extraction_status": "NOT_ATTEMPTED",
     }
+    if contract_version == 2:
+        board = row.get("pageColumn")
+        if board is not None:
+            check(
+                isinstance(board, str) and board in BOARD_EXCHANGES,
+                "ANNOUNCEMENT_BOARD_UNSUPPORTED",
+            )
+            check(BOARD_EXCHANGES[board] == query.ts_code[-2:], "ANNOUNCEMENT_EXCHANGE_MISMATCH")
+        check(org_exchange_verified or board in BOARD_EXCHANGES, "ORG_EXCHANGE_UNVERIFIED")
+        record["exchange_evidence"] = (
+            "ORG_RESPONSE_EXCHANGE" if org_exchange_verified else "ANNOUNCEMENT_PAGE_COLUMN"
+        )
+        record["exchange_response_hash"] = (
+            org_hash if org_exchange_verified else capture["attempts"][-1]["body_sha256"]
+        )
+    return record
 
 
 def analyze_search(
-    query: AnnouncementQuery, captures: list[dict[str, Any]], blobs: dict[str, bytes]
+    query: AnnouncementQuery,
+    captures: list[dict[str, Any]],
+    blobs: dict[str, bytes],
+    *,
+    contract_version: int = 2,
 ) -> SearchProgress:
     """One shared state machine for acquisition and independent business reconstruction."""
+    check(contract_version in (1, 2), "DISCOVERY_CONTRACT_UNSUPPORTED")
     records: list[dict[str, Any]] = []
     initial = request_spec(TOP_SEARCH, {"keyWord": query.ts_code[:6], "maxNum": "10"})
     if not captures:
@@ -240,12 +279,21 @@ def analyze_search(
             None,
         )
     try:
-        org = org_identity(query, response_json(captures[0], blobs))
+        org_response = response_json(captures[0], blobs)
+        org = org_identity(query, org_response, allow_pending_exchange=contract_version == 2)
+        org_exchange_verified = True
+        if contract_version == 2:
+            try:
+                org_identity(query, org_response)
+            except AnnouncementError as error:
+                check(str(error) == "ORG_EXCHANGE_UNVERIFIED", "ORG_IDENTITY_CONFLICT")
+                org_exchange_verified = False
     except AnnouncementError as error:
         check(len(captures) == 1, "EXTRA_SEARCH_CAPTURE")
         return SearchProgress(records, "FAILED", [str(error)], None)
     org_hash = captures[0]["attempts"][-1]["body_sha256"]
     total: int | None = None
+    declared_pages: int | None = None
     seen: set[str] = set()
     for page, capture in enumerate(captures[1:], 1):
         check(
@@ -277,11 +325,23 @@ def analyze_search(
                     "PAGE_COUNTER_SCHEMA",
                 )
                 assert isinstance(count, int) and isinstance(pages, int)
-                check(
-                    pages == (count + query.page_size - 1) // query.page_size,
-                    "PAGE_TOTAL_INCONSISTENT",
+                required_pages = (count + query.page_size - 1) // query.page_size
+                allowed_pages = (
+                    {required_pages}
+                    if contract_version == 1
+                    else {
+                        required_pages,
+                        count // query.page_size,
+                    }
                 )
+                check(pages in allowed_pages, "PAGE_TOTAL_INCONSISTENT")
                 check(total is None or total == count, "PAGINATION_TOTAL_CHANGED")
+                if contract_version == 2:
+                    check(
+                        declared_pages is None or declared_pages == pages,
+                        "PAGINATION_PAGES_CHANGED",
+                    )
+                    declared_pages = pages
                 total = count
                 items = body.get("announcements")
                 if count == 0 and items is None:
@@ -290,17 +350,29 @@ def analyze_search(
                 assert isinstance(items, list)
                 expected = min(query.page_size, max(0, count - (page - 1) * query.page_size))
                 check(
-                    len(items) == expected and more == (page < pages), "PAGE_COVERAGE_INCONSISTENT"
+                    len(items) == expected
+                    and more == (page < (pages if contract_version == 1 else required_pages)),
+                    "PAGE_COVERAGE_INCONSISTENT",
                 )
                 page_rows = []
                 for raw in items:
                     check(isinstance(raw, dict), "ANNOUNCEMENT_ROW_SCHEMA")
-                    record = announcement_record(raw, query, org, capture, org_hash)
+                    record = announcement_record(
+                        raw,
+                        query,
+                        org,
+                        capture,
+                        org_hash,
+                        contract_version=contract_version,
+                        org_exchange_verified=org_exchange_verified,
+                    )
                     check(record["announcement_id"] not in seen, "DUPLICATE_ANNOUNCEMENT_ID")
                     seen.add(record["announcement_id"])
                     page_rows.append(record)
                 records.extend(page_rows)
                 if not more:
+                    if contract_version == 2:
+                        check(org_exchange_verified or bool(records), "ORG_EXCHANGE_UNVERIFIED")
                     check(len(records) == count, "ANNOUNCEMENT_TOTAL_MISMATCH")
                     check(len(captures) == page + 1, "EXTRA_SEARCH_CAPTURE")
                     return SearchProgress(records, "COMPLETE", [], None)
