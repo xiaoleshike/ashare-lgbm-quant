@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,24 @@ from ashare_quant.data.economic_event_sources import publish, safe_file, validat
 KIND = "official_announcement_source"
 CONTRACT = "official_announcement_source_v1"
 
+# Read compatibility v1, scoped only to CONTRACT. Entries authorize reconstruction,
+# never acceptance of historical derived results. No fixture code is imported.
+SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 1
+COMPATIBLE_SOURCE_COMPONENTS = {
+    "5692b05331de047ef937663449ddc08cbaab031f": {
+        "announcement_sources.py": (
+            "ac1fcfbfd47d131b75d547918bdd16fe3b918588c1828f95b5d2e511677b2478"
+        ),
+        "announcement_http.py": "c3e6173b66509dadcbb90d696d4c9b18ba09d5dd5c474230f2008682f1101f9a",
+        "cninfo_announcement_provider.py": (
+            "7ca9f936d6db591d7a4c1098f117bec00ef16d07a224b82874276da88b78d62f"
+        ),
+        "announcement_documents.py": (
+            "5071c5aa5bdcb4ded36993e40edce7bd3e6c1dbd2c501e9a07477cb4c2b01ef9"
+        ),
+    },
+}
+
 
 def implementation_hash() -> str:
     return payload_hash(
@@ -42,6 +61,18 @@ def implementation_hash() -> str:
                 "announcement_documents.py",
             )
         }
+    )
+
+
+def compatible_source_implementation(value: object) -> bool:
+    """Allow only current bytes or explicitly pinned, reviewed v1 producer bytes."""
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+        and (
+            value == implementation_hash()
+            or value in {payload_hash(c) for c in COMPATIBLE_SOURCE_COMPONENTS.values()}
+        )
     )
 
 
@@ -271,6 +302,10 @@ def acquire(
 
 def validate_announcement_source(path: Path) -> dict[str, Any]:
     manifest = validate_envelope(path, KIND)
+    logical = manifest["logical_identity"]
+    check(logical.get("contract") == CONTRACT, "ANNOUNCEMENT_SOURCE_CONTRACT")
+    producer = logical.get("implementation_hash")
+    check(compatible_source_implementation(producer), "SOURCE_IMPLEMENTATION_UNSUPPORTED")
     body = read_json(path / "responses.json")
     check(
         set(body) == {"query", "limits", "captures", "search_capture_count", "download_ids"},
@@ -297,9 +332,12 @@ def validate_announcement_source(path: Path) -> dict[str, Any]:
         )
     else:
         check(body["download_ids"] == [], "DOCUMENT_PARENT_REQUIRED")
-    check(
-        manifest["logical_identity"] == _identity(body, parent_hash), "ANNOUNCEMENT_SOURCE_IDENTITY"
-    )
+    expected = _identity(body, parent_hash)
+    check(logical.get("pdf_inspector") == expected["pdf_inspector"], "PDF_INSPECTOR_UNSUPPORTED")
+    # Retain producer provenance; all other identity and business fields are current
+    # reconstructions, including the exact native inspector environment.
+    expected["implementation_hash"] = producer
+    check(logical == expected, "ANNOUNCEMENT_SOURCE_IDENTITY")
     frame, objects, files = derive(body, _blobs(path, body))
     check(
         set(manifest["artifact_hashes"])

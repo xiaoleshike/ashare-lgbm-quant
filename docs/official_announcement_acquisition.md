@@ -175,6 +175,48 @@ implementation and PDF inspector identity must be supported; unknown producer
 changes cannot silently validate old artifacts under different semantics.
 No retrieval time, host, PID, mtime or absolute path enters logical identity.
 
+## Source producer compatibility
+
+`SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION = 1` is a read policy scoped to
+`official_announcement_source_v1`, not an upgrade of old manifests. New publication
+always binds the SHA256-derived identity of the current four source components.
+Validation accepts only that current digest or the following explicitly pinned
+producer from commit `5692b05331de047ef937663449ddc08cbaab031f`:
+
+```text
+implementation: 2044ac3cefd69cf586718e96096c3a6e2a2d9da0f4296b63e41cff71d3e36543
+announcement_sources.py: ac1fcfbfd47d131b75d547918bdd16fe3b918588c1828f95b5d2e511677b2478
+announcement_http.py: c3e6173b66509dadcbb90d696d4c9b18ba09d5dd5c474230f2008682f1101f9a
+cninfo_announcement_provider.py: 7ca9f936d6db591d7a4c1098f117bec00ef16d07a224b82874276da88b78d62f
+announcement_documents.py: 5071c5aa5bdcb4ded36993e40edce7bd3e6c1dbd2c501e9a07477cb4c2b01ef9
+```
+
+The aggregate uses the existing canonical `payload_hash(component_sha256)` rule.
+The test-only JSON fixture freezes these exact UTF-8 source bytes and provenance.
+Tests execute the old producer in a temporary module context to publish synthetic
+discovery, acquisition and text artifacts, then validate them with current code.
+Production never loads or executes the fixture. The reviewed change only alters
+producer compatibility checks; HTTP, normalization, pagination and PDF algorithms
+are unchanged. Future entries require explicit source review and regression proof;
+unknown or malformed hashes fail `SOURCE_IMPLEMENTATION_UNSUPPORTED`.
+
+Accepting a producer digest permits reconstruction, not automatic acceptance of
+its historical results. The original producer hash is retained, and every other
+identity field must equal the current reconstruction. Recursive parent validation,
+request/capture hashes, orgId/security, pagination, metadata, document selection,
+GET identity, PDF bytes/inspection, catalog, inventory, summary and child hashes
+remain mandatory. Even a repaired child hash cannot bypass reconstruction. A
+different current business result fails closed; it requires a separate semantic
+compatibility review, not editing the frozen artifact or broadening this list.
+
+PDF inspector identity is a separate gate: a differing recorded/current Poppler
+identity fails `PDF_INSPECTOR_UNSUPPORTED`, even if the producer is compatible.
+Changed inspection output still fails business reconstruction. Text extraction
+has no new compatibility allowance: its exact parser identity remains required
+and mismatches fail `PARSER_ENVIRONMENT_UNSUPPORTED`. A text artifact can reference
+a compatible legacy source without changing its own identity. No validator uses
+the network, rewrites old children, or silently substitutes newer parser results.
+
 ## Operator workflow (not executed during implementation)
 
 After code review and a separate explicit authorization for one small live query:

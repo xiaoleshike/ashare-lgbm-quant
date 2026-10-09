@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import socket
 import sys
@@ -12,9 +13,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from ashare_quant.backtest.continuous_source import file_hash, read_json
+from ashare_quant.backtest.continuous_source import file_hash, payload_hash, read_json
 from ashare_quant.cli import main
 from ashare_quant.data import announcement_http as http
+from ashare_quant.data import announcement_sources as sources
 from ashare_quant.data import announcement_text_extraction as text
 from ashare_quant.data.announcement_documents import inspect_pdf, run_native
 from ashare_quant.data.announcement_http import (
@@ -183,6 +185,247 @@ def rehash(root, name):
     m = read_json(root / "manifest.json")
     m["artifact_hashes"][name] = file_hash(root / name)
     atomic_write_json(root / "manifest.json", m)
+
+
+@pytest.fixture
+def legacy_source(tmp_path, monkeypatch):
+    """Run exact frozen producer bytes, not a current artifact relabeled as legacy."""
+    frozen = read_json(Path(__file__).parent / "fixtures/announcement_source_v1_5692b05.json")
+    assert frozen["source_commit"] == "5692b05331de047ef937663449ddc08cbaab031f"
+    hashes = {n: digest(s.encode()) for n, s in frozen["source_utf8"].items()}
+    assert hashes == frozen["component_sha256"]
+    assert payload_hash(hashes) == frozen["implementation_hash"]
+    directory = tmp_path / "frozen_producer"
+    directory.mkdir()
+    for name, source in frozen["source_utf8"].items():
+        (directory / name).write_bytes(source.encode())
+    with monkeypatch.context() as patch:
+        modules = {}
+        for name in (
+            "announcement_http",
+            "announcement_documents",
+            "cninfo_announcement_provider",
+            "announcement_sources",
+        ):
+            qualified = "ashare_quant.data." + name
+            spec = importlib.util.spec_from_file_location(qualified, directory / (name + ".py"))
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            patch.setitem(sys.modules, qualified, module)
+            spec.loader.exec_module(module)
+            modules[name] = module
+        old = modules["announcement_sources"]
+        assert old.implementation_hash() == frozen["implementation_hash"]
+        old_http = modules["announcement_http"]
+        old_query = modules["cninfo_announcement_provider"].AnnouncementQuery
+
+        def fake_client(replies):
+            return old_http.SafeHTTPClient(
+                authorized=True, transport=FakeTransport(replies), sleep=lambda _: None
+            )
+
+        parent = old.probe(
+            old_query(**query().model_dump()),
+            fake_client([reply(org()), reply(page([announcement()]))]),
+            tmp_path / "legacy",
+        )
+        artifact = old.acquire(
+            parent, ["fixture-1"], fake_client([reply(pdf())]), tmp_path / "legacy"
+        )
+        old_text = text.publish_text(artifact, tmp_path / "legacy_text")
+    return parent, artifact, old_text, frozen
+
+
+def test_legacy_real_producer_survives_implementation_change(legacy_source, monkeypatch):
+    parent, artifact, old_text, frozen = legacy_source
+    before = {
+        p: file_hash(p)
+        for root in (parent, artifact, old_text)
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+    # A nonsemantic source-byte change exercises the defect even before the fix.
+    components = dict(frozen["component_sha256"])
+    components["announcement_sources.py"] = digest(
+        (frozen["source_utf8"]["announcement_sources.py"] + "\n").encode()
+    )
+    monkeypatch.setattr(sources, "implementation_hash", lambda: payload_hash(components))
+    manifest = sources.validate_announcement_source(artifact)
+    assert manifest["logical_identity"]["implementation_hash"] == frozen["implementation_hash"]
+    text.validate_text_artifact(old_text)
+    assert all(file_hash(p) == h for p, h in before.items())
+
+
+def reseal_fixture(root, logical):
+    """Adversarial fixture: repair envelope identity, never a production operation."""
+    manifest = read_json(root / "manifest.json")
+    manifest["logical_identity"] = logical
+    manifest["artifact_id"] = sources.KIND + "_" + payload_hash(logical)[:24]
+    atomic_write_json(root / "manifest.json", manifest)
+    destination = root.with_name(manifest["artifact_id"])
+    if destination != root:
+        root.rename(destination)
+    return destination
+
+
+def test_current_and_pinned_producers_use_distinct_unchanged_business(legacy_source, tmp_path):
+    parent, artifact, _, frozen = legacy_source
+    assert sources.SOURCE_IMPLEMENTATION_COMPATIBILITY_VERSION == 1
+    assert (
+        sources.COMPATIBLE_SOURCE_COMPONENTS[frozen["source_commit"]] == frozen["component_sha256"]
+    )
+    assert sources.implementation_hash() != frozen["implementation_hash"]
+    assert sources.validate_announcement_source(artifact)["status"] == "COMPLETE"
+    current = acquire(parent, ["fixture-1"], client([reply(pdf())]), tmp_path / "current")
+    manifest = sources.validate_announcement_source(current)
+    assert manifest["logical_identity"]["implementation_hash"] == sources.implementation_hash()
+    assert current.name != artifact.name
+    assert manifest["artifact_hashes"] == read_json(artifact / "manifest.json")["artifact_hashes"]
+    assert acquire(parent, ["fixture-1"], client([reply(pdf())]), tmp_path / "current") == current
+
+
+@pytest.mark.parametrize("fingerprint", ["f" * 64, "bad", "A" * 64, "0" * 63, None, 42, []])
+def test_unsupported_source_producer_rejected(legacy_source, fingerprint):
+    parent, _, _, _ = legacy_source
+    logical = read_json(parent / "manifest.json")["logical_identity"]
+    logical["implementation_hash"] = fingerprint
+    path = reseal_fixture(parent, logical)
+    with pytest.raises(AnnouncementError, match="SOURCE_IMPLEMENTATION_UNSUPPORTED"):
+        sources.validate_announcement_source(path)
+
+
+@pytest.mark.parametrize(
+    "child",
+    [
+        "announcement_catalog.parquet",
+        "document_inventory.json",
+        "acquisition_summary.json",
+        "requests.json",
+    ],
+)
+def test_legacy_rehashed_children_still_reconstructed(legacy_source, child):
+    _, artifact, _, _ = legacy_source
+    if child.endswith(".parquet"):
+        frame = pd.read_parquet(artifact / child)
+        frame.loc[0, "announcement_title"] = "false metadata"
+        frame.to_parquet(artifact / child, index=False)
+    else:
+        obj = read_json(artifact / child)
+        obj["invented"] = True
+        atomic_write_json(artifact / child, obj)
+    rehash(artifact, child)
+    with pytest.raises(AnnouncementError, match="RECONSTRUCTION"):
+        sources.validate_announcement_source(artifact)
+
+
+@pytest.mark.parametrize("target", ["parent", "response", "pdf"])
+def test_legacy_original_bytes_and_parent_remain_checked(legacy_source, target):
+    parent, artifact, _, _ = legacy_source
+    if target == "parent":
+        child = parent / "acquisition_summary.json"
+    else:
+        child = next((artifact / ("responses" if target == "response" else "documents")).iterdir())
+    child.write_bytes(b"tampered")
+    with pytest.raises(DataValidationError, match="CHILD_HASH_MISMATCH"):
+        sources.validate_announcement_source(artifact)
+    if target == "pdf":
+        rehash(artifact, str(child.relative_to(artifact)))
+        with pytest.raises(AnnouncementError, match="DOCUMENT_RECONSTRUCTION"):
+            sources.validate_announcement_source(artifact)
+    elif target == "response":
+        rehash(artifact, str(child.relative_to(artifact)))
+        with pytest.raises(AnnouncementError, match="RESPONSE_HASH"):
+            sources.validate_announcement_source(artifact)
+
+
+@pytest.mark.parametrize("mutation", ["pagination", "security", "org", "title", "capture"])
+def test_legacy_resealed_response_requires_business_reconstruction(legacy_source, mutation):
+    parent, _, _, _ = legacy_source
+    body = read_json(parent / "responses.json")
+    if mutation == "capture":
+        body["captures"][1]["request_id"] = "0" * 64
+    else:
+        index = 0 if mutation == "org" else 1
+        attempt = body["captures"][index]["attempts"][-1]
+        old_name = "responses/" + attempt["body_sha256"] + ".bin"
+        raw = json.loads((parent / old_name).read_bytes())
+        if mutation == "org":
+            raw[0]["orgId"] = "different-org"
+        elif mutation == "pagination":
+            raw["totalAnnouncement"] = 2
+        elif mutation == "security":
+            raw["announcements"][0]["secCode"] = "999999"
+        else:
+            raw["announcements"][0]["announcementTitle"] = "different title"
+        data = json.dumps(raw).encode()
+        attempt.update(body_sha256=digest(data), size=len(data))
+        new_name = "responses/" + digest(data) + ".bin"
+        (parent / new_name).write_bytes(data)
+        (parent / old_name).unlink()
+        manifest = read_json(parent / "manifest.json")
+        del manifest["artifact_hashes"][old_name]
+        manifest["artifact_hashes"][new_name] = digest(data)
+        atomic_write_json(parent / "manifest.json", manifest)
+    atomic_write_json(parent / "responses.json", body)
+    rehash(parent, "responses.json")
+    logical = read_json(parent / "manifest.json")["logical_identity"]
+    logical["acquisition_content_hash"] = payload_hash(body)
+    parent = reseal_fixture(parent, logical)
+    with pytest.raises(AnnouncementError, match="RECONSTRUCTION|REQUEST_MISMATCH|REQUEST_ID"):
+        sources.validate_announcement_source(parent)
+
+
+def test_legacy_download_request_not_accepted_by_compatibility(legacy_source):
+    _, artifact, _, _ = legacy_source
+    body = read_json(artifact / "responses.json")
+    capture = body["captures"][-1]
+    capture["request"] = request_spec("https://static.cninfo.com.cn/unrelated.pdf")
+    capture["request_id"] = payload_hash(capture["request"])
+    capture["attempts"][-1]["url"] = capture["request"]["url"]
+    atomic_write_json(artifact / "responses.json", body)
+    rehash(artifact, "responses.json")
+    logical = read_json(artifact / "manifest.json")["logical_identity"]
+    logical["acquisition_content_hash"] = payload_hash(body)
+    artifact = reseal_fixture(artifact, logical)
+    with pytest.raises(AnnouncementError, match="DOCUMENT_REQUEST_IDENTITY"):
+        sources.validate_announcement_source(artifact)
+
+
+def test_legacy_different_business_results_fail_closed(legacy_source, monkeypatch):
+    _, artifact, _, _ = legacy_source
+    original = sources.inspect_pdf
+
+    def changed(data):
+        result = original(data)
+        result["total_pages"] += 1
+        return result
+
+    monkeypatch.setattr(sources, "inspect_pdf", changed)
+    with pytest.raises(AnnouncementError, match="BUSINESS_RECONSTRUCTION"):
+        sources.validate_announcement_source(artifact)
+
+
+def test_source_compatibility_does_not_authorize_new_native_tools(legacy_source, monkeypatch):
+    _, artifact, old_text, _ = legacy_source
+    original = sources.tool_identity
+    monkeypatch.setattr(sources, "tool_identity", lambda n: original(n) | {"version": "different"})
+    with pytest.raises(AnnouncementError, match="PDF_INSPECTOR_UNSUPPORTED"):
+        sources.validate_announcement_source(artifact)
+    monkeypatch.setattr(sources, "tool_identity", original)
+    parser = text.parser_identity()
+    parser["tools"][1]["version"] = "different"
+    monkeypatch.setattr(text, "parser_identity", lambda: parser)
+    with pytest.raises(AnnouncementError, match="PARSER_ENVIRONMENT_UNSUPPORTED"):
+        text.validate_text_artifact(old_text)
+
+
+def test_legacy_resealed_inspector_identity_rejected(legacy_source):
+    _, artifact, _, _ = legacy_source
+    logical = read_json(artifact / "manifest.json")["logical_identity"]
+    logical["pdf_inspector"]["version"] = "untrusted-version"
+    artifact = reseal_fixture(artifact, logical)
+    with pytest.raises(AnnouncementError, match="PDF_INSPECTOR_UNSUPPORTED"):
+        sources.validate_announcement_source(artifact)
 
 
 @pytest.mark.parametrize(
