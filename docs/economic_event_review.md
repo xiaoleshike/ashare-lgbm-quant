@@ -61,6 +61,49 @@ supplements, fill only the decisions actually reviewed using the published templ
 and compile to the same output root. Never edit a published artifact. Changed
 decisions produce a new content identity; unchanged inputs validate and reuse.
 
+## Share-field qualification v1
+
+`economic_event_share_field_qualification_v1` is an independent qualification layer
+over an exact, recursively validated **proposal-only** v2 supplement artifact. It
+does not change or approve that ordinary supplement. V1 accepts only
+`stk_bo_rate` and `stk_co_rate` claims where the original provider field is null.
+The source event, candidate, complete raw-row hash set, original supplement hash,
+parent manifest hash, document SHA256/ID, identity citations, claim page/quote,
+field, value and explicit unit basis are bound into each `field_claim_hash`.
+Original PDFs and claims are reread from the parent. Native citation matching is
+a locator check; the human reviewer remains responsible for interpreting the
+clause. No zero is inferred from `stk_div`, `adj_factor` or a provider null.
+
+The input JSON contains `contract`, `parent_artifact_id`, `parent_manifest_hash`,
+`supplement_hash` and `decisions`. `decisions=[]` produces one pending proposal
+and one blank template entry per share claim. A later **separate human decision**
+may bind a single `field_claim_hash` to `APPROVE_FIELD_AS_EVIDENCE`,
+`REQUIRE_OFFICIAL_DOCUMENT` or `REJECT_FIELD_CLAIM`, plus a nonblank reviewer and
+reason. Timestamp is non-logical metadata. Claim, document or parent changes
+invalidate the old decision hash. Nonapproval decisions create no reviewed row.
+
+`reviewed_field_qualifications.parquet` has **one row per approved field**, with
+columns `field_claim_hash`, `review_event_id`, `candidate_group_id`,
+`canonical_ts_code`, `source_row_hashes`, `source_supplement_hash`,
+`parent_manifest_hash`, `field`, `approved_value`, `basis`, `disclosed_value`,
+`document_sha256`, `document_id`, `page`, `quote`, `review_decision_hash`,
+`evidence_status`, `qualification_only` and `execution_authorized`. It never
+contains `cash_div`, `cash_div_tax` or a whole MATERIAL-term action. Those provider
+values remain in the immutable parent, **not** in reviewed field results. Even two
+approved share fields leave `economic_event_evidence_status=BLOCKED`, tax execution
+unresolved, `qualification_only=true` and `execution_authorized=false`.
+
+CLI: `ashare-quant data economic-review-share-field-qualification --parent PARENT
+--parent-manifest-sha256 SHA256 --fields INPUT.json --output-root ROOT`; validate
+with `ashare-quant data economic-review-share-field-qualification-validate
+--artifact ARTIFACT`. These are contract syntax, not authorization to publish a
+real approval. Publication is staged, manifest-last and immutable. Validation
+recursively rechecks the parent, rederives the field claims and every derived
+child. New publications bind the current source-content implementation hash;
+unknown producer hashes fail closed. No historical producer is recognized in v1.
+A future compatible hash requires explicit source-byte review and regression
+fixtures; semantic incompatibility requires a new version, never manifest edits.
+
 ## Conflicting provider observations: official event reconciliation
 
 `economic_event_revision_resolution_v1` is a separate qualification layer over an

@@ -11,6 +11,10 @@ from ashare_quant.data.economic_event_revision_resolution import (
     compile_revision_resolutions,
     validate_revision_resolution_artifact,
 )
+from ashare_quant.data.economic_event_share_field_qualification import (
+    compile_share_field_qualification,
+    validate_share_field_qualification,
+)
 from ashare_quant.data.economic_event_supplements import compile_supplements, validate_supplements
 from ashare_quant.data.economic_review_artifacts import (
     compile_review,
@@ -29,6 +33,8 @@ COMMANDS = {
     "economic-review-supplement-validate",
     "economic-review-revision-resolution",
     "economic-review-revision-resolution-validate",
+    "economic-review-share-field-qualification",
+    "economic-review-share-field-qualification-validate",
 }
 
 
@@ -41,6 +47,7 @@ def add_review_parsers(commands: argparse._SubParsersAction[argparse.ArgumentPar
             "economic-review-validate",
             "economic-review-supplement-validate",
             "economic-review-revision-resolution-validate",
+            "economic-review-share-field-qualification-validate",
         }:
             p.add_argument("--artifact", type=Path, required=True)
             continue
@@ -56,6 +63,12 @@ def add_review_parsers(commands: argparse._SubParsersAction[argparse.ArgumentPar
             p.add_argument("--resolutions", type=Path, required=True)
             p.add_argument("--output-root", type=Path, required=True)
             continue
+        if name == "economic-review-share-field-qualification":
+            p.add_argument("--parent", type=Path, required=True)
+            p.add_argument("--parent-manifest-sha256", required=True)
+            p.add_argument("--fields", type=Path, required=True)
+            p.add_argument("--output-root", type=Path, required=True)
+            continue
         p.add_argument("--initial-evidence", type=Path, required=True)
         p.add_argument("--initial-manifest-sha256", required=True)
         p.add_argument("--provider-source", type=Path, required=True)
@@ -68,6 +81,16 @@ def add_review_parsers(commands: argparse._SubParsersAction[argparse.ArgumentPar
 
 
 def run_review_command(args: argparse.Namespace, settings: AppSettings) -> int:
+    if args.data_command == "economic-review-share-field-qualification-validate":
+        manifest = validate_share_field_qualification(args.artifact)
+        print(json.dumps({"artifact_id": manifest["artifact_id"], "validation": "PASS"}))
+        return 0
+    if args.data_command == "economic-review-share-field-qualification":
+        path = compile_share_field_qualification(
+            args.parent, args.parent_manifest_sha256, args.fields, args.output_root
+        )
+        print(json.dumps({"artifact": str(path.resolve())}))
+        return 0
     if args.data_command == "economic-review-revision-resolution-validate":
         manifest = validate_revision_resolution_artifact(args.artifact)
         print(json.dumps({"artifact_id": manifest["artifact_id"], "validation": "PASS"}))
