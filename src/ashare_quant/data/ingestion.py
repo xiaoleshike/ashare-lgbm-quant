@@ -18,10 +18,12 @@ from ashare_quant.data.exceptions import (
     TusharePermissionError,
     TushareRequestError,
 )
+from ashare_quant.data.share_float_observations import capture_observations, merge_observations
 from ashare_quant.data.storage import ParquetDataStore
 from ashare_quant.data.tushare_client import TushareClient, TushareClientConfig
 
 LOGGER = logging.getLogger(__name__)
+MAX_ANNOUNCEMENT_PAGES = 100
 type DataFrame = pd.DataFrame
 
 
@@ -539,6 +541,13 @@ class DataIngestionService:
             for status in self._settings.data.stock_list_statuses:
                 yield self._query(spec, list_status=status, **params)
             return
+        if spec.fetch_mode == "ann_date":
+            # Announcement dates include non-trading days; unlock dates can be in the future.
+            for ann_date in pd.date_range(start_date, end_date, freq="D").strftime("%Y%m%d"):
+                frame = self._fetch_announcement_day(spec, ann_date, params)
+                if not frame.empty:
+                    yield frame
+            return
         if spec.fetch_mode == "date_range":
             for chunk_start, chunk_end in iter_year_chunks(
                 start_date, end_date, self._settings.data.date_range_chunk_years
@@ -616,6 +625,79 @@ class DataIngestionService:
                 yield self._query(spec, hs_type=hs_type, **params)
             return
         raise ValueError(f"Unsupported fetch mode: {spec.fetch_mode}")
+
+    def _fetch_announcement_day(
+        self, spec: DatasetSpec, ann_date: str, params: dict[str, object]
+    ) -> DataFrame:
+        """Buffer one complete announcement day so a failed page cannot advance max_date."""
+
+        page_size = min(
+            self._settings.data.tushare_page_size,
+            spec.response_row_limit or self._settings.data.tushare_page_size,
+        )
+        frames: list[DataFrame] = []
+        seen_observations: set[str] = set()
+        response_columns: set[str] | None = None
+        for page in range(MAX_ANNOUNCEMENT_PAGES):
+            offset = page * page_size
+            try:
+                frame = self._query(
+                    spec, ann_date=ann_date, limit=page_size, offset=offset, **params
+                )
+            except TushareNoDataError:
+                LOGGER.info(
+                    "no further announcements for dataset date",
+                    extra={"dataset": spec.name, "ann_date": ann_date, "offset": offset},
+                )
+                break
+            if frame.empty:
+                break
+            received = len(frame)
+            if received > page_size:
+                raise DataValidationError(
+                    f"{spec.name} response exceeds requested page size={page_size} "
+                    f"for ann_date={ann_date} offset={offset}"
+                )
+            missing = [column for column in spec.required_columns if column not in frame.columns]
+            if missing:
+                raise DataValidationError(f"{spec.name} is missing required columns: {missing}")
+            if not frame["ann_date"].astype(str).eq(ann_date).all():
+                observed = frame["ann_date"].astype(str).drop_duplicates().head(5).tolist()
+                raise DataValidationError(
+                    f"{spec.name} returned rows with an unexpected announcement date "
+                    f"for ann_date={ann_date} offset={offset}; observed={observed}"
+                )
+            if response_columns is not None and set(frame.columns) != response_columns:
+                raise DataValidationError(f"{spec.name} response schema changed between pages")
+            response_columns = set(frame.columns)
+            frame = capture_observations(
+                frame,
+                request={
+                    "endpoint": spec.endpoint,
+                    "params": {
+                        **params,
+                        "ann_date": ann_date,
+                        "limit": page_size,
+                        "offset": offset,
+                    },
+                },
+            )
+            page_observations = set(frame["observation_hash"])
+            if seen_observations.intersection(page_observations):
+                raise DataValidationError(
+                    f"{spec.name} has overlapping pagination for ann_date={ann_date} "
+                    f"offset={offset}; completeness cannot be guaranteed"
+                )
+            seen_observations.update(page_observations)
+            frames.append(frame)
+            if received < page_size:
+                break
+        else:
+            raise DataValidationError(
+                f"{spec.name} exceeded announcement page budget={MAX_ANNOUNCEMENT_PAGES} "
+                f"for ann_date={ann_date}; completeness cannot be guaranteed"
+            )
+        return merge_observations(frames) if frames else pd.DataFrame()
 
     def _iter_ts_code_date_range_frames(
         self,

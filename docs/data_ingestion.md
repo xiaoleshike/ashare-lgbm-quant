@@ -332,6 +332,28 @@ create duplicate canonical rows.
   and `moneyflow` are requested one open trading day at a time using `trade_cal`.
 - Date-range reference datasets are split into calendar-year chunks to reduce
   timeout and row-limit risk.
+- `share_float` is requested once per calendar day using `ann_date`, including
+  weekends and holidays. Its `start_date`/`end_date` API parameters refer to
+  **unlock dates**, not announcement dates, and are therefore not sent for the
+  local announcement-date update window. Future `float_date` values are retained.
+  Empty announcement days are allowed; parameter and transport failures still
+  stop ingestion. It uses the existing `limit`/`offset` request pattern and
+  `data.tushare_page_size`, capped at the documented 6000 rows per request. A full
+  page continues to the next offset; a short or empty page ends that day's query.
+  Every returned row must match the requested announcement date. Oversized pages,
+  overlapping/repeated full observations (including ignored offsets), schema
+  changes and a 100-page per-day budget fail closed. Distinct observations of the
+  same business key may occur within or across pages and are retained. Actual
+  provider acceptance of pagination and date filters must still be confirmed by
+  the operator's bounded live run; offline fixtures do not prove server behavior.
+  The entire day's pages are buffered and checked before writing so a failed page
+  cannot advance the incremental watermark past an unfinished day. Completed
+  earlier days remain stored. Empty days are not persisted as a checkpoint and may
+  be queried again.
+- `share_float` uses the `share_float_observation_v1` raw observation contract
+  described below. A structurally valid ambiguous day can be stored and the next
+  date fetched; ambiguity is a separate data-quality warning, not an HTTP or
+  pagination failure. Missing/null business identity still fails closed.
 - Financial datasets use the account's VIP endpoints when available. They are
   queried by report quarter and paginated with `limit`/`offset`; this replaces
   thousands of per-stock requests with a small number of cross-sectional calls.
@@ -340,6 +362,79 @@ create duplicate canonical rows.
   is correct but materially slower.
 - Snapshot datasets without a date column are skipped during `data update` once a
   local snapshot exists; refresh them explicitly with `data init --dataset ...`.
+
+To retry a bounded announcement interval after a `share_float` parameter error:
+
+```bash
+ashare-quant --config config/default.yaml data init \
+  --dataset share_float --start-date YYYYMMDD --end-date YYYYMMDD
+```
+
+Select the interval from the failed update log. This is a live provider operation;
+it is not part of offline implementation tests. The provider parameter definitions
+and single-request limit are documented in the
+[Tushare share_float reference](https://tushare.pro/document/2?doc_id=160).
+
+### Share-Float Raw Observations and Identity Ambiguity
+
+The provider does not document a unique lot ID or revision order. The tuple
+`(ts_code, ann_date, float_date, holder_name, share_type)` is a **business grouping
+key**, not a proven unique row key. Two different quantities for this tuple may
+be distinct lots or conflicting revisions; ingestion does not decide which.
+
+Each distinct complete parsed provider row is stored separately:
+
+| Column | Meaning |
+| --- | --- |
+| `observation_contract` | `share_float_observation_v1` |
+| `observation_hash` | SHA256 of contract + newline + canonical `raw_row_json`; storage primary key only |
+| `raw_row_json` | All returned fields and values, sorted JSON keys, UTF-8, compact separators |
+| `source_requests_json` | Sorted unique endpoint/parameter references, including announcement date, limit and offset |
+| `legacy_provenance` | Whether any observation source lacks known request provenance |
+| `identity_variant_count` | Count of distinct observations sharing the business grouping key |
+| `identity_status` | `SINGLE_OBSERVATION` or `AMBIGUOUS` when the count exceeds one |
+
+Provider columns remain available without renaming securities, summing quantities
+or selecting a preferred row. Null remains null, not zero. Numeric precision is
+preserved from the SDK's parsed scalar values using Python JSON serialization;
+this is **not a freeze of the original HTTP bytes**. Missing columns versus
+explicit nulls, and differing numeric JSON representations, can produce distinct
+observation identities. The hash includes every returned column, not just amounts.
+There are no timestamps or row-order winners in observation identity.
+
+Repeated identical rows are idempotent, not separate lot counts. Their known
+request references are unioned. This is not an attempt-by-attempt request journal
+and cannot prove whether two byte-identical rows represented separate lots. A
+later different observation never overwrites or retires an earlier one, even if
+the provider no longer returns the older value. All variants are re-annotated
+after merging the partition. Source changes do not prove supersession.
+
+Storage logs `ambiguous raw observations retained` with partition-level key and
+observation counts. `data validate --dataset share_float` independently recomputes
+hashes, raw/projected value correspondence, request structure and group counts.
+Tampered annotations, incomplete metadata, duplicate observation hashes or
+invalid provenance fail validation; ambiguity itself yields an explicit warning
+also recorded in the existing data-quality logs. `ok=True` describes raw storage
+integrity only, **not resolved economic identity or complete historical coverage**.
+Neither identity status authorizes economic use; consumers must not sum variants
+or choose the last/largest record as a resolved unlock event. No current feature
+or execution consumer is added by this storage change.
+
+Legacy partitions without metadata are adapted in memory on reads, with unknown
+request provenance explicitly flagged. Reads and validation never rewrite them.
+The next explicit ingestion write upgrades only affected partitions using the
+existing atomic Parquet replacement, preserving every distinct surviving legacy
+row. Mixed old/new partitions remain readable through `ParquetDataStore`;
+external direct Parquet scans must handle the additional columns (for example,
+DuckDB `union_by_name=true`). Partially present metadata is corruption, not legacy.
+Missing identity fields require explicit repair, not guessed values.
+
+Rows lost through the earlier narrower primary key or unlock-date filters cannot
+be reconstructed from the remaining local rows. Recovery requires an explicitly
+selected re-download interval. An ordinary update's maximum-date watermark is
+not a historical completion checkpoint. This change does not automatically
+rebuild history or freeze failed/partial HTTP responses, and all pages for a day
+must still complete before that day's observations can be written.
 
 
 ## Data Quality Error Logs

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
@@ -9,7 +11,9 @@ from ashare_quant.data.datasets import ALL_DATASETS, DEFAULT_DATASETS, get_datas
 from ashare_quant.data.exceptions import (
     DataValidationError,
     TushareNoDataError,
+    TushareParameterError,
     TusharePermissionError,
+    TushareRequestError,
 )
 from ashare_quant.data.ingestion import DataIngestionService
 from ashare_quant.data.storage import ParquetDataStore
@@ -91,6 +95,513 @@ def test_longhubang_dataset_primary_keys_preserve_multiple_reasons() -> None:
         "side",
         "reason",
     )
+
+
+class ShareFloatMockClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.responses: dict[str | tuple[str, int], pd.DataFrame | Exception] = {}
+
+    def query(self, endpoint: str, **params: object) -> pd.DataFrame:
+        self.calls.append((endpoint, params))
+        assert endpoint == "share_float"
+        if "ann_date" not in params:
+            raise TushareParameterError("ts_code or ann_date is required")
+        ann_date = str(params["ann_date"])
+        response = self.responses.get(
+            (ann_date, int(params.get("offset", 0))),
+            self.responses.get(
+                ann_date,
+                share_float_rows(ann_date, ["holder"]),
+            ),
+        )
+        if isinstance(response, Exception):
+            raise response
+        return response.copy()
+
+
+def share_float_rows(ann_date: str, holders: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * len(holders),
+            "ann_date": [ann_date] * len(holders),
+            "float_date": ["20270115"] * len(holders),
+            "holder_name": holders,
+            "share_type": ["placement"] * len(holders),
+            "float_share": [1000.0] * len(holders),
+        }
+    )
+
+
+def test_share_float_init_queries_announcement_dates_and_preserves_future_unlock(tmp_path) -> None:
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    results = service.init(("share_float",), "20261104", "20261105")
+
+    assert client.calls == [
+        ("share_float", {"ann_date": "20261104", "limit": 6000, "offset": 0}),
+        ("share_float", {"ann_date": "20261105", "limit": 6000, "offset": 0}),
+    ]
+    assert [result.dataset for result in results] == ["share_float"]
+    assert results[0].rows_written == 2
+    frame = store.read_dataset(get_dataset_spec("share_float"))
+    assert frame["ann_date"].tolist() == ["20261104", "20261105"]
+    assert frame["float_date"].tolist() == ["20270115", "20270115"]
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "dates"),
+    [
+        ("20240105", "20240108", ["20240105", "20240106", "20240107", "20240108"]),
+        ("20231231", "20240101", ["20231231", "20240101"]),
+        ("20240228", "20240301", ["20240228", "20240229", "20240301"]),
+    ],
+)
+def test_share_float_queries_every_calendar_day(tmp_path, start, end, dates) -> None:
+    client = ShareFloatMockClient()
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=ParquetDataStore(tmp_path),
+        client=client,  # type: ignore[arg-type]
+    )
+
+    service.init(("share_float",), start, end)
+
+    assert client.calls == [
+        ("share_float", {"ann_date": date, "limit": 6000, "offset": 0}) for date in dates
+    ]
+
+
+def test_share_float_update_resumes_from_announcement_not_unlock_date(tmp_path) -> None:
+    store = ParquetDataStore(tmp_path)
+    spec = get_dataset_spec("share_float")
+    store.write(
+        spec,
+        pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "ann_date": ["20261103"],
+                "float_date": ["20270115"],
+                "holder_name": ["holder"],
+                "share_type": ["placement"],
+            }
+        ),
+    )
+    client = ShareFloatMockClient()
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    service.update(("share_float",), "20261105")
+    service.update(("share_float",), "20261105")
+
+    assert client.calls == [
+        ("share_float", {"ann_date": "20261104", "limit": 6000, "offset": 0}),
+        ("share_float", {"ann_date": "20261105", "limit": 6000, "offset": 0}),
+    ]
+    assert store.status(spec).rows == 3
+
+
+@pytest.mark.parametrize("empty_response", [pd.DataFrame(), TushareNoDataError("no data")])
+def test_share_float_empty_announcement_day_does_not_block_following_days(
+    tmp_path, empty_response
+) -> None:
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses["20261104"] = empty_response
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    results = service.init(("share_float",), "20261104", "20261105")
+
+    assert results[0].rows_written == 1
+    assert store.read_dataset(get_dataset_spec("share_float"))["ann_date"].tolist() == ["20261105"]
+
+
+def test_share_float_keeps_completed_days_and_resumes_after_request_failure(tmp_path) -> None:
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses["20261105"] = TushareRequestError("simulated timeout")
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(TushareRequestError, match="simulated timeout"):
+        service.init(("share_float",), "20261104", "20261105")
+    assert store.status(get_dataset_spec("share_float")).max_date == "20261104"
+
+    client.responses.clear()
+    client.calls.clear()
+    service.update(("share_float",), "20261105")
+
+    assert client.calls == [("share_float", {"ann_date": "20261105", "limit": 6000, "offset": 0})]
+    assert store.status(get_dataset_spec("share_float")).rows == 2
+
+
+def test_share_float_rejects_oversized_page(tmp_path) -> None:
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses["20261105"] = share_float_rows(
+        "20261105", [f"holder_{i}" for i in range(6001)]
+    )
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(DataValidationError, match="exceeds requested page size"):
+        service.init(("share_float",), "20261105", "20261105")
+
+    assert not store.status(get_dataset_spec("share_float")).exists
+
+
+@pytest.mark.parametrize("ann_dates", [["20261104"], [None], ["20261105", "20261104"]])
+def test_share_float_rejects_rows_for_another_announcement_date(tmp_path, ann_dates) -> None:
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses["20261105"] = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * len(ann_dates),
+            "ann_date": ann_dates,
+            "float_date": ["20270115"] * len(ann_dates),
+            "holder_name": ["holder"] * len(ann_dates),
+            "share_type": ["placement"] * len(ann_dates),
+        }
+    )
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(DataValidationError, match="announcement date"):
+        service.init(("share_float",), "20261105", "20261105")
+
+    assert not store.status(get_dataset_spec("share_float")).exists
+
+
+def test_share_float_missing_announcement_column_fails_closed(tmp_path) -> None:
+    client = ShareFloatMockClient()
+    client.responses["20261105"] = pd.DataFrame(
+        {"ts_code": ["000001.SZ"], "float_date": ["20270115"]}
+    )
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=ParquetDataStore(tmp_path),
+        client=client,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(DataValidationError, match="ann_date"):
+        service.init(("share_float",), "20261105", "20261105")
+
+
+def test_share_float_parameter_errors_are_not_swallowed_as_empty_days(tmp_path) -> None:
+    client = ShareFloatMockClient()
+    client.responses["20261105"] = TushareParameterError("invalid announcement query")
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=ParquetDataStore(tmp_path),
+        client=client,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(TushareParameterError, match="invalid announcement query"):
+        service.init(("share_float",), "20261105", "20261105")
+
+
+def test_share_float_pages_use_configured_size_and_preserve_holder_and_share_type(tmp_path) -> None:
+    settings = load_settings("config/default.yaml")
+    settings.data.tushare_page_size = 2
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    first = share_float_rows("20261105", ["holder_a", "holder_a"])
+    first.loc[1, "share_type"] = "employee"
+    client.responses[("20261105", 0)] = first
+    client.responses[("20261105", 2)] = share_float_rows("20261105", ["holder_b"])
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    results = service.init(("share_float",), "20261105", "20261105")
+    service.init(("share_float",), "20261105", "20261105")
+
+    assert client.calls[:2] == [
+        ("share_float", {"ann_date": "20261105", "limit": 2, "offset": 0}),
+        ("share_float", {"ann_date": "20261105", "limit": 2, "offset": 2}),
+    ]
+    assert results[0].rows_written == 3
+    frame = store.read_dataset(get_dataset_spec("share_float"))
+    assert len(frame) == 3
+    assert set(zip(frame["holder_name"], frame["share_type"], strict=True)) == {
+        ("holder_a", "placement"),
+        ("holder_a", "employee"),
+        ("holder_b", "placement"),
+    }
+
+
+def test_share_float_full_6000_row_page_continues_to_next_page(tmp_path) -> None:
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = share_float_rows(
+        "20261105", [f"holder_{i}" for i in range(6000)]
+    )
+    client.responses[("20261105", 0)].loc[1, "holder_name"] = "holder_0"
+    client.responses[("20261105", 0)].loc[1, "float_share"] = 2000.0
+    client.responses[("20261105", 6000)] = share_float_rows("20261105", ["last_holder"])
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    results = service.init(("share_float",), "20261105", "20261105")
+
+    assert [params["offset"] for _, params in client.calls] == [0, 6000]
+    assert results[0].rows_written == 6001
+    assert store.status(get_dataset_spec("share_float")).rows == 6001
+    stored = store.read_dataset(get_dataset_spec("share_float"))
+    assert stored.identity_status.eq("AMBIGUOUS").sum() == 2
+
+
+@pytest.mark.parametrize("tail", [pd.DataFrame(), TushareNoDataError("no data")])
+def test_share_float_exact_page_multiple_requires_empty_tail(tmp_path, tail) -> None:
+    settings = load_settings("config/default.yaml")
+    settings.data.tushare_page_size = 2
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = share_float_rows("20261105", ["a", "b"])
+    client.responses[("20261105", 2)] = share_float_rows("20261105", ["c", "d"])
+    client.responses[("20261105", 4)] = tail
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    service.init(("share_float",), "20261105", "20261105")
+
+    assert [params["offset"] for _, params in client.calls] == [0, 2, 4]
+    assert store.status(get_dataset_spec("share_float")).rows == 4
+
+
+@pytest.mark.parametrize("second_holders", [["a", "b"], ["b", "a"], ["a"], ["b", "c"]])
+def test_share_float_repeated_or_overlapping_pages_never_publish_partial_day(
+    tmp_path, second_holders
+) -> None:
+    settings = load_settings("config/default.yaml")
+    settings.data.tushare_page_size = 2
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = share_float_rows("20261105", ["a", "b"])
+    client.responses[("20261105", 2)] = share_float_rows("20261105", second_holders)
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(DataValidationError, match="overlapping pagination"):
+        service.init(("share_float",), "20261105", "20261105")
+
+    assert len(client.calls) == 2
+    assert not store.status(get_dataset_spec("share_float")).exists
+
+
+def test_share_float_second_page_failure_does_not_advance_update_watermark(tmp_path) -> None:
+    settings = load_settings("config/default.yaml")
+    settings.data.tushare_page_size = 2
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = share_float_rows("20261105", ["a", "b"])
+    client.responses[("20261105", 2)] = TushareRequestError("second page timeout")
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(TushareRequestError, match="second page timeout"):
+        service.init(("share_float",), "20261104", "20261105")
+    assert store.status(get_dataset_spec("share_float")).max_date == "20261104"
+
+    client.responses[("20261105", 2)] = share_float_rows("20261105", ["c"])
+    client.calls.clear()
+    service.update(("share_float",), "20261105")
+
+    assert [params["offset"] for _, params in client.calls] == [0, 2]
+    assert store.status(get_dataset_spec("share_float")).rows == 4
+
+
+def test_share_float_validates_identity_on_every_page_before_writing(tmp_path) -> None:
+    settings = load_settings("config/default.yaml")
+    settings.data.tushare_page_size = 2
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = share_float_rows("20261105", ["a", "b"])
+    client.responses[("20261105", 2)] = share_float_rows("20261104", ["c"])
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(DataValidationError, match="announcement date"):
+        service.init(("share_float",), "20261105", "20261105")
+    assert not store.status(get_dataset_spec("share_float")).exists
+
+
+def test_share_float_bounds_pages_without_publishing_unfinished_day(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("ashare_quant.data.ingestion.MAX_ANNOUNCEMENT_PAGES", 2, raising=False)
+    settings = load_settings("config/default.yaml")
+    settings.data.tushare_page_size = 1
+    store = ParquetDataStore(tmp_path)
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = share_float_rows("20261105", ["a"])
+    client.responses[("20261105", 1)] = share_float_rows("20261105", ["b"])
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(DataValidationError, match="page budget"):
+        service.init(("share_float",), "20261105", "20261105")
+    assert len(client.calls) == 2
+    assert not store.status(get_dataset_spec("share_float")).exists
+
+
+@pytest.mark.parametrize("different_value", [2000.0, None])
+def test_share_float_different_detail_values_are_retained(tmp_path, different_value) -> None:
+    client = ShareFloatMockClient()
+    frame = share_float_rows("20261105", ["a", "a"])
+    frame.loc[1, "float_share"] = different_value
+    client.responses[("20261105", 0)] = frame
+    store = ParquetDataStore(tmp_path)
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    service.init(("share_float",), "20261105", "20261105")
+    stored = store.read_dataset(get_dataset_spec("share_float"))
+    assert len(stored) == 2
+    assert set(stored.identity_status) == {"AMBIGUOUS"}
+    assert set(stored.identity_variant_count) == {2}
+    values = [json.loads(raw)["float_share"] for raw in stored.raw_row_json]
+    assert 1000.0 in values
+    assert different_value in values
+    assert not stored.legacy_provenance.any()
+    assert all(
+        json.loads(value)
+        == [
+            {
+                "endpoint": "share_float",
+                "params": {"ann_date": "20261105", "limit": 6000, "offset": 0},
+            }
+        ]
+        for value in stored.source_requests_json
+    )
+
+
+def test_share_float_ambiguous_complete_day_advances_watermark(tmp_path) -> None:
+    client = ShareFloatMockClient()
+    frame = share_float_rows("20261105", ["a"] * 10 + ["b"] * 2)
+    frame["float_share"] = list(range(12))
+    client.responses["20261105"] = frame
+    store = ParquetDataStore(tmp_path)
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+    service.init(("share_float",), "20261104", "20261105")
+    spec = get_dataset_spec("share_float")
+    stored = store.read_dataset(spec, "20261105", "20261105")
+    assert len(stored) == 12
+    assert set(stored.identity_status) == {"AMBIGUOUS"}
+    assert set(stored.identity_variant_count) == {10, 2}
+    assert store.status(spec).max_date == "20261105"
+
+
+def test_share_float_distinct_observations_for_same_key_across_pages(tmp_path) -> None:
+    settings = load_settings("config/default.yaml")
+    settings.data.tushare_page_size = 2
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = share_float_rows("20261105", ["a", "b"])
+    second = share_float_rows("20261105", ["a"])
+    second["float_share"] = 2000.0
+    client.responses[("20261105", 2)] = second
+    store = ParquetDataStore(tmp_path)
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+    service.init(("share_float",), "20261105", "20261105")
+    stored = store.read_dataset(get_dataset_spec("share_float"))
+    assert len(stored) == 3
+    assert set(stored.loc[stored.holder_name.eq("a"), "identity_status"]) == {"AMBIGUOUS"}
+    assert set(stored.loc[stored.holder_name.eq("b"), "identity_status"]) == {"SINGLE_OBSERVATION"}
+    assert set(
+        json.loads(value)[0]["params"]["offset"] for value in stored.source_requests_json
+    ) == {0, 2}
+
+
+def test_share_float_ambiguous_page_does_not_bypass_completion_requirement(tmp_path) -> None:
+    settings = load_settings("config/default.yaml")
+    settings.data.tushare_page_size = 2
+    client = ShareFloatMockClient()
+    frame = share_float_rows("20261105", ["a", "a"])
+    frame.loc[1, "float_share"] = 2000.0
+    client.responses[("20261105", 0)] = frame
+    client.responses[("20261105", 2)] = TushareRequestError("second page failed")
+    store = ParquetDataStore(tmp_path)
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+    with pytest.raises(TushareRequestError, match="second page failed"):
+        service.init(("share_float",), "20261104", "20261105")
+    assert store.status(get_dataset_spec("share_float")).max_date == "20261104"
+
+
+def test_share_float_exact_duplicate_detail_is_idempotent(tmp_path) -> None:
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = share_float_rows("20261105", ["a", "a"])
+    store = ParquetDataStore(tmp_path)
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    service.init(("share_float",), "20261105", "20261105")
+
+    assert store.status(get_dataset_spec("share_float")).rows == 1
+
+
+@pytest.mark.parametrize("field", ["holder_name", "share_type"])
+@pytest.mark.parametrize("issue", ["missing", "null"])
+def test_share_float_missing_detail_identity_fails_closed(tmp_path, field, issue) -> None:
+    frame = share_float_rows("20261105", ["holder"])
+    if issue == "missing":
+        frame = frame.drop(columns=[field])
+    else:
+        frame[field] = None
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = frame
+    store = ParquetDataStore(tmp_path)
+    service = DataIngestionService(
+        settings=load_settings("config/default.yaml"),
+        store=store,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    message = "missing required columns" if issue == "missing" else "null detail identity"
+    with pytest.raises(DataValidationError, match=message):
+        service.init(("share_float",), "20261105", "20261105")
+    assert not store.status(get_dataset_spec("share_float")).exists
+
+
+def test_share_float_schema_changes_between_pages_fail_before_writing(tmp_path) -> None:
+    settings = load_settings("config/default.yaml")
+    settings.data.tushare_page_size = 2
+    client = ShareFloatMockClient()
+    client.responses[("20261105", 0)] = share_float_rows("20261105", ["a", "b"])
+    client.responses[("20261105", 2)] = share_float_rows("20261105", ["c"]).drop(
+        columns=["float_share"]
+    )
+    store = ParquetDataStore(tmp_path)
+    service = DataIngestionService(settings=settings, store=store, client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(DataValidationError, match="schema changed between pages"):
+        service.init(("share_float",), "20261105", "20261105")
+    assert not store.status(get_dataset_spec("share_float")).exists
 
 
 def test_extended_fetch_modes_use_expected_parameters(tmp_path, monkeypatch) -> None:

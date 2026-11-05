@@ -20,6 +20,7 @@ DatasetKind = Literal[
 FetchMode = Literal[
     "snapshot",
     "trade_date",
+    "ann_date",
     "date_range",
     "ts_code_date_range",
     "index_codes",
@@ -389,11 +390,12 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         name="share_float",
         endpoint="share_float",
         kind="reference",
-        primary_key=("ts_code", "ann_date", "float_date"),
-        required_columns=("ts_code", "ann_date", "float_date"),
+        primary_key=("observation_hash",),
+        required_columns=("ts_code", "ann_date", "float_date", "holder_name", "share_type"),
         partitioning="date_month",
-        fetch_mode="date_range",
+        fetch_mode="ann_date",
         date_column="ann_date",
+        response_row_limit=6000,
     ),
     "repurchase": DatasetSpec(
         name="repurchase",

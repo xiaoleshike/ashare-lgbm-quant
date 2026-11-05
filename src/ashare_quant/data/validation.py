@@ -8,6 +8,8 @@ from typing import Literal
 import pandas as pd
 
 from ashare_quant.data.datasets import DATASET_SPECS, DatasetSpec, get_dataset_spec
+from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.share_float_observations import BUSINESS_KEY, validate_observations
 from ashare_quant.data.storage import ParquetDataStore
 
 type DataFrame = pd.DataFrame
@@ -34,7 +36,11 @@ class DataValidator:
     def validate_dataset(self, spec: DatasetSpec) -> ValidationResult:
         """Validate one locally stored dataset."""
 
-        status = self._store.status(spec)
+        try:
+            status = self._store.status(spec)
+            frame = self._store.read_dataset(spec)
+        except DataValidationError as error:
+            return ValidationResult(spec.name, ok=False, status="invalid", errors=(str(error),))
         if not status.exists:
             if spec.optional:
                 return ValidationResult(
@@ -50,7 +56,6 @@ class DataValidator:
                 errors=("required dataset is not downloaded",),
             )
 
-        frame = self._store.read_dataset(spec)
         errors: list[str] = []
         warnings: list[str] = []
         if frame.empty:
@@ -89,6 +94,24 @@ class DataValidator:
             limit_errors, limit_warnings = self._stk_limit_quality_messages(frame)
             errors.extend(limit_errors)
             warnings.extend(limit_warnings)
+        if spec.name == "share_float":
+            try:
+                validate_observations(frame)
+            except DataValidationError as error:
+                errors.append(str(error))
+            if not errors:
+                ambiguous = frame.loc[frame.identity_status.eq("AMBIGUOUS")]
+                if not ambiguous.empty:
+                    groups = len(ambiguous[list(BUSINESS_KEY)].drop_duplicates())
+                    warnings.append(
+                        f"share_float AMBIGUOUS business identities={groups}; "
+                        f"observations={len(ambiguous)}; all variants retained, "
+                        "not resolved economic events; do not sum or select a winner"
+                    )
+                if frame.legacy_provenance.any():
+                    warnings.append(
+                        "share_float includes legacy observations with unknown requests"
+                    )
 
         return ValidationResult(
             spec.name,

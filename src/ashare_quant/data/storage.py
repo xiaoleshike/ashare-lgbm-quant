@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -12,8 +13,14 @@ import pandas as pd
 
 from ashare_quant.data.datasets import DATASET_SPECS, DatasetSpec
 from ashare_quant.data.exceptions import DataValidationError
+from ashare_quant.data.share_float_observations import (
+    BUSINESS_KEY,
+    merge_observations,
+    prepare_observations,
+)
 
 type DataFrame = pd.DataFrame
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +53,8 @@ class ParquetDataStore:
 
         if frame.empty:
             return 0
+        if spec.name == "share_float":
+            frame = prepare_observations(frame)
         self._validate_frame(spec, frame)
 
         normalized = self._normalize_types(spec, frame.copy())
@@ -53,6 +62,18 @@ class ParquetDataStore:
         for partition_path, partition_frame in self._iter_partitions(spec, normalized):
             merged = self._merge_existing(spec, partition_path, partition_frame)
             self._atomic_write(partition_path, merged)
+            if spec.name == "share_float":
+                ambiguous = merged.loc[merged.identity_status.eq("AMBIGUOUS")]
+                if not ambiguous.empty:
+                    LOGGER.warning(
+                        "share_float ambiguous raw observations retained; "
+                        "economic identity unresolved",
+                        extra={
+                            "partition": str(partition_path),
+                            "ambiguous_keys": len(ambiguous[list(BUSINESS_KEY)].drop_duplicates()),
+                            "ambiguous_observations": len(ambiguous),
+                        },
+                    )
             rows_written += len(partition_frame)
         return rows_written
 
@@ -83,7 +104,10 @@ class ParquetDataStore:
         files = self._dataset_files_for_range(spec, start_date, end_date)
         if not files:
             return pd.DataFrame(columns=list(spec.required_columns))
-        frame = pd.concat((pd.read_parquet(file) for file in files), ignore_index=True)
+        frames = [pd.read_parquet(file) for file in files]
+        if spec.name == "share_float":
+            frames = [prepare_observations(frame) for frame in frames]
+        frame = pd.concat(frames, ignore_index=True)
         if spec.date_column is not None and spec.date_column in frame.columns:
             frame[spec.date_column] = frame[spec.date_column].astype(str)
             if start_date is not None:
@@ -226,6 +250,9 @@ class ParquetDataStore:
         return sorted(files)
 
     def _merge_existing(self, spec: DatasetSpec, path: Path, frame: DataFrame) -> DataFrame:
+        if spec.name == "share_float":
+            frames = [pd.read_parquet(path), frame] if path.exists() else [frame]
+            return merge_observations(frames)
         if path.exists():
             existing = pd.read_parquet(path)
             merged = pd.concat([existing, frame], ignore_index=True)
